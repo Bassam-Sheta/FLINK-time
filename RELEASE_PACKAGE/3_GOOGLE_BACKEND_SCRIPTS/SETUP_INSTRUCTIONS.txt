@@ -1,0 +1,25 @@
+================================================================================
+FLINK TIME & WORKFORCE PLATFORM — BACKEND DEPLOYMENT INSTRUCTIONS
+================================================================================
+1. Open Google Sheets at https://sheets.new and name it:
+   "FLINK_Time_Master_Control"
+
+2. Go to Extensions > Apps Script.
+
+3. In the Apps Script project editor, copy all files from this directory into the editor:
+   - All .gs script files (Constants.gs, App.gs, AuthService.gs, MasterRepository.gs,
+     JobService.gs, IntegrityService.gs, etc.)
+   - index.html (Create HTML file named "index" and paste contents)
+   - Enable "Show appsscript.json" in Project Settings and paste appsscript.json
+
+4. Run MigrationService.bootstrapMasterSheet (or SetupService.processStep) to
+   initialize all 18 Master Control Sheet tabs.
+
+5. Click Deploy > New deployment > Web app:
+   - Description: FLINK Time Platform Production v1.0
+   - Execute as: Me
+   - Who has access: Anyone
+
+6. Copy the deployed Web App URL and embed it into your Google Site!
+   Refer to docs/DEPLOYMENT_GUIDE.md and docs/OPERATIONS_RUNBOOK.md for full details.
+================================================================================

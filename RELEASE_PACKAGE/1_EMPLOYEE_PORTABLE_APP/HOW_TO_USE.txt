@@ -1,0 +1,7 @@
+========================================================== 
+ULTRA-ACCOUNT EMPLOYEE PORTABLE APP 
+========================================================== 
+1. Keep UltraAccount.exe and workspace.json in the same folder. 
+2. Double-click UltraAccount.exe (or Launch_Portable_Tracker.bat). 
+3. The Clockify-style portable client will launch immediately. 
+4. Click 'PROFILE & SETTINGS' or the top profile badge to set your email. 

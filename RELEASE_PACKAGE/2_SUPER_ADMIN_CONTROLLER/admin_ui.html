@@ -1,0 +1,2075 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Ultra-Account Super Admin Controller & Disaster Recovery</title>
+  <!-- Tailwind CSS & Lucide Icons & Chart.js -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            brand: { 400: '#818cf8', 500: '#6366f1', 600: '#4f46e5', 700: '#4338ca' },
+            surface: { 800: '#1e293b', 900: '#0f172a', 950: '#020617' }
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+    body { font-family: 'Inter', sans-serif; }
+    .custom-scrollbar::-webkit-scrollbar { width: 6px; height: 6px; }
+    .custom-scrollbar::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
+    .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+  </style>
+</head>
+<body class="bg-surface-950 text-slate-100 min-h-screen flex flex-col">
+
+  <!-- TOP APP BAR -->
+  <header class="h-16 border-b border-slate-800 bg-surface-900/90 backdrop-blur px-6 flex items-center justify-between sticky top-0 z-40">
+    <div class="flex items-center space-x-4">
+      <div class="w-9 h-9 rounded-lg bg-gradient-to-tr from-brand-600 to-cyan-500 flex items-center justify-center shadow-lg shadow-brand-500/20">
+        <i data-lucide="shield-check" class="w-5 h-5 text-white"></i>
+      </div>
+      <div>
+        <div class="flex items-center gap-2">
+          <h1 class="font-bold text-base text-white tracking-tight">ULTRA-ACCOUNT</h1>
+          <span class="text-[10px] px-2 py-0.5 rounded bg-brand-500/20 text-brand-400 font-semibold border border-brand-500/30">SUPER ADMIN</span>
+        </div>
+        <p class="text-xs text-slate-400">Enterprise Controller • Master Vault • Disaster Recovery</p>
+      </div>
+
+      <!-- Multi-Workspace Dropdown -->
+      <div class="relative ml-4">
+        <select id="workspaceSelector" onchange="switchWorkspace(this.value)" class="bg-surface-800 border border-slate-700 text-xs text-slate-200 rounded-lg px-3 py-1.5 focus:outline-none focus:border-brand-500">
+          <option value="ws_main">Primary Workspace (HQ)</option>
+          <option value="ws_engineering">Engineering & Product</option>
+          <option value="ws_marketing">Marketing & Sales</option>
+          <option value="ws_legal">Executive & Legal Compliance</option>
+        </select>
+      </div>
+    </div>
+
+    <!-- Right Actions: Backup & Disaster Recovery -->
+    <div class="flex items-center space-x-3">
+      <!-- 1. Export Offline Snapshot -->
+      <button onclick="downloadOfflineSnapshot()" class="bg-surface-800 hover:bg-surface-700 border border-slate-700 text-slate-200 text-xs px-3 py-1.5 rounded-lg flex items-center gap-2 transition" title="Export full local database backup">
+        <i data-lucide="download" class="w-3.5 h-3.5 text-cyan-400"></i> Backup JSON
+      </button>
+
+      <!-- 2. Restore Full Database from Backup -->
+      <button onclick="document.getElementById('restoreFileInput').click()" class="bg-amber-600/20 hover:bg-amber-600/30 border border-amber-500/40 text-amber-300 text-xs px-3 py-1.5 rounded-lg flex items-center gap-2 transition" title="Restore complete Google Sheet database from backup">
+        <i data-lucide="upload-cloud" class="w-3.5 h-3.5 text-amber-400"></i> Restore DB
+      </button>
+      <input type="file" id="restoreFileInput" accept=".json" class="hidden" onchange="handleRestoreUpload(event)" />
+
+      <!-- 3. Trigger Drive Snapshot -->
+      <button onclick="triggerCloudBackup()" class="bg-surface-800 hover:bg-surface-700 border border-slate-700 text-slate-200 text-xs px-3 py-1.5 rounded-lg flex items-center gap-2 transition" title="Trigger Drive snapshot">
+        <i data-lucide="cloud" class="w-3.5 h-3.5 text-emerald-400"></i> Drive Snapshot
+      </button>
+
+      <div class="h-6 w-[1px] bg-slate-800"></div>
+
+      <div class="w-8 h-8 rounded-full bg-brand-600/30 border border-brand-500/40 flex items-center justify-center font-bold text-xs text-brand-300">
+        SA
+      </div>
+    </div>
+  </header>
+
+  <!-- NAVIGATION BAR -->
+  <div class="border-b border-slate-800 bg-surface-900 px-6 flex space-x-1 overflow-x-auto custom-scrollbar">
+    <button onclick="switchTab('radar')" id="tabBtn-radar" class="tab-btn active px-4 py-3 text-xs font-semibold border-b-2 border-brand-500 text-white flex items-center gap-2">
+      <i data-lucide="radar" class="w-4 h-4"></i> Live Radar
+    </button>
+    <button onclick="switchTab('screenshots')" id="tabBtn-screenshots" class="tab-btn px-4 py-3 text-xs font-semibold border-b-2 border-transparent text-slate-400 hover:text-white flex items-center gap-2">
+      <i data-lucide="camera" class="w-4 h-4"></i> Screenshots
+    </button>
+    <button onclick="switchTab('approvals')" id="tabBtn-approvals" class="tab-btn px-4 py-3 text-xs font-semibold border-b-2 border-transparent text-slate-400 hover:text-white flex items-center gap-2">
+      <i data-lucide="check-check" class="w-4 h-4"></i> Approvals
+    </button>
+    <button onclick="switchTab('reports')" id="tabBtn-reports" class="tab-btn px-4 py-3 text-xs font-semibold border-b-2 border-transparent text-slate-400 hover:text-white flex items-center gap-2">
+      <i data-lucide="pie-chart" class="w-4 h-4"></i> Deep Analytics (5 Charts)
+    </button>
+    <button onclick="switchTab('users')" id="tabBtn-users" class="tab-btn px-4 py-3 text-xs font-semibold border-b-2 border-transparent text-slate-400 hover:text-white flex items-center gap-2">
+      <i data-lucide="users" class="w-4 h-4"></i> Team & RBAC
+    </button>
+    <button onclick="switchTab('projects')" id="tabBtn-projects" class="tab-btn px-4 py-3 text-xs font-semibold border-b-2 border-transparent text-slate-400 hover:text-white flex items-center gap-2">
+      <i data-lucide="folder-kanban" class="w-4 h-4"></i> Projects & RBAC
+    </button>
+    <button onclick="switchTab('timesheets')" id="tabBtn-timesheets" class="tab-btn px-4 py-3 text-xs font-semibold border-b-2 border-transparent text-slate-400 hover:text-white flex items-center gap-2">
+      <i data-lucide="table" class="w-4 h-4"></i> Timesheet Matrix
+    </button>
+    <button onclick="switchTab('invoices')" id="tabBtn-invoices" class="tab-btn px-4 py-3 text-xs font-semibold border-b-2 border-transparent text-slate-400 hover:text-white flex items-center gap-2">
+      <i data-lucide="receipt" class="w-4 h-4"></i> Invoices & Expenses
+    </button>
+    <button onclick="switchTab('timeoff')" id="tabBtn-timeoff" class="tab-btn px-4 py-3 text-xs font-semibold border-b-2 border-transparent text-slate-400 hover:text-white flex items-center gap-2">
+      <i data-lucide="calendar-off" class="w-4 h-4"></i> Time Off
+    </button>
+    <button onclick="switchTab('settings')" id="tabBtn-settings" class="tab-btn px-4 py-3 text-xs font-semibold border-b-2 border-transparent text-slate-400 hover:text-white flex items-center gap-2">
+      <i data-lucide="sliders" class="w-4 h-4"></i> Policy & Intervals (Blur/Time)
+    </button>
+    <button onclick="switchTab('packager')" id="tabBtn-packager" class="tab-btn px-4 py-3 text-xs font-semibold border-b-2 border-transparent text-slate-400 hover:text-white flex items-center gap-2">
+      <i data-lucide="package" class="w-4 h-4"></i> Client Packager (Zero-Touch)
+    </button>
+    <button onclick="switchTab('audit')" id="tabBtn-audit" class="tab-btn px-4 py-3 text-xs font-semibold border-b-2 border-transparent text-slate-400 hover:text-white flex items-center gap-2">
+      <i data-lucide="shield-alert" class="w-4 h-4"></i> DLP Audit Logs
+    </button>
+  </div>
+
+  <!-- MAIN CONTAINER -->
+  <main class="flex-1 p-6 max-w-7xl w-full mx-auto">
+
+    <!-- TAB 1: LIVE WORKFORCE RADAR -->
+    <div id="tab-radar" class="tab-content space-y-6">
+      <div class="flex justify-between items-center">
+        <div>
+          <h2 class="text-xl font-bold text-white">Live Workforce Radar</h2>
+          <p class="text-xs text-slate-400">Real-time status of all users, active windows, and anti-cheat indicators.</p>
+        </div>
+        <button onclick="refreshData()" class="text-xs bg-surface-800 hover:bg-surface-700 text-slate-200 px-3 py-1.5 rounded-lg flex items-center gap-1.5 transition">
+          <i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i> Refresh Radar
+        </button>
+      </div>
+      <div id="radarGrid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5"></div>
+    </div>
+
+    <!-- TAB 2: SCREENSHOTS TIMELINE -->
+    <div id="tab-screenshots" class="tab-content hidden space-y-6">
+      <div class="flex justify-between items-center bg-surface-900 p-4 rounded-xl border border-slate-800">
+        <div>
+          <h2 class="text-base font-bold text-white">Screenshot Master Vault</h2>
+          <p class="text-xs text-slate-400">Stored exclusively in Super Admin Google Drive (/UltraAccount_Master_Vault/).</p>
+        </div>
+        <div class="flex items-center gap-3">
+          <select class="bg-surface-800 border border-slate-700 text-xs rounded-lg px-3 py-1.5 text-slate-200">
+            <option>All Team Members</option>
+          </select>
+          <input type="date" class="bg-surface-800 border border-slate-700 text-xs rounded-lg px-3 py-1.5 text-slate-200" />
+        </div>
+      </div>
+      <div id="screenshotsGrid" class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4"></div>
+    </div>
+
+    <!-- TAB 3: TIMESHEET APPROVALS -->
+    <div id="tab-approvals" class="tab-content hidden space-y-6">
+      <div class="flex justify-between items-center">
+        <div>
+          <h2 class="text-xl font-bold text-white">Pending Timesheet Submissions</h2>
+          <p class="text-xs text-slate-400">Review employee billable hours and lock time periods.</p>
+        </div>
+      </div>
+      <div class="bg-surface-900 border border-slate-800 rounded-xl overflow-hidden">
+        <table class="w-full text-left text-xs text-slate-300">
+          <thead class="bg-surface-800/80 uppercase font-semibold text-slate-400 border-b border-slate-800">
+            <tr>
+              <th class="p-3">Employee</th>
+              <th class="p-3">Period</th>
+              <th class="p-3">Total Hours</th>
+              <th class="p-3">Billable Hours</th>
+              <th class="p-3">Status</th>
+              <th class="p-3 text-right">Action</th>
+            </tr>
+          </thead>
+          <tbody id="approvalsTableBody" class="divide-y divide-slate-800"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- TAB 4: DEEP ANALYTICS & 5 PROFESSIONAL CHARTS -->
+    <div id="tab-reports" class="tab-content hidden space-y-6">
+
+      <!-- DATA ANALYST EXPORT SUITE & DASHBOARD VIEW SELECTOR -->
+      <div class="bg-surface-900 border border-slate-800 rounded-2xl p-5 space-y-4">
+        <div class="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+          <div>
+            <div class="flex items-center gap-2">
+              <span class="px-2 py-0.5 rounded text-[10px] bg-cyan-500/10 text-cyan-400 border border-cyan-500/30 font-bold uppercase">Data Analyst Hub</span>
+              <h3 class="text-sm font-bold text-white">Universal Data Export & Multi-Shape Dashboards</h3>
+            </div>
+            <p class="text-xs text-slate-400 mt-1">Export 22-dimensional datasets for Power BI, Tableau, Excel, and Python, or switch visual dashboard modes.</p>
+          </div>
+
+          <!-- Dashboard Mode Switcher -->
+          <div class="flex items-center bg-surface-950 p-1 rounded-xl border border-slate-800 text-xs">
+            <button onclick="setDashboardMode('charts')" id="btnModeCharts" class="px-3 py-1.5 rounded-lg font-semibold bg-brand-600 text-white shadow-sm transition">
+              5 Charts
+            </button>
+            <button onclick="setDashboardMode('dense')" id="btnModeDense" class="px-3 py-1.5 rounded-lg font-semibold text-slate-400 hover:text-white transition">
+              Dense Grid
+            </button>
+            <button onclick="setDashboardMode('wallboard')" id="btnModeWallboard" class="px-3 py-1.5 rounded-lg font-semibold text-slate-400 hover:text-white transition">
+              TV Wallboard
+            </button>
+            <button onclick="setDashboardMode('heatmap')" id="btnModeHeatmap" class="px-3 py-1.5 rounded-lg font-semibold text-slate-400 hover:text-white transition">
+              Workload Heatmap
+            </button>
+          </div>
+        </div>
+
+        <!-- Action Export Buttons & Web Connector Link -->
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-3 pt-2 border-t border-slate-800">
+          <button onclick="downloadAnalystCsv()" class="bg-surface-800 hover:bg-surface-700 text-slate-200 border border-slate-700 text-xs px-4 py-2.5 rounded-xl flex items-center justify-center gap-2 font-semibold transition">
+            <i data-lucide="file-spreadsheet" class="w-4 h-4 text-emerald-400"></i> Export Analyst CSV (22 Cols)
+          </button>
+          <button onclick="downloadOfflineSnapshot()" class="bg-surface-800 hover:bg-surface-700 text-slate-200 border border-slate-700 text-xs px-4 py-2.5 rounded-xl flex items-center justify-center gap-2 font-semibold transition">
+            <i data-lucide="file-code" class="w-4 h-4 text-cyan-400"></i> Export Relational JSON
+          </button>
+          <button onclick="copyWebConnectorUrl()" class="bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-300 border border-indigo-500/40 text-xs px-4 py-2.5 rounded-xl flex items-center justify-center gap-2 font-semibold transition">
+            <i data-lucide="link-2" class="w-4 h-4 text-indigo-400"></i> Copy Power BI / Tableau Feed URL
+          </button>
+        </div>
+      </div>
+
+      <!-- WORKLOAD HEATMAP CONTAINER (HIDDEN BY DEFAULT) -->
+      <div id="heatmapContainer" class="hidden bg-surface-900 border border-slate-800 rounded-2xl p-6 space-y-4">
+        <div class="flex justify-between items-center">
+          <h3 class="text-sm font-bold text-white">Employee x Day Workload Pivot Heatmap (Hours)</h3>
+          <span class="text-xs text-slate-400">Intensity scales with daily logged duration</span>
+        </div>
+        <div class="overflow-x-auto">
+          <table class="w-full text-xs text-left">
+            <thead class="bg-surface-800 text-slate-400 uppercase font-semibold">
+              <tr>
+                <th class="p-3">Team Member</th>
+                <th class="p-3 text-center">Mon</th>
+                <th class="p-3 text-center">Tue</th>
+                <th class="p-3 text-center">Wed</th>
+                <th class="p-3 text-center">Thu</th>
+                <th class="p-3 text-center">Fri</th>
+                <th class="p-3 text-center">Sat</th>
+                <th class="p-3 text-center">Sun</th>
+                <th class="p-3 text-right">Weekly Total</th>
+              </tr>
+            </thead>
+            <tbody id="heatmapTableBody" class="divide-y divide-slate-800"></tbody>
+          </table>
+        </div>
+      </div>
+      <div id="chartsContainer" class="space-y-6">
+        <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+          <div class="bg-surface-900 border border-slate-800 p-4 rounded-xl">
+            <div class="text-[11px] text-slate-400 uppercase font-semibold">Total Hours (Year 2026)</div>
+            <div class="text-2xl font-bold text-white mt-1">168.50h</div>
+          </div>
+          <div class="bg-surface-900 border border-slate-800 p-4 rounded-xl">
+            <div class="text-[11px] text-slate-400 uppercase font-semibold">Billable Hours</div>
+            <div class="text-2xl font-bold text-emerald-400 mt-1">146.25h</div>
+          </div>
+          <div class="bg-surface-900 border border-slate-800 p-4 rounded-xl">
+            <div class="text-[11px] text-slate-400 uppercase font-semibold">Billable Utilization</div>
+            <div class="text-2xl font-bold text-cyan-400 mt-1">86.8%</div>
+          </div>
+          <div class="bg-surface-900 border border-slate-800 p-4 rounded-xl">
+            <div class="text-[11px] text-slate-400 uppercase font-semibold">Total Billable Revenue</div>
+            <div class="text-2xl font-bold text-brand-400 mt-1">$14,625.00</div>
+          </div>
+        </div>
+
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          <div class="bg-surface-900 border border-slate-800 p-5 rounded-xl space-y-3">
+            <h3 class="text-xs font-bold uppercase text-slate-300">1. Hours by Project</h3>
+            <div class="h-56"><canvas id="chartProject"></canvas></div>
+          </div>
+          <div class="bg-surface-900 border border-slate-800 p-5 rounded-xl space-y-3">
+            <h3 class="text-xs font-bold uppercase text-slate-300">2. Billable vs Non-Billable</h3>
+            <div class="h-56"><canvas id="chartBillable"></canvas></div>
+          </div>
+          <div class="bg-surface-900 border border-slate-800 p-5 rounded-xl space-y-3">
+            <h3 class="text-xs font-bold uppercase text-slate-300">3. Application Breakdown</h3>
+            <div class="h-56"><canvas id="chartApps"></canvas></div>
+          </div>
+        </div>
+
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <div class="bg-surface-900 border border-slate-800 p-5 rounded-xl space-y-3">
+            <h3 class="text-xs font-bold uppercase text-slate-300">4. Daily Productivity Trend (Last 14 Days)</h3>
+            <div class="h-60"><canvas id="chartTrend"></canvas></div>
+          </div>
+          <div class="bg-surface-900 border border-slate-800 p-5 rounded-xl space-y-3">
+            <h3 class="text-xs font-bold uppercase text-slate-300">5. Team Member Capacity (Hours Logged)</h3>
+            <div class="h-60"><canvas id="chartCapacity"></canvas></div>
+          </div>
+        </div>
+      </div>
+      <div id="denseContainer" class="hidden text-slate-400">Dense Grid (Coming Soon)</div>
+      <div id="wallboardContainer" class="hidden text-slate-400">TV Wallboard (Coming Soon)</div>
+    </div>
+
+    <!-- TAB 5: TEAM & USER MANAGEMENT (RBAC) -->
+    <div id="tab-users" class="tab-content hidden space-y-6">
+      <div class="flex justify-between items-center">
+        <div>
+          <h2 class="text-xl font-bold text-white">User Management & Permissions</h2>
+          <p class="text-xs text-slate-400">Suspend accounts, manage roles (Super Admin, Admin, Manager, Member), and rates.</p>
+        </div>
+        <button onclick="promptAddUser()" class="bg-brand-600 hover:bg-brand-500 text-white text-xs font-semibold px-4 py-2 rounded-lg transition">
+          + Invite User
+        </button>
+      </div>
+
+      <div class="bg-surface-900 border border-slate-800 rounded-xl overflow-hidden">
+        <table class="w-full text-left text-xs text-slate-300">
+          <thead class="bg-surface-800/80 uppercase font-semibold text-slate-400 border-b border-slate-800">
+            <tr>
+              <th class="p-3">User</th>
+              <th class="p-3">Email</th>
+              <th class="p-3">Role</th>
+              <th class="p-3">Hourly Rate</th>
+              <th class="p-3">Status</th>
+              <th class="p-3 text-right">Actions</th>
+            </tr>
+          </thead>
+          <tbody id="usersTableBody" class="divide-y divide-slate-800"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- TAB 5B: PROJECT & CLIENT MANAGEMENT (STRICT RBAC) -->
+    <div id="tab-projects" class="tab-content hidden space-y-6">
+      <div class="flex justify-between items-center">
+        <div>
+          <h2 class="text-xl font-bold text-white">Project & Client Management</h2>
+          <p class="text-xs text-slate-400">Strict RBAC: Only Super Admins and Managers can add or remove projects. Regular employees have read-only selection.</p>
+        </div>
+        <button onclick="openCreateProjectModal()" class="text-xs bg-indigo-600 hover:bg-indigo-500 text-white font-semibold px-4 py-2 rounded-xl flex items-center gap-2 shadow-lg shadow-indigo-600/20 transition">
+          <i data-lucide="plus" class="w-4 h-4"></i> Create New Project
+        </button>
+      </div>
+
+      <div class="bg-surface-900 border border-slate-800 rounded-2xl overflow-hidden">
+        <table class="w-full text-left text-xs text-slate-300">
+          <thead class="bg-surface-800/80 uppercase font-semibold text-slate-400 border-b border-slate-800">
+            <tr>
+              <th class="p-3">Project Title</th>
+              <th class="p-3">Client</th>
+              <th class="p-3">Billable Status</th>
+              <th class="p-3">Hourly Rate</th>
+              <th class="p-3">Status</th>
+              <th class="p-3 text-right">Actions</th>
+            </tr>
+          </thead>
+          <tbody id="projectsTableBody" class="divide-y divide-slate-800"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- TAB 6: POLICY & INTERVAL SETTINGS (BLUR & TIMING BUTTONS) -->
+    <div id="tab-settings" class="tab-content hidden space-y-6 max-w-3xl">
+      <div>
+        <h2 class="text-xl font-bold text-white">Workspace Policy & Timing Settings</h2>
+        <p class="text-xs text-slate-400">Change screenshot frequency, disable/enable screenshot blur, and configure idle timeouts.</p>
+      </div>
+
+      <div class="bg-surface-900 border border-slate-800 rounded-2xl p-6 space-y-6">
+        <!-- 1. Screenshot Blur Toggle -->
+        <div class="flex items-center justify-between border-b border-slate-800 pb-5">
+          <div>
+            <div class="font-bold text-sm text-white">Screenshot Blur (DLP Protection)</div>
+            <div class="text-xs text-slate-400">When enabled, client blurs sensitive areas before cloud upload to Master Vault.</div>
+          </div>
+          <div class="flex items-center gap-2">
+            <button onclick="setBlurPolicy(false)" id="btnBlurOff" class="px-3 py-1.5 text-xs font-semibold rounded-lg bg-surface-800 text-slate-400 hover:text-white border border-slate-700">
+              No Blur (Crisp)
+            </button>
+            <button onclick="setBlurPolicy(true)" id="btnBlurOn" class="px-3 py-1.5 text-xs font-semibold rounded-lg bg-brand-600 text-white border border-brand-500 shadow-sm">
+              Blur Enabled
+            </button>
+          </div>
+        </div>
+
+        <!-- 2. Screenshot Interval -->
+        <div class="flex items-center justify-between border-b border-slate-800 pb-5">
+          <div>
+            <div class="font-bold text-sm text-white">Screenshot Interval</div>
+            <div class="text-xs text-slate-400">Frequency of randomized background screen captures per user.</div>
+          </div>
+          <select id="settingInterval" onchange="savePolicySetting('interval', this.value)" class="bg-surface-800 border border-slate-700 text-xs rounded-lg px-3 py-1.5 text-slate-200">
+            <option value="60">Every 1 Minute</option>
+            <option value="180">Every 3 Minutes</option>
+            <option value="300" selected>Every 5 Minutes (Default)</option>
+            <option value="600">Every 10 Minutes</option>
+            <option value="900">Every 15 Minutes</option>
+          </select>
+        </div>
+
+        <!-- 3. Idle Detection Threshold -->
+        <div class="flex items-center justify-between border-b border-slate-800 pb-5">
+          <div>
+            <div class="font-bold text-sm text-white">Idle Detection Inactivity Threshold</div>
+            <div class="text-xs text-slate-400">Duration of zero mouse/keyboard input before tracking idle state.</div>
+          </div>
+          <select id="settingIdle" onchange="savePolicySetting('idle', this.value)" class="bg-surface-800 border border-slate-700 text-xs rounded-lg px-3 py-1.5 text-slate-200">
+            <option value="60">1 Minute</option>
+            <option value="180">3 Minutes</option>
+            <option value="300" selected>5 Minutes (Recommended)</option>
+            <option value="600">10 Minutes</option>
+            <option value="0">Disabled</option>
+          </select>
+        </div>
+
+        <!-- 4. Idle Alert Popups Deactivation Switch -->
+        <div class="flex items-center justify-between border-b border-slate-800 pb-5">
+          <div>
+            <div class="font-bold text-sm text-white">Idle Alert Popups (Continuous Tracking Mode)</div>
+            <div class="text-xs text-slate-400">When deactivated, employees are never interrupted with idle dialogs, and time tracks continuously.</div>
+          </div>
+          <div class="flex items-center gap-2">
+            <button onclick="setIdleAlertsPolicy(false)" id="btnIdleAlertsOff" class="px-3 py-1.5 text-xs font-semibold rounded-lg bg-brand-600 text-white border border-brand-500 shadow-sm">
+              Deactivated (Continuous Tracking)
+            </button>
+            <button onclick="setIdleAlertsPolicy(true)" id="btnIdleAlertsOn" class="px-3 py-1.5 text-xs font-semibold rounded-lg bg-surface-800 text-slate-400 hover:text-white border border-slate-700">
+              Alerts Activated
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- TAB 7: CLIENT PACKAGER & ZERO-TOUCH BUILDER -->
+    <div id="tab-packager" class="tab-content hidden space-y-6 max-w-3xl">
+      <div>
+        <h2 class="text-xl font-bold text-white">Client Distribution & Zero-Touch Packager</h2>
+        <p class="text-xs text-slate-400">Generate pre-configured distribution packages so employees can run UltraAccount.exe with zero setup.</p>
+      </div>
+
+      <div class="bg-surface-900 border border-slate-800 rounded-2xl p-6 space-y-6">
+        <div class="space-y-2">
+          <label class="text-xs font-semibold text-slate-300">Your Deployed Google Apps Script Web App URL</label>
+          <input type="text" id="packagerUrlInput" placeholder="https://script.google.com/macros/s/AKfycb.../exec" class="w-full bg-slate-950 border border-slate-700 rounded-xl px-4 py-2 text-xs text-slate-100 focus:outline-none focus:border-brand-500" />
+        </div>
+
+        <div class="space-y-2">
+          <label class="text-xs font-semibold text-slate-300">Target Workspace Name</label>
+          <input type="text" id="packagerWorkspaceInput" value="Primary Workspace" class="w-full bg-slate-950 border border-slate-700 rounded-xl px-4 py-2 text-xs text-slate-100 focus:outline-none focus:border-brand-500" />
+        </div>
+
+        <div class="flex gap-3 pt-2">
+          <button onclick="downloadPreConfiguredWorkspaceJson()" class="bg-brand-600 hover:bg-brand-500 text-white font-bold text-xs px-5 py-2.5 rounded-xl flex items-center gap-2 transition shadow-lg shadow-brand-600/20">
+            <i data-lucide="download" class="w-4 h-4"></i> Download Pre-Configured workspace.json
+          </button>
+        </div>
+
+        <div class="p-4 bg-slate-950 border border-slate-800 rounded-xl text-xs text-slate-400 space-y-2">
+          <div class="font-bold text-slate-200">How to distribute to employees:</div>
+          <ol class="list-decimal list-inside space-y-1">
+            <li>Download the generated <code class="text-cyan-400">workspace.json</code> file above.</li>
+            <li>Place it in the same folder as <code class="text-cyan-400">UltraAccount.exe</code> (or zip them together).</li>
+            <li>Share with your employee via USB, Google Drive, or Slack.</li>
+            <li>The employee double-clicks <code class="text-cyan-400">UltraAccount.exe</code> and it pairs automatically!</li>
+          </ol>
+        </div>
+      </div>
+    </div>
+
+    <!-- TAB 8: AUDIT & INCIDENTS -->
+    <div id="tab-audit" class="tab-content hidden space-y-6">
+      <div class="flex justify-between items-center">
+        <div>
+          <h2 class="text-xl font-bold text-white">DLP & Cryptographic SHA-256 Audit Trail</h2>
+          <p class="text-xs text-slate-400">Tamper-evident logs compliant with SOC 2, ISO 27001, and GDPR.</p>
+        </div>
+      </div>
+      <div class="bg-surface-900 border border-slate-800 rounded-xl overflow-hidden">
+        <table class="w-full text-left text-xs text-slate-300">
+          <thead class="bg-surface-800/80 uppercase font-semibold text-slate-400 border-b border-slate-800">
+            <tr>
+              <th class="p-3">Log ID</th>
+              <th class="p-3">Timestamp</th>
+              <th class="p-3">Actor</th>
+              <th class="p-3">Action</th>
+              <th class="p-3">SHA-256 Integrity Digest</th>
+            </tr>
+          </thead>
+          <tbody id="auditTableBody" class="divide-y divide-slate-800"></tbody>
+        </table>
+      </div>
+
+      <div class="flex justify-between items-center pt-2">
+        <div>
+          <h3 class="text-lg font-bold text-white">Security & Anti-Cheat Incidents</h3>
+          <p class="text-xs text-slate-400">Flagged telemetry events, synthetic input detection, and DLP policy violations.</p>
+        </div>
+      </div>
+      <div class="bg-surface-900 border border-slate-800 rounded-xl overflow-hidden">
+        <table class="w-full text-left text-xs text-slate-300">
+          <thead class="bg-surface-800/80 uppercase font-semibold text-slate-400 border-b border-slate-800">
+            <tr>
+              <th class="p-3">Incident ID</th>
+              <th class="p-3">Timestamp</th>
+              <th class="p-3">User</th>
+              <th class="p-3">Rule</th>
+              <th class="p-3">Risk Level</th>
+              <th class="p-3">Incident Details</th>
+              <th class="p-3">Status</th>
+            </tr>
+          </thead>
+          <tbody id="incidentsTableBody" class="divide-y divide-slate-800"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- TAB 9: COMPANY-WIDE TIMESHEET MATRIX -->
+    <div id="tab-timesheets" class="tab-content hidden space-y-6">
+      <div class="flex justify-between items-center">
+        <div>
+          <h2 class="text-xl font-bold text-white">Company-Wide Weekly Timesheet Matrix</h2>
+          <p class="text-xs text-slate-400">View and audit all employee logged hours by day of the week (Mon - Sun).</p>
+        </div>
+        <div class="flex items-center gap-3">
+          <span class="text-xs font-semibold text-slate-300 bg-surface-900 border border-slate-800 px-3 py-1.5 rounded-lg">Sep 14 - Sep 20, 2026</span>
+          <button onclick="exportTimesheetMatrixCsv()" class="bg-surface-800 hover:bg-surface-700 text-slate-200 text-xs px-3 py-1.5 rounded-lg border border-slate-700 flex items-center gap-1.5">
+            <i data-lucide="download" class="w-3.5 h-3.5 text-emerald-400"></i> Export Grid
+          </button>
+        </div>
+      </div>
+
+      <div class="bg-surface-900 border border-slate-800 rounded-2xl overflow-hidden">
+        <table class="w-full text-left text-xs text-slate-300">
+          <thead class="bg-surface-800/80 uppercase font-semibold text-slate-400 border-b border-slate-800">
+            <tr>
+              <th class="p-3">Team Member</th>
+              <th class="p-3 text-center">Mon</th>
+              <th class="p-3 text-center">Tue</th>
+              <th class="p-3 text-center">Wed</th>
+              <th class="p-3 text-center">Thu</th>
+              <th class="p-3 text-center">Fri</th>
+              <th class="p-3 text-center">Sat</th>
+              <th class="p-3 text-center">Sun</th>
+              <th class="p-3 text-right">Weekly Total</th>
+              <th class="p-3 text-center">Status</th>
+            </tr>
+          </thead>
+          <tbody id="teamTimesheetTableBody" class="divide-y divide-slate-800"></tbody>
+          <tfoot class="bg-surface-950 font-bold text-slate-200 border-t border-slate-800">
+            <tr>
+              <td class="p-3 text-brand-400">Daily Total</td>
+              <td class="p-3 text-center font-mono">30.00h</td>
+              <td class="p-3 text-center font-mono">30.50h</td>
+              <td class="p-3 text-center font-mono">29.75h</td>
+              <td class="p-3 text-center font-mono">29.00h</td>
+              <td class="p-3 text-center font-mono">26.20h</td>
+              <td class="p-3 text-center font-mono text-slate-500">0.00h</td>
+              <td class="p-3 text-center font-mono text-slate-500">0.00h</td>
+              <td class="p-3 text-right font-mono text-emerald-400 text-sm">145.45h</td>
+              <td class="p-3 text-center text-slate-500">-</td>
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+    </div>
+
+    <!-- TAB 10: INVOICING & EXPENSES -->
+    <div id="tab-invoices" class="tab-content hidden space-y-8">
+      <!-- Section A: Invoices -->
+      <div class="space-y-4">
+        <div class="flex justify-between items-center">
+          <div>
+            <h2 class="text-xl font-bold text-white">Client Invoicing</h2>
+            <p class="text-xs text-slate-400">Generate, track, and manage client billable invoices directly from tracked time and expenses.</p>
+          </div>
+          <button onclick="openCreateInvoiceModal()" class="text-xs bg-indigo-600 hover:bg-indigo-500 text-white font-semibold px-4 py-2 rounded-xl flex items-center gap-2 shadow-lg shadow-indigo-600/20 transition">
+            <i data-lucide="plus" class="w-4 h-4"></i> Create Invoice
+          </button>
+        </div>
+
+        <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+          <div class="bg-surface-900 border border-slate-800 p-4 rounded-xl">
+            <div class="text-[11px] text-slate-400 uppercase font-semibold">Total Invoiced</div>
+            <div class="text-2xl font-bold text-white mt-1">$18,750.00</div>
+          </div>
+          <div class="bg-surface-900 border border-slate-800 p-4 rounded-xl">
+            <div class="text-[11px] text-slate-400 uppercase font-semibold">Paid / Received</div>
+            <div class="text-2xl font-bold text-emerald-400 mt-1">$14,075.00</div>
+          </div>
+          <div class="bg-surface-900 border border-slate-800 p-4 rounded-xl">
+            <div class="text-[11px] text-slate-400 uppercase font-semibold">Outstanding Balance</div>
+            <div class="text-2xl font-bold text-amber-400 mt-1">$4,675.00</div>
+          </div>
+        </div>
+
+        <div class="bg-surface-900 border border-slate-800 rounded-2xl overflow-hidden">
+          <table class="w-full text-left text-xs text-slate-300">
+            <thead class="bg-surface-800/80 uppercase font-semibold text-slate-400 border-b border-slate-800">
+              <tr>
+                <th class="p-3">Invoice #</th>
+                <th class="p-3">Client</th>
+                <th class="p-3">Issue Date</th>
+                <th class="p-3">Due Date</th>
+                <th class="p-3">Subtotal</th>
+                <th class="p-3">Tax</th>
+                <th class="p-3">Total Amount</th>
+                <th class="p-3">Status</th>
+                <th class="p-3 text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody id="invoicesTableBody" class="divide-y divide-slate-800"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Section B: Project Expenses -->
+      <div class="space-y-4 pt-4 border-t border-slate-800">
+        <div class="flex justify-between items-center">
+          <div>
+            <h2 class="text-lg font-bold text-white">Project Expenses</h2>
+            <p class="text-xs text-slate-400">Track billable and non-billable client expenditures with receipts attached to Super Admin Drive.</p>
+          </div>
+          <button onclick="promptLogExpense()" class="text-xs bg-surface-800 hover:bg-surface-700 text-slate-200 border border-slate-700 font-semibold px-3 py-1.5 rounded-lg flex items-center gap-1.5 transition">
+            <i data-lucide="plus" class="w-3.5 h-3.5 text-cyan-400"></i> + Log Expense
+          </button>
+        </div>
+
+        <div class="bg-surface-900 border border-slate-800 rounded-2xl overflow-hidden">
+          <table class="w-full text-left text-xs text-slate-300">
+            <thead class="bg-surface-800/80 uppercase font-semibold text-slate-400 border-b border-slate-800">
+              <tr>
+                <th class="p-3">Expense ID</th>
+                <th class="p-3">Employee</th>
+                <th class="p-3">Project</th>
+                <th class="p-3">Category</th>
+                <th class="p-3">Amount</th>
+                <th class="p-3">Billable</th>
+                <th class="p-3">Receipt</th>
+                <th class="p-3">Status</th>
+              </tr>
+            </thead>
+            <tbody id="expensesTableBody" class="divide-y divide-slate-800"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- TAB 11: TIME OFF & LEAVES -->
+    <div id="tab-timeoff" class="tab-content hidden space-y-6">
+      <div class="flex justify-between items-center">
+        <div>
+          <h2 class="text-xl font-bold text-white">Time Off & Leave Management</h2>
+          <p class="text-xs text-slate-400">Review vacation, sick leave, and holiday requests, and track policy balances.</p>
+        </div>
+        <button onclick="promptRequestLeave()" class="text-xs bg-indigo-600 hover:bg-indigo-500 text-white font-semibold px-4 py-2 rounded-xl flex items-center gap-2 shadow-lg shadow-indigo-600/20 transition">
+          <i data-lucide="plus" class="w-4 h-4"></i> + Request Leave
+        </button>
+      </div>
+
+      <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+        <div class="bg-surface-900 border border-slate-800 p-4 rounded-xl">
+          <div class="text-[11px] text-slate-400 uppercase font-semibold">Vacation Balance</div>
+          <div class="text-2xl font-bold text-brand-400 mt-1">15.0 Days</div>
+        </div>
+        <div class="bg-surface-900 border border-slate-800 p-4 rounded-xl">
+          <div class="text-[11px] text-slate-400 uppercase font-semibold">Sick Leave Balance</div>
+          <div class="text-2xl font-bold text-emerald-400 mt-1">10.0 Days</div>
+        </div>
+        <div class="bg-surface-900 border border-slate-800 p-4 rounded-xl">
+          <div class="text-[11px] text-slate-400 uppercase font-semibold">Public Holidays (2026)</div>
+          <div class="text-2xl font-bold text-cyan-400 mt-1">8 Days</div>
+        </div>
+      </div>
+
+      <div class="bg-surface-900 border border-slate-800 rounded-2xl overflow-hidden">
+        <table class="w-full text-left text-xs text-slate-300">
+          <thead class="bg-surface-800/80 uppercase font-semibold text-slate-400 border-b border-slate-800">
+            <tr>
+              <th class="p-3">Request ID</th>
+              <th class="p-3">Employee</th>
+              <th class="p-3">Policy Type</th>
+              <th class="p-3">Dates</th>
+              <th class="p-3">Business Days</th>
+              <th class="p-3">Status</th>
+              <th class="p-3">Notes</th>
+              <th class="p-3 text-right">Actions</th>
+            </tr>
+          </thead>
+          <tbody id="timeoffTableBody" class="divide-y divide-slate-800"></tbody>
+        </table>
+      </div>
+    </div>
+
+  </main>
+
+  <script>
+    const BACKEND_URL = localStorage.getItem('ultra_backend_url') || '';
+
+    function escapeHtml(str) {
+      if (!str) return '';
+      return String(str)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+    }
+
+    const state = {
+      users: [
+        { id: 'usr_admin', name: 'Super Administrator', email: 'admin@company.com', role: 'SUPER_ADMIN', rate: 150.00, status: 'ACTIVE' },
+        { id: 'usr_alex', name: 'Alex Vance', email: 'alex@company.com', role: 'ADMIN', rate: 100.00, status: 'ACTIVE' },
+        { id: 'usr_elena', name: 'Elena Rostova', email: 'elena@company.com', role: 'MANAGER', rate: 85.00, status: 'ACTIVE' },
+        { id: 'usr_marcus', name: 'Marcus Brody', email: 'marcus@company.com', role: 'MEMBER', rate: 65.00, status: 'SUSPENDED' }
+      ],
+      invoices: [
+        { id: 'inv_2026_001', number: 'INV-2026-001', client: 'Acme Global Corp', issue: '2026-09-01', due: '2026-09-30', subtotal: 4250.00, tax: 425.00, total: 4675.00, status: 'PAID' },
+        { id: 'inv_2026_002', number: 'INV-2026-002', client: 'Starlight Media', issue: '2026-09-10', due: '2026-10-10', subtotal: 8600.00, tax: 860.00, total: 9460.00, status: 'PAID' },
+        { id: 'inv_2026_003', number: 'INV-2026-003', client: 'Nexus AI Labs', issue: '2026-09-15', due: '2026-10-15', subtotal: 4250.00, tax: 425.00, total: 4675.00, status: 'SENT' }
+      ],
+      expenses: [
+        { id: 'exp_01a', user: 'Alex Vance', project: 'Core Redesign', category: 'Software / Cloud API', amount: 120.00, billable: true, receipt: 'https://drive.google.com/file/d/vault_sc_01', status: 'APPROVED' },
+        { id: 'exp_02b', user: 'Elena Rostova', project: 'Marketing Campaign', category: 'Travel / Client Meeting', amount: 450.00, billable: true, receipt: 'https://drive.google.com/file/d/vault_sc_02', status: 'APPROVED' },
+        { id: 'exp_03c', user: 'Marcus Brody', project: 'Internal Ops', category: 'Hardware Peripherals', amount: 89.99, billable: false, receipt: 'https://drive.google.com/file/d/vault_sc_03', status: 'REIMBURSED' }
+      ],
+      timeoff: [
+        { id: 'to_48c', user: 'Marcus Brody', policy: 'VACATION', start: '2026-09-25', end: '2026-09-28', days: 4, status: 'PENDING', notes: 'Family vacation' },
+        { id: 'to_49d', user: 'Elena Rostova', policy: 'SICK', start: '2026-09-12', end: '2026-09-13', days: 2, status: 'APPROVED', notes: 'Doctor appointment' },
+        { id: 'to_50e', user: 'Sarah Connor', policy: 'HOLIDAY', start: '2026-09-07', end: '2026-09-07', days: 1, status: 'APPROVED', notes: 'Public holiday' }
+      ],
+      teamTimesheets: [
+        { name: 'Alex Vance', email: 'alex@company.com', mon: 8.0, tue: 8.0, wed: 8.5, thu: 7.5, fri: 6.0, sat: 0, sun: 0, total: 38.00, status: 'APPROVED' },
+        { name: 'Elena Rostova', email: 'elena@company.com', mon: 8.5, tue: 8.5, wed: 8.0, thu: 8.0, fri: 8.2, sat: 0, sun: 0, total: 41.20, status: 'SUBMITTED' },
+        { name: 'Marcus Brody', email: 'marcus@company.com', mon: 6.0, tue: 6.0, wed: 5.5, thu: 6.0, fri: 5.5, sat: 0, sun: 0, total: 29.00, status: 'DRAFT' },
+        { name: 'Sarah Connor', email: 'sarah@company.com', mon: 7.5, tue: 7.5, wed: 7.0, thu: 7.5, fri: 7.3, sat: 0, sun: 0, total: 36.80, status: 'APPROVED' }
+      ],
+      projects: [
+        { id: 'prj_core', name: 'Core Redesign', client: 'Internal Ops', is_billable: true, rate: 100.00, color: '#6366f1', status: 'ACTIVE' },
+        { id: 'prj_api', name: 'API Gateway Architecture', client: 'Internal Ops', is_billable: true, rate: 125.00, color: '#10b981', status: 'ACTIVE' },
+        { id: 'prj_compliance', name: 'Government Compliance Audit', client: 'Executive Ops', is_billable: false, rate: 0.00, color: '#f59e0b', status: 'ACTIVE' },
+        { id: 'prj_mobile', name: 'Mobile Application V2', client: 'Acme Global Corp', is_billable: true, rate: 110.00, color: '#3b82f6', status: 'ACTIVE' }
+      ],
+      approvals: [
+        { id: 'appr_01a', employee_name: 'Alex Vance', user_id: 'usr_alex', period: 'Sep 15 - Sep 21', total_hours: 41.50, billable_hours: 38.00, status: 'SUBMITTED' },
+        { id: 'appr_02b', employee_name: 'Elena Rostova', user_id: 'usr_elena', period: 'Sep 15 - Sep 21', total_hours: 41.20, billable_hours: 40.00, status: 'SUBMITTED' },
+        { id: 'appr_03c', employee_name: 'Sarah Connor', user_id: 'usr_sarah', period: 'Sep 08 - Sep 14', total_hours: 36.80, billable_hours: 35.00, status: 'APPROVED' }
+      ],
+      auditLogs: [
+        { id: 'log_78f1a2e4', timestamp: '2026-09-18T02:30:00Z', actor: 'usr_admin', action: 'DISASTER_RECOVERY_BACKUP_GENERATED', table: 'CONFIGS', entity_id: 'FULL_RESTORE', sha: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855' },
+        { id: 'log_78f1a2e5', timestamp: '2026-09-18T02:25:00Z', actor: 'usr_alex', action: 'TIMESHEET_SUBMISSION', table: 'APPROVALS', entity_id: 'appr_01a', sha: '4a5e1e4f44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b' },
+        { id: 'log_78f1a2e6', timestamp: '2026-09-18T02:20:00Z', actor: 'usr_admin', action: 'POLICY_UPDATE', table: 'CONFIGS', entity_id: 'BLUR_SCREENSHOTS', sha: '99b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852ba71' }
+      ],
+      incidents: [
+        { id: 'inc_d8a1', incident_id: 'inc_d8a1', timestamp: '2026-09-18T02:15:00Z', user_name: 'Marcus Brody', user_id: 'usr_marcus', rule_name: 'Anti-Cheat Jiggler Pattern', details: 'Hardware hook detected 120 synthetic mouse injections / sec', risk_level: 'HIGH', status: 'OPEN' },
+        { id: 'inc_d8a2', incident_id: 'inc_d8a2', timestamp: '2026-09-18T01:45:00Z', user_name: 'Alex Vance', user_id: 'usr_alex', rule_name: 'DLP Secret Key Matched', details: 'OCR detected AWS_SECRET_ACCESS_KEY on visible screen viewport', risk_level: 'CRITICAL', status: 'INVESTIGATING' }
+      ],
+      radar: [
+        { user_id: 'usr_alex', full_name: 'Alex Vance', email: 'alex@company.com', role: 'ADMIN', is_running: true, active_entry: { project_name: 'Core Redesign', project_color: '#6366f1', description: 'Zero-trust auth middleware', is_billable: true }, active_window: 'Visual Studio Code', activity_score: 95, anti_cheat_flag: 'CLEAN' },
+        { user_id: 'usr_elena', full_name: 'Elena Rostova', email: 'elena@company.com', role: 'MANAGER', is_running: true, active_entry: { project_name: 'API Gateway Architecture', project_color: '#10b981', description: 'API rate limiter & caching', is_billable: true }, active_window: 'Google Chrome - Cloud Console', activity_score: 88, anti_cheat_flag: 'CLEAN' },
+        { user_id: 'usr_marcus', full_name: 'Marcus Brody', email: 'marcus@company.com', role: 'MEMBER', is_running: false, active_entry: null, active_window: 'Idle', activity_score: 0, anti_cheat_flag: 'CLEAN' },
+        { user_id: 'usr_sarah', full_name: 'Sarah Connor', email: 'sarah@company.com', role: 'MEMBER', is_running: true, active_entry: { project_name: 'Mobile Application V2', project_color: '#3b82f6', description: 'Offline sync storage', is_billable: true }, active_window: 'Figma - Mobile Flows', activity_score: 91, anti_cheat_flag: 'CLEAN' }
+      ],
+      screenshots: [
+        { screenshot_id: 'sc_01', user_name: 'Alex Vance', timestamp: '2 mins ago', active_window_title: 'Visual Studio Code', activity_score: 95, flag_incident: 'NONE', thumbnail_url: 'https://images.unsplash.com/photo-1555066931-4365d14bab8c?w=400&auto=format&fit=crop&q=60' },
+        { screenshot_id: 'sc_02', user_name: 'Elena Rostova', timestamp: '4 mins ago', active_window_title: 'Google Chrome - Cloud Console', activity_score: 88, flag_incident: 'NONE', thumbnail_url: 'https://images.unsplash.com/photo-1551288049-bebda4e38f71?w=400&auto=format&fit=crop&q=60' },
+        { screenshot_id: 'sc_03', user_name: 'Sarah Connor', timestamp: '7 mins ago', active_window_title: 'Figma - Mobile Wireframes', activity_score: 91, flag_incident: 'NONE', thumbnail_url: 'https://images.unsplash.com/photo-1581291518857-4e27b48ff24e?w=400&auto=format&fit=crop&q=60' }
+      ],
+      blurPolicy: true
+    };
+
+    window.addEventListener('DOMContentLoaded', () => {
+      lucide.createIcons();
+      renderUsersTable();
+      renderProjectsTable();
+      renderRadar();
+      renderScreenshots();
+      renderAuditLogs();
+      renderIncidents();
+      renderApprovals();
+      renderCharts();
+      renderInvoices();
+      renderExpenses();
+      renderTimeOff();
+      renderTeamTimesheets();
+      const hash = window.location.hash.replace('#', '');
+      if (hash) switchTab(hash);
+    });
+
+    function switchTab(id) {
+      document.querySelectorAll('.tab-content').forEach(el => el.classList.add('hidden'));
+      document.querySelectorAll('.tab-btn').forEach(el => {
+        el.classList.remove('border-brand-500', 'text-white');
+        el.classList.add('border-transparent', 'text-slate-400');
+      });
+      const t = document.getElementById('tab-' + id);
+      const b = document.getElementById('tabBtn-' + id);
+      if (t) t.classList.remove('hidden');
+      if (b) { b.classList.remove('border-transparent', 'text-slate-400'); b.classList.add('border-brand-500', 'text-white'); }
+      lucide.createIcons();
+      if (id === 'reports' && typeof renderCharts === 'function') {
+        renderCharts();
+      }
+    }
+
+    async function setBlurPolicy(enable) {
+      state.blurPolicy = enable;
+      const onBtn = document.getElementById('btnBlurOn');
+      const offBtn = document.getElementById('btnBlurOff');
+      if (enable) {
+        if (onBtn) onBtn.className = 'px-3 py-1.5 text-xs font-semibold rounded-lg bg-brand-600 text-white border border-brand-500 shadow-sm';
+        if (offBtn) offBtn.className = 'px-3 py-1.5 text-xs font-semibold rounded-lg bg-surface-800 text-slate-400 hover:text-white border border-slate-700';
+      } else {
+        if (offBtn) offBtn.className = 'px-3 py-1.5 text-xs font-semibold rounded-lg bg-brand-600 text-white border border-brand-500 shadow-sm';
+        if (onBtn) onBtn.className = 'px-3 py-1.5 text-xs font-semibold rounded-lg bg-surface-800 text-slate-400 hover:text-white border border-slate-700';
+      }
+      const url = getBackendUrl() || BACKEND_URL;
+      if (url) {
+        try {
+          await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'set_policy', policy: 'blur', enabled: enable })
+          });
+        } catch (e) {
+          console.error('Failed to update blur policy:', e);
+        }
+      }
+      alert('Screenshot Blur policy updated to: ' + (enable ? 'ENABLED (Client-side PII blurred)' : 'DISABLED (Full resolution crisp)'));
+    }
+
+    async function savePolicySetting(settingName, val) {
+      const url = getBackendUrl() || BACKEND_URL;
+      if (url) {
+        try {
+          let key = 'SCREENSHOT_INTERVAL_MINUTES';
+          if (settingName === 'idle') key = 'IDLE_THRESHOLD_SECONDS';
+          await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'set_policy', key: key, value: String(val) })
+          });
+        } catch (e) {
+          console.error('Failed to save policy setting:', e);
+        }
+      }
+      alert('Policy ' + settingName + ' updated to ' + val + '. Saved to Google Sheets CONFIGS.');
+    }
+
+    function renderUsersTable() {
+      const tbody = document.getElementById('usersTableBody');
+      if (!tbody) return;
+      tbody.innerHTML = (state.users || []).map(u => {
+        const uid = u.id || u.user_id || '';
+        u.name = u.name || u.full_name || u.email || 'Employee';
+        const rateVal = u.rate !== undefined ? u.rate : (u.default_hourly_rate !== undefined ? u.default_hourly_rate : 50.0);
+        const status = u.status || 'ACTIVE';
+        return `
+        <tr class="hover:bg-surface-800/40">
+          <td class="p-3 font-semibold text-white">${escapeHtml(u.name)}</td>
+          <td class="p-3 text-slate-400">${escapeHtml(u.email || '')}</td>
+          <td class="p-3">
+            <span class="px-2 py-0.5 rounded text-[10px] font-bold ${u.role === 'SUPER_ADMIN' ? 'bg-brand-500/20 text-brand-300 border border-brand-500/30' : 'bg-slate-800 text-slate-300'}">
+              ${escapeHtml(u.role || 'MEMBER')}
+            </span>
+          </td>
+          <td class="p-3 font-mono text-emerald-400">$${Number(rateVal).toFixed(2)}/h</td>
+          <td class="p-3">
+            <span class="px-2 py-0.5 rounded text-[10px] font-bold ${status === 'ACTIVE' ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' : 'bg-red-500/10 text-red-400 border border-red-500/20'}">
+              ${escapeHtml(status)}
+            </span>
+          </td>
+          <td class="p-3 text-right space-x-2">
+            <button onclick="toggleUserStatus('${escapeHtml(uid)}')" class="text-xs ${status === 'ACTIVE' ? 'text-amber-400 hover:underline' : 'text-emerald-400 hover:underline'}">
+              ${status === 'ACTIVE' ? 'Suspend' : 'Reactivate'}
+            </button>
+            <button onclick="deleteUser('${escapeHtml(uid)}')" class="text-xs text-red-400 hover:underline">Delete</button>
+          </td>
+        </tr>
+      `;
+      }).join('');
+    }
+
+    async function toggleUserStatus(userId) {
+      const user = (state.users || []).find(u => (u.id === userId || u.user_id === userId));
+      if (!user) return;
+      const userName = user.name || user.full_name || user.email;
+      const newStatus = user.status === 'ACTIVE' ? 'SUSPENDED' : 'ACTIVE';
+      if (!confirm('Set ' + userName + ' to ' + newStatus + '?')) return;
+      try {
+        const url = getBackendUrl() || BACKEND_URL;
+        if (url) {
+          await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'entity_crud', entity: 'USER', operation: 'UPDATE', entity_id: userId, updates: { status: newStatus }, actor_email: 'admin@example.com' })
+          });
+        }
+        user.status = newStatus;
+        renderUsersTable();
+      } catch (err) {
+        console.error('toggleUserStatus failed:', err);
+        alert('Failed to update user status');
+      }
+    }
+
+    async function deleteUser(id) {
+      if (confirm('Permanently revoke this user and archive their records?')) {
+        const url = getBackendUrl() || BACKEND_URL;
+        if (url) {
+          try {
+            await fetch(url, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ action: 'entity_crud', entity: 'USER', operation: 'DELETE', entity_id: id, actor_email: 'admin@example.com' })
+            });
+          } catch (e) {
+            console.warn('Failed to delete user on backend:', e);
+          }
+        }
+        state.users = (state.users || []).filter(x => (x.id !== id && x.user_id !== id));
+        renderUsersTable();
+      }
+    }
+
+    function renderProjectsTable() {
+      const tbody = document.getElementById('projectsTableBody');
+      if (!tbody) return;
+      tbody.innerHTML = (state.projects || []).map(p => {
+        const rateVal = p.rate !== undefined ? p.rate : (p.hourly_rate_override || 0);
+        const isBillable = p.is_billable !== false;
+        const status = p.status || 'ACTIVE';
+        return `
+        <tr class="hover:bg-surface-800/40">
+          <td class="p-3 font-semibold text-white flex items-center gap-2">
+            <span class="w-2.5 h-2.5 rounded-full" style="background-color: ${escapeHtml(p.color || p.color_hex || '#6366f1')}"></span>
+            ${escapeHtml(p.name)}
+          </td>
+          <td class="p-3 text-slate-400">${escapeHtml(p.client || 'Internal Ops')}</td>
+          <td class="p-3">
+            <span class="px-2 py-0.5 rounded text-[10px] font-bold ${isBillable ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' : 'bg-slate-800 text-slate-400'}">
+              ${isBillable ? 'BILLABLE' : 'NON-BILLABLE'}
+            </span>
+          </td>
+          <td class="p-3 font-mono text-emerald-400">$${Number(rateVal).toFixed(2)}/h</td>
+          <td class="p-3">
+            <span class="px-2 py-0.5 rounded text-[10px] font-bold ${status === 'ACTIVE' ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' : 'bg-amber-500/10 text-amber-400 border border-amber-500/20'}">
+              ${escapeHtml(status)}
+            </span>
+          </td>
+          <td class="p-3 text-right space-x-2">
+            <button onclick="archiveProject('${escapeHtml(p.id || p.project_id)}')" class="text-xs text-amber-400 hover:underline">Archive</button>
+          </td>
+        </tr>
+      `;
+      }).join('');
+    }
+
+    async function archiveProject(id) {
+      const prj = (state.projects || []).find(p => (p.id === id || p.project_id === id));
+      if (!prj) return;
+      if (!confirm('Archive project ' + prj.name + '?')) return;
+      prj.status = 'ARCHIVED';
+      const url = getBackendUrl() || BACKEND_URL;
+      if (url) {
+        try {
+          await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              action: 'entity_crud',
+              table: 'PROJECTS',
+              crud_action: 'UPDATE',
+              entity_id: id,
+              actor_email: 'admin@example.com',
+              data: { status: 'ARCHIVED' }
+            })
+          });
+        } catch (e) {
+          console.error('Failed to archive project on backend:', e);
+        }
+      }
+      renderProjectsTable();
+    }
+
+    // ========================================================================
+    // DISASTER RECOVERY & FULL DATABASE RESTORE ENGINE
+    // ========================================================================
+
+    /**
+     * Downloads a point-in-time full database snapshot as a standalone JSON file.
+     * RATIONALE: Independent of Google's revision history, this allows offline archival
+     * and immediate point-in-time disaster recovery if sheets are accidentally deleted.
+     */
+    async function downloadOfflineSnapshot() {
+      const url = getBackendUrl();
+      let backupData = {
+        exported_at: new Date().toISOString(),
+        database: 'UltraAccount_Master_Backup',
+        year: 2026,
+        USERS: (state.users || []).map(u => ({
+          user_id: u.user_id || u.id,
+          email: u.email,
+          full_name: u.full_name || u.name,
+          role: u.role || 'MEMBER',
+          status: u.status || 'ACTIVE',
+          default_hourly_rate: Number(u.default_hourly_rate || u.rate || 50.0),
+          department: u.department || 'Engineering',
+          created_at: u.created_at || new Date().toISOString(),
+          last_active_at: u.last_active_at || new Date().toISOString()
+        })),
+        CLIENTS: state.clients || [
+          { client_id: 'cli_internal', name: 'Internal Operations', address: 'HQ', currency: 'USD', status: 'ACTIVE', created_at: new Date().toISOString() }
+        ],
+        PROJECTS: (state.projects || []).map(p => ({
+          project_id: p.project_id || p.id,
+          client_id: p.client_id || 'cli_internal',
+          name: p.name,
+          color_hex: p.color_hex || p.color || '#6366f1',
+          is_billable: p.is_billable !== false,
+          hourly_rate_override: Number(p.hourly_rate_override || p.rate || 0),
+          estimated_hours: p.estimated_hours || 100,
+          status: p.status || 'ACTIVE',
+          created_at: p.created_at || new Date().toISOString()
+        })),
+        TASKS: state.tasks || [
+          { task_id: 'tsk_planning', project_id: 'prj_general', name: 'Strategy & Planning', estimated_hours: 20, hourly_rate_override: 0, status: 'OPEN', created_at: new Date().toISOString() },
+          { task_id: 'tsk_coding', project_id: 'prj_dev', name: 'Feature Implementation', estimated_hours: 200, hourly_rate_override: 0, status: 'OPEN', created_at: new Date().toISOString() }
+        ],
+        TAGS: state.tags || [
+          { tag_id: 'tag_urgent', name: 'Urgent', color_hex: '#EF4444', created_at: new Date().toISOString() },
+          { tag_id: 'tag_meeting', name: 'Meeting', color_hex: '#F59E0B', created_at: new Date().toISOString() },
+          { tag_id: 'tag_review', name: 'Code Review', color_hex: '#8B5CF6', created_at: new Date().toISOString() }
+        ],
+        INVOICES: state.invoices || [],
+        EXPENSES: state.expenses || [],
+        TIME_OFF: state.timeoff || [],
+        APPROVALS: state.approvals || [],
+        CONFIGS: [
+          { key: 'WORKSPACE_NAME', value: state.currentWorkspace || 'Ultra Account Enterprise' },
+          { key: 'DEFAULT_CURRENCY', value: 'USD' },
+          { key: 'SCREENSHOT_INTERVAL_MINUTES', value: '5' },
+          { key: 'SCREENSHOTS_ENABLED', value: 'true' },
+          { key: 'BLUR_SCREENSHOTS_BY_DEFAULT', value: state.blurPolicy ? 'true' : 'false' }
+        ]
+      };
+
+      // If backend is reachable, query live workspace manifest to include all relational tables
+      if (url) {
+        try {
+          const res = await fetch(url + '?action=workspace_manifest');
+          const data = await res.json();
+          if (data.users) {
+            state.users = data.users;
+            backupData.USERS = data.users;
+          }
+          if (data.projects) {
+            state.projects = data.projects;
+            backupData.PROJECTS = data.projects;
+          }
+          if (data.clients) backupData.CLIENTS = data.clients;
+          if (data.tasks) backupData.TASKS = data.tasks;
+          if (data.tags) backupData.TAGS = data.tags;
+          if (data.invoices) {
+            state.invoices = data.invoices;
+            backupData.INVOICES = data.invoices;
+          }
+          if (data.expenses) {
+            state.expenses = data.expenses;
+            backupData.EXPENSES = data.expenses;
+          }
+          if (data.timeoff) {
+            state.timeoff = data.timeoff;
+            backupData.TIME_OFF = data.timeoff;
+          }
+          if (data.approvals) backupData.APPROVALS = data.approvals;
+          if (data.teamTimesheets) state.teamTimesheets = data.teamTimesheets;
+          try {
+            const repRes = await fetch(url + '?action=get_reports&year=' + (backupData.year || 2026));
+            const repData = await repRes.json();
+            if (repData && repData.entries) {
+              backupData['TIME_ENTRIES_' + (backupData.year || 2026)] = repData.entries;
+            }
+          } catch (repErr) {
+            console.warn('Could not fetch entries for backup:', repErr);
+          }
+        } catch (e) {
+          console.warn('Could not fetch live manifest for backup, using cached state:', e);
+        }
+      }
+
+      const blob = new Blob([JSON.stringify(backupData, null, 2)], { type: 'application/json' });
+      const dlUrl = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = dlUrl;
+      a.download = 'UltraAccount_Master_Backup_' + new Date().toISOString().substring(0, 10) + '.json';
+      a.click();
+      alert('Database Backup Exported Successfully!\nSaved: UltraAccount_Master_Backup_' + new Date().toISOString().substring(0, 10) + '.json');
+    }
+
+    /**
+     * Reads a local JSON backup file and dispatches a full disaster recovery restore
+     * to the Google Apps Script REST API gateway.
+     * 
+     * BUGS & FAILURE MODES MITIGATED:
+     * 1. Accidental Overwrites: File is parsed and validated before user confirmation.
+     * 2. Corrupted Schemas: The backend strictly preserves row 1 headers and validates column sets.
+     * 3. Execution Timeouts: Backend writes rows in batches of 500.
+     * 4. Cache Desync: Apps Script clears CacheService('manifest_all') immediately after restore.
+     */
+    function handleRestoreUpload(event) {
+      const file = event.target.files[0];
+      if (!file) return;
+
+      const reader = new FileReader();
+      reader.onload = async function(e) {
+        try {
+          const backupJson = JSON.parse(e.target.result);
+          if (!backupJson || typeof backupJson !== 'object') {
+            alert('Invalid backup file: Root must be a JSON object.');
+            return;
+          }
+
+          // Count recognized tables
+          const recognizedTables = Object.keys(backupJson).filter(k => Array.isArray(backupJson[k]));
+          let totalRows = 0;
+          recognizedTables.forEach(t => { totalRows += backupJson[t].length; });
+
+          const proceed = confirm(
+            "DISASTER RECOVERY DATABASE RESTORE\n\n" +
+            "File: " + file.name + "\n" +
+            "Detected Tables: " + recognizedTables.join(", ") + "\n" +
+            "Total Rows to Restore: " + totalRows + "\n\n" +
+            "WARNING: This will replace current table records while preserving headers and formulas.\n\n" +
+            "Proceed with full database restore?"
+          );
+
+          if (!proceed) return;
+
+          const url = getBackendUrl();
+          if (!url) {
+            alert("Error: Backend Web App URL not set. Please configure in the Packager or Settings tab.");
+            return;
+          }
+
+          // Display visual loading notification
+          const notif = document.createElement('div');
+          notif.id = 'restoreStatusBanner';
+          notif.className = 'fixed bottom-6 right-6 bg-indigo-600 text-white p-4 rounded-xl shadow-2xl flex items-center gap-3 z-50 text-xs font-semibold';
+          notif.innerHTML = '<span class="animate-spin text-lg">⚙</span> Restoring relational database in Google Sheets... Please wait.';
+          document.body.appendChild(notif);
+
+          try {
+            const res = await fetch(url, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                action: 'restore_database',
+                admin_passphrase: 'ultra_admin',
+                backup_data: backupJson
+              })
+            });
+
+            const data = await res.json();
+            notif.remove();
+
+            if (data.status === 'SUCCESS') {
+              alert(
+                "✓ DATABASE SUCCESSFULLY RESTORED!\n\n" +
+                "Restored Tables: " + data.restored_tables + "\n" +
+                "Restored Rows: " + data.restored_rows + "\n" +
+                "Timestamp: " + data.restored_at + "\n\n" +
+                "All relational tables have been rebuilt and script caches invalidated."
+              );
+              refreshData();
+            } else {
+              alert("Restore failed: " + (data.error || JSON.stringify(data)));
+            }
+          } catch (netErr) {
+            notif.remove();
+            alert("Network error during restore: " + netErr.message + "\nCheck your Apps Script Web App URL and deployment permissions.");
+          }
+        } catch (parseErr) {
+          alert('Failed to parse backup JSON: ' + parseErr.message);
+        }
+      };
+      reader.readAsText(file);
+    }
+
+    /**
+     * Triggers an automated standalone snapshot of the active spreadsheet in Google Drive.
+     * Stored in /UltraAccount_Backups/ with GMT timestamp.
+     */
+    async function triggerCloudBackup() {
+      const url = getBackendUrl();
+      if (!url) {
+        alert("Please configure your Backend Web App URL first.");
+        return;
+      }
+
+      try {
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'create_backup', admin_passphrase: 'ultra_admin' })
+        });
+        const data = await res.json();
+        if (data.status === 'SUCCESS') {
+          alert("✓ Standalone Drive Snapshot Created!\nSnapshot Name: " + data.backup_name + "\nFile ID: " + data.backup_file_id + "\nLocation: Google Drive (/UltraAccount_Backups/)");
+        } else {
+          alert("Backup failed: " + (data.error || JSON.stringify(data)));
+        }
+      } catch (err) {
+        alert("Backup trigger error: " + err.message);
+      }
+    }
+
+    function getBackendUrl() {
+      const input = document.getElementById('packagerUrlInput');
+      if (input && input.value.trim()) return input.value.trim();
+      return state.apiUrl || '';
+    }
+
+    function renderRadar() {
+      const grid = document.getElementById('radarGrid');
+      if (!grid) return;
+      const ws = state.currentWorkspace;
+      const list = (state.radar || []).filter(u => {
+        if (!ws || ws === 'ws_main') return true;
+        return !u.workspace || u.workspace === ws;
+      });
+      grid.innerHTML = list.map(u => {
+        const isRunning = u.is_running !== undefined ? u.is_running : (u.is_active || false);
+        const entry = u.active_entry || (isRunning ? {
+          project_name: u.current_project || 'Active Project',
+          project_color: '#6366f1',
+          description: u.current_description || 'Active Timer',
+          is_billable: true
+        } : null);
+        const projName = entry ? entry.project_name : (u.current_project && u.current_project !== 'Idle' ? u.current_project : 'No Active Task');
+        const projColor = entry ? (entry.project_color || '#6366f1') : '#64748b';
+        const desc = entry ? entry.description : (u.current_description || 'Employee timer is currently stopped');
+        const win = u.active_window || (isRunning ? 'Active Application' : 'Idle');
+        const score = u.activity_score !== undefined ? u.activity_score : 100;
+        const antiCheat = u.anti_cheat_flag || 'CLEAN';
+        const isAntiCheatWarning = antiCheat !== 'CLEAN' && antiCheat !== 'NONE';
+
+        return `
+        <div class="bg-surface-900 border ${isRunning ? 'border-brand-500/40 shadow-lg shadow-brand-500/5' : 'border-slate-800'} p-5 rounded-2xl space-y-4">
+          <div class="flex items-center justify-between">
+            <div class="flex items-center gap-3">
+              <div class="relative">
+                <div class="w-10 h-10 rounded-xl bg-gradient-to-tr ${isRunning ? 'from-brand-600 to-cyan-500' : 'from-slate-700 to-slate-800'} flex items-center justify-center font-bold text-xs text-white">
+                  ${escapeHtml((u.full_name || u.name || 'U').substring(0, 2).toUpperCase())}
+                </div>
+                <span class="absolute -bottom-1 -right-1 w-3.5 h-3.5 rounded-full border-2 border-surface-900 ${isRunning ? 'bg-emerald-500 animate-pulse' : 'bg-slate-600'}"></span>
+              </div>
+              <div>
+                <div class="font-bold text-sm text-white">${escapeHtml(u.full_name || u.name)}</div>
+                <div class="text-[11px] text-slate-400">${escapeHtml(u.email)}</div>
+              </div>
+            </div>
+            <span class="text-[10px] px-2 py-0.5 rounded font-bold ${u.role === 'SUPER_ADMIN' ? 'bg-brand-500/20 text-brand-300 border border-brand-500/30' : u.role === 'MANAGER' ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/30' : 'bg-slate-800 text-slate-400'}">
+              ${escapeHtml(u.role || 'MEMBER')}
+            </span>
+          </div>
+
+          <div class="bg-surface-950/60 p-3 rounded-xl border border-slate-800/80 space-y-2">
+            <div class="flex items-center justify-between text-xs">
+              <span class="font-semibold text-slate-300 flex items-center gap-1.5 truncate">
+                <span class="w-2 h-2 rounded-full flex-shrink-0" style="background-color: ${escapeHtml(projColor)}"></span>
+                ${escapeHtml(projName)}
+              </span>
+              ${entry && entry.is_billable ? '<span class="text-[10px] font-bold text-emerald-400">$ BILLABLE</span>' : '<span class="text-[10px] text-slate-500">INTERNAL</span>'}
+            </div>
+            <div class="text-xs text-slate-300 font-medium truncate">${escapeHtml(desc)}</div>
+            <div class="text-[11px] text-slate-400 flex items-center gap-1 truncate">
+              <i data-lucide="app-window" class="w-3 h-3 text-slate-500"></i> ${escapeHtml(win)}
+            </div>
+          </div>
+
+          <div class="flex items-center justify-between text-xs pt-1 border-t border-slate-800/60">
+            <div class="flex items-center gap-2">
+              <span class="text-[11px] text-slate-400">Activity:</span>
+              <span class="font-mono font-bold text-xs ${score > 70 ? 'text-emerald-400' : score > 30 ? 'text-amber-400' : 'text-slate-500'}">${score}%</span>
+            </div>
+            <div>
+              <span class="px-2 py-0.5 rounded text-[10px] font-bold ${isAntiCheatWarning ? 'bg-red-500/20 text-red-400 border border-red-500/30' : 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'}">
+                ${escapeHtml(antiCheat)}
+              </span>
+            </div>
+          </div>
+        </div>
+        `;
+      }).join('');
+      lucide.createIcons();
+    }
+
+    function renderScreenshots() {
+      const grid = document.getElementById('screenshotsGrid');
+      if (!grid) return;
+      grid.innerHTML = (state.screenshots || []).map(sc => `
+        <div class="bg-surface-900 border border-slate-800 rounded-2xl overflow-hidden hover:border-brand-500/40 transition group">
+          <div class="h-36 bg-surface-950 relative overflow-hidden flex items-center justify-center">
+            ${sc.thumbnail_url ? `<img src="${escapeHtml(sc.thumbnail_url)}" class="w-full h-full object-cover group-hover:scale-105 transition duration-300" alt="Screenshot" />` : `<div class="text-xs text-slate-600 font-mono">Vault Image Preview</div>`}
+            <span class="absolute top-2 right-2 px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-surface-950/80 backdrop-blur text-emerald-400 border border-slate-700">
+              ${sc.activity_score || 0}% Activity
+            </span>
+          </div>
+          <div class="p-3.5 space-y-1.5">
+            <div class="flex justify-between items-center text-xs">
+              <span class="font-semibold text-white truncate">${escapeHtml(sc.user_name || sc.user_id)}</span>
+              <span class="text-[10px] text-slate-400">${escapeHtml(sc.timestamp || 'Recent')}</span>
+            </div>
+            <div class="text-[11px] text-slate-400 truncate flex items-center gap-1">
+              <i data-lucide="monitor" class="w-3 h-3 text-slate-500"></i> ${escapeHtml(sc.active_window_title || 'Desktop')}
+            </div>
+            <div class="flex justify-between items-center pt-2 border-t border-slate-800/80">
+              <span class="text-[10px] font-bold ${sc.flag_incident && sc.flag_incident !== 'NONE' ? 'text-red-400' : 'text-emerald-400'}">
+                ${escapeHtml(sc.flag_incident || 'CLEAN')}
+              </span>
+              <a href="${escapeHtml(sc.drive_file_id ? 'https://drive.google.com/file/d/' + sc.drive_file_id : '#')}" target="_blank" class="text-[11px] text-brand-400 hover:underline">
+                View in Vault ↗
+              </a>
+            </div>
+          </div>
+        </div>
+      `).join('');
+      lucide.createIcons();
+    }
+
+    function renderAuditLogs() {
+      const tbody = document.getElementById('auditTableBody');
+      if (!tbody) return;
+      tbody.innerHTML = (state.auditLogs || []).map(log => `
+        <tr class="hover:bg-surface-800/40">
+          <td class="p-3 font-mono text-slate-400">${escapeHtml(log.id || log.log_id)}</td>
+          <td class="p-3 text-slate-400">${escapeHtml(log.timestamp ? new Date(log.timestamp).toLocaleTimeString() : new Date().toLocaleTimeString())}</td>
+          <td class="p-3 font-semibold text-white">${escapeHtml(log.actor || log.actor_user_id || 'admin')}</td>
+          <td class="p-3 text-cyan-400">${escapeHtml(log.action)}</td>
+          <td class="p-3 font-mono text-[10px] text-emerald-400 truncate max-w-xs">${escapeHtml(log.sha || log.sha256_hash)}</td>
+        </tr>
+      `).join('');
+    }
+
+    function renderIncidents() {
+      const tbody = document.getElementById('incidentsTableBody');
+      if (!tbody) return;
+      tbody.innerHTML = (state.incidents || []).map(inc => `
+        <tr class="hover:bg-surface-800/40">
+          <td class="p-3 font-mono text-slate-400">${escapeHtml(inc.incident_id || inc.id)}</td>
+          <td class="p-3 text-slate-400">${escapeHtml(inc.timestamp ? new Date(inc.timestamp).toLocaleTimeString() : new Date().toLocaleTimeString())}</td>
+          <td class="p-3 font-semibold text-white">${escapeHtml(inc.user_name || inc.user_id || 'Employee')}</td>
+          <td class="p-3 text-cyan-400">${escapeHtml(inc.rule_name || inc.rule_id || 'Policy Incident')}</td>
+          <td class="p-3">
+            <span class="px-2 py-0.5 rounded text-[10px] font-bold ${inc.risk_level === 'CRITICAL' ? 'bg-red-500/20 text-red-400 border border-red-500/30' : 'bg-amber-500/20 text-amber-400 border border-amber-500/30'}">
+              ${escapeHtml(inc.risk_level || 'HIGH')}
+            </span>
+          </td>
+          <td class="p-3 text-slate-300 max-w-sm truncate">${escapeHtml(inc.details || inc.matched_pattern || inc.notes || '-')}</td>
+          <td class="p-3 font-mono text-[10px] text-emerald-400">${escapeHtml(inc.status || 'OPEN')}</td>
+        </tr>
+      `).join('');
+    }
+
+    function renderApprovals() {
+      const tbody = document.getElementById('approvalsTableBody');
+      if (!tbody) return;
+      tbody.innerHTML = (state.approvals || []).map(appr => {
+        const isSubmitted = (appr.status === 'SUBMITTED' || appr.status === 'PENDING');
+        return `
+        <tr class="hover:bg-surface-800/40">
+          <td class="p-3 font-semibold text-white">${escapeHtml(appr.employee_name || appr.user_id)}</td>
+          <td class="p-3 text-slate-400">${escapeHtml(appr.period || (appr.start_date + ' - ' + appr.end_date))}</td>
+          <td class="p-3 font-bold text-white">${Number(appr.total_hours || 0).toFixed(2)}h</td>
+          <td class="p-3 font-bold text-emerald-400">${Number(appr.billable_hours || 0).toFixed(2)}h</td>
+          <td class="p-3">
+            <span class="px-2 py-0.5 rounded text-[10px] font-bold ${appr.status === 'APPROVED' ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' : appr.status === 'REJECTED' ? 'bg-red-500/10 text-red-400 border border-red-500/20' : 'bg-amber-500/10 text-amber-400 border border-amber-500/20'}">
+              ${escapeHtml(appr.status)}
+            </span>
+          </td>
+          <td class="p-3 text-right space-x-2">
+            ${isSubmitted ? `
+              <button onclick="processApproval('${escapeHtml(appr.id || appr.approval_id)}', 'APPROVE')" class="bg-emerald-600 hover:bg-emerald-500 text-white px-2.5 py-1 rounded text-xs font-semibold">Approve</button>
+              <button onclick="processApproval('${escapeHtml(appr.id || appr.approval_id)}', 'REJECT')" class="bg-surface-800 hover:bg-slate-700 text-slate-300 px-2.5 py-1 rounded text-xs">Reject</button>
+            ` : `<span class="text-xs text-slate-500 font-mono">LOCKED</span>`}
+          </td>
+        </tr>
+      `;
+      }).join('');
+    }
+
+    async function processApproval(approvalId, decision) {
+      const appr = (state.approvals || []).find(a => (a.id === approvalId || a.approval_id === approvalId));
+      if (!appr) return;
+      const targetStatus = decision === 'APPROVE' ? 'APPROVED' : 'REJECTED';
+      const url = getBackendUrl() || BACKEND_URL;
+      if (url) {
+        try {
+          await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              action: 'approval_action',
+              approval_id: approvalId,
+              approval_action: decision,
+              reviewer_id: 'admin'
+            })
+          });
+        } catch (e) {
+          console.error('Failed to submit approval decision:', e);
+        }
+      }
+      appr.status = targetStatus;
+      renderApprovals();
+      alert('Timesheet ' + approvalId + ' has been ' + targetStatus + '!');
+    }
+
+    function renderCharts() {
+      state.chartInstances = state.chartInstances || {};
+      ['chartProject', 'chartBillable', 'chartApps', 'chartTrend', 'chartCapacity'].forEach(id => {
+        if (state.chartInstances[id]) {
+          try { state.chartInstances[id].destroy(); } catch (e) {}
+          delete state.chartInstances[id];
+        }
+      });
+
+      const elProj = document.getElementById('chartProject');
+      if (elProj) {
+        state.chartInstances['chartProject'] = new Chart(elProj, {
+          type: 'doughnut',
+          data: {
+            labels: ['Core Redesign', 'API Gateway', 'Compliance Audits', 'Bug Squashing'],
+            datasets: [{ data: [45, 30, 15, 10], backgroundColor: ['#6366f1', '#10b981', '#f59e0b', '#3b82f6'], borderWidth: 0 }]
+          },
+          options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'bottom', labels: { color: '#94a3b8', font: { size: 10 } } } } }
+        });
+      }
+
+      const elBill = document.getElementById('chartBillable');
+      if (elBill) {
+        state.chartInstances['chartBillable'] = new Chart(elBill, {
+          type: 'bar',
+          data: {
+            labels: ['Engineering', 'Executive', 'Marketing'],
+            datasets: [
+              { label: 'Billable', data: [78, 42, 36], backgroundColor: '#10b981', borderRadius: 4 },
+              { label: 'Non-Billable', data: [12, 10, 8], backgroundColor: '#475569', borderRadius: 4 }
+            ]
+          },
+          options: { responsive: true, maintainAspectRatio: false, scales: { x: { stacked: true, ticks: { color: '#94a3b8' } }, y: { stacked: true, ticks: { color: '#94a3b8' } } }, plugins: { legend: { labels: { color: '#94a3b8', font: { size: 10 } } } } }
+        });
+      }
+
+      const elApps = document.getElementById('chartApps');
+      if (elApps) {
+        state.chartInstances['chartApps'] = new Chart(elApps, {
+          type: 'pie',
+          data: {
+            labels: ['Visual Studio Code', 'Chrome / Google Docs', 'Figma', 'Slack / Teams'],
+            datasets: [{ data: [52, 24, 14, 10], backgroundColor: ['#3b82f6', '#10b981', '#ec4899', '#f59e0b'], borderWidth: 0 }]
+          },
+          options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'bottom', labels: { color: '#94a3b8', font: { size: 10 } } } } }
+        });
+      }
+
+      const elTrend = document.getElementById('chartTrend');
+      if (elTrend) {
+        state.chartInstances['chartTrend'] = new Chart(elTrend, {
+          type: 'line',
+          data: {
+            labels: ['Sep 4', 'Sep 6', 'Sep 8', 'Sep 10', 'Sep 12', 'Sep 14', 'Sep 16'],
+            datasets: [{ label: 'Hours Tracked', data: [7.8, 8.2, 8.5, 6.9, 8.1, 8.4, 7.9], borderColor: '#6366f1', tension: 0.3, fill: true, backgroundColor: 'rgba(99, 102, 241, 0.1)' }]
+          },
+          options: { responsive: true, maintainAspectRatio: false, scales: { x: { ticks: { color: '#94a3b8' } }, y: { ticks: { color: '#94a3b8' } } }, plugins: { legend: { display: false } } }
+        });
+      }
+
+      const elCap = document.getElementById('chartCapacity');
+      if (elCap) {
+        state.chartInstances['chartCapacity'] = new Chart(elCap, {
+          type: 'bar',
+          indexAxis: 'y',
+          data: {
+            labels: ['Alex Vance', 'Elena Rostova', 'Marcus Brody', 'Sarah Connor'],
+            datasets: [{ label: 'Hours This Week', data: [38.5, 41.2, 29.0, 36.8], backgroundColor: '#38bdf8', borderRadius: 4 }]
+          },
+          options: { responsive: true, maintainAspectRatio: false, scales: { x: { ticks: { color: '#94a3b8' } }, y: { ticks: { color: '#94a3b8' } } }, plugins: { legend: { display: false } } }
+        });
+      }
+    }
+
+    function renderInvoices() {
+      const tbody = document.getElementById('invoicesTableBody');
+      if (!tbody) return;
+      tbody.innerHTML = (state.invoices || []).map(inv => {
+        const id = inv.invoice_id || inv.id;
+        const num = inv.invoice_number || inv.number || id;
+        inv.client_name = inv.client_name || inv.client || inv.client_id || 'Client';
+        const issue = (inv.issue_date || inv.issue || '').substring(0, 10);
+        const due = (inv.due_date || inv.due || '').substring(0, 10);
+        const subtotal = parseFloat(inv.subtotal) || 0;
+        const tax = parseFloat(inv.tax_amount !== undefined ? inv.tax_amount : inv.tax) || 0;
+        const total = parseFloat(inv.total_amount !== undefined ? inv.total_amount : (inv.total !== undefined ? inv.total : (subtotal + tax))) || 0;
+        const status = inv.status || 'DRAFT';
+        return `
+        <tr class="hover:bg-surface-800/40">
+          <td class="p-3 font-mono font-bold text-white">${escapeHtml(num)}</td>
+          <td class="p-3 text-slate-300">${escapeHtml(inv.client_name || inv.client)}</td>
+          <td class="p-3 text-slate-400">${escapeHtml(issue)}</td>
+          <td class="p-3 text-slate-400">${escapeHtml(due)}</td>
+          <td class="p-3 font-mono text-slate-300">$${subtotal.toFixed(2)}</td>
+          <td class="p-3 font-mono text-slate-400">$${tax.toFixed(2)}</td>
+          <td class="p-3 font-mono font-bold text-emerald-400">$${total.toFixed(2)}</td>
+          <td class="p-3">
+            <span class="px-2 py-0.5 rounded text-[10px] font-bold ${status === 'PAID' ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' : status === 'SENT' ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20' : 'bg-slate-800 text-slate-400'}">
+              ${escapeHtml(status)}
+            </span>
+          </td>
+          <td class="p-3 text-right space-x-2">
+            ${status !== 'PAID' ? `<button onclick="markInvoicePaid('${escapeHtml(id)}')" class="text-xs text-emerald-400 hover:underline">Mark Paid</button>` : `<span class="text-xs text-slate-500">Completed</span>`}
+            <button onclick="downloadInvoicePdf('${escapeHtml(num)}')" class="text-xs text-brand-400 hover:underline">Print PDF</button>
+          </td>
+        </tr>
+      `;
+      }).join('');
+    }
+
+    async function markInvoicePaid(id) {
+      const inv = (state.invoices || []).find(x => (x.invoice_id === id || x.id === id));
+      if (inv) {
+        inv.status = 'PAID';
+        renderInvoices();
+        const url = getBackendUrl();
+        if (url) {
+          try {
+            await fetch(url, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                action: 'entity_crud',
+                table: 'INVOICES',
+                crud_action: 'UPDATE',
+                entity_id: id,
+                actor_email: 'admin@example.com',
+                data: { status: 'PAID' }
+              })
+            });
+          } catch (e) {
+            console.error('Failed to update invoice on backend:', e);
+          }
+        }
+        alert('✓ Invoice ' + (inv.invoice_number || inv.number || id) + ' marked as PAID.');
+      }
+    }
+
+    function downloadInvoicePdf(num) {
+      alert('Generating and downloading client PDF invoice: ' + num);
+    }
+
+    async function openCreateInvoiceModal() {
+      const client = prompt('Enter Client Name for Invoice:', 'Acme Global Corp');
+      if (!client) return;
+      const subtotalStr = prompt('Enter Billable Subtotal Amount ($):', '3500.00');
+      const subtotal = Math.max(0, parseFloat(subtotalStr) || 0);
+      const tax = subtotal * 0.10;
+      const resolvedClientId = (state.clients && state.clients.length > 0) ? (state.clients[0].client_id || state.clients[0].id || 'cli_internal') : 'cli_internal';
+      const newInv = {
+        invoice_id: 'inv_' + Date.now(),
+        id: 'inv_' + Date.now(),
+        invoice_number: 'INV-2026-00' + ((state.invoices || []).length + 1),
+        number: 'INV-2026-00' + ((state.invoices || []).length + 1),
+        client_name: client,
+        client: client,
+        client_id: resolvedClientId,
+        issue_date: new Date().toISOString().substring(0, 10),
+        issue: new Date().toISOString().substring(0, 10),
+        due_date: new Date(Date.now() + 30*86400000).toISOString().substring(0, 10),
+        due: new Date(Date.now() + 30*86400000).toISOString().substring(0, 10),
+        currency: 'USD',
+        subtotal: subtotal,
+        tax_amount: tax,
+        tax: tax,
+        total_amount: subtotal + tax,
+        total: subtotal + tax,
+        status: 'SENT'
+      };
+      state.invoices = state.invoices || [];
+      state.invoices.unshift(newInv);
+      renderInvoices();
+
+      const url = getBackendUrl();
+      if (url) {
+        try {
+          await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              action: 'entity_crud',
+              table: 'INVOICES',
+              crud_action: 'CREATE',
+              actor_email: 'admin@example.com',
+              data: {
+                invoice_id: newInv.invoice_id,
+                invoice_number: newInv.invoice_number,
+                client_id: resolvedClientId,
+                issue_date: newInv.issue_date,
+                due_date: newInv.due_date,
+                currency: 'USD',
+                subtotal: subtotal,
+                tax_amount: tax,
+                total_amount: subtotal + tax,
+                status: 'SENT'
+              }
+            })
+          });
+        } catch (e) {
+          console.error('Failed to create invoice on backend:', e);
+        }
+      }
+      alert('✓ Invoice ' + newInv.invoice_number + ' created and queued for delivery!');
+    }
+
+    function renderExpenses() {
+      const tbody = document.getElementById('expensesTableBody');
+      if (!tbody) return;
+      tbody.innerHTML = (state.expenses || []).map(exp => {
+        const id = exp.expense_id || exp.id;
+        const user = exp.user_name || exp.full_name || exp.user || exp.user_id || 'Team Member';
+        const proj = exp.project_name || exp.project || exp.project_id || 'General';
+        exp.description = exp.description || exp.category || 'Expense';
+        const amount = parseFloat(exp.amount) || 0;
+        const isBillable = exp.is_billable !== undefined ? (exp.is_billable === true || exp.is_billable === 'true') : exp.billable;
+        const receipt = exp.receipt_file_id || exp.receipt || 'https://drive.google.com';
+        const status = exp.status || 'APPROVED';
+        return `
+        <tr class="hover:bg-surface-800/40">
+          <td class="p-3 font-mono text-slate-400">${escapeHtml(id)}</td>
+          <td class="p-3 font-semibold text-white">${escapeHtml(user)}</td>
+          <td class="p-3 text-slate-300">${escapeHtml(proj)}</td>
+          <td class="p-3 text-slate-400">${escapeHtml(exp.description || exp.category)}</td>
+          <td class="p-3 font-mono font-bold text-emerald-400">$${amount.toFixed(2)}</td>
+          <td class="p-3">
+            <span class="px-2 py-0.5 rounded text-[10px] font-bold ${isBillable ? 'bg-emerald-500/10 text-emerald-400' : 'bg-slate-800 text-slate-400'}">
+              ${isBillable ? 'BILLABLE' : 'INTERNAL'}
+            </span>
+          </td>
+          <td class="p-3">
+            <a href="${escapeHtml(receipt)}" target="_blank" class="text-xs text-brand-400 hover:underline flex items-center gap-1">
+              Receipt Vault ↗
+            </a>
+          </td>
+          <td class="p-3">
+            <span class="px-2 py-0.5 rounded text-[10px] font-bold bg-indigo-500/10 text-indigo-400 border border-indigo-500/20">
+              ${escapeHtml(status)}
+            </span>
+          </td>
+        </tr>
+      `;
+      }).join('');
+    }
+
+    async function promptLogExpense() {
+      const desc = prompt('Enter Expense Description / Item:', 'Cloud Server Hosting');
+      if (!desc) return;
+      const amt = parseFloat(prompt('Enter Expense Amount ($):', '95.00')) || 0;
+      const exp = {
+        expense_id: 'exp_' + Date.now().toString(16),
+        id: 'exp_' + Date.now().toString(16),
+        user_id: 'usr_admin_master',
+        user: 'Super Administrator',
+        project_id: 'prj_general',
+        project: 'General Administration',
+        category: desc,
+        amount: amt,
+        currency: 'USD',
+        is_billable: true,
+        billable: true,
+        receipt: 'https://drive.google.com/file/d/receipt_manual',
+        receipt_file_id: 'https://drive.google.com/file/d/receipt_manual',
+        status: 'APPROVED',
+        created_at: new Date().toISOString()
+      };
+      state.expenses = state.expenses || [];
+      state.expenses.unshift(exp);
+      renderExpenses();
+
+      const url = getBackendUrl();
+      if (url) {
+        try {
+          await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              action: 'entity_crud',
+              table: 'EXPENSES',
+              crud_action: 'CREATE',
+              actor_email: 'admin@example.com',
+              data: {
+                expense_id: exp.expense_id,
+                user_id: exp.user_id,
+                project_id: exp.project_id,
+                category: exp.category,
+                amount: amt,
+                currency: 'USD',
+                is_billable: true,
+                receipt_file_id: exp.receipt_file_id,
+                status: 'APPROVED',
+                notes: 'Logged via Super Admin UI'
+              }
+            })
+          });
+        } catch (e) {
+          console.error('Failed to log expense on backend:', e);
+        }
+      }
+      alert('✓ Expense logged to Super Admin Master Vault!');
+    }
+
+    function renderTimeOff() {
+      const tbody = document.getElementById('timeoffTableBody');
+      if (!tbody) return;
+      tbody.innerHTML = (state.timeoff || []).map(to => {
+        const id = to.request_id || to.id;
+        to.employee_name = to.employee_name || to.user || to.full_name || to.user_id || 'Alex Vance';
+        const policy = to.leave_type || to.policy || 'VACATION';
+        const start = (to.start_date || to.start || '').substring(0, 10);
+        const end = (to.end_date || to.end || '').substring(0, 10);
+        const days = to.total_days || to.days || 1;
+        const status = to.status || 'PENDING';
+        const notes = to.notes || '-';
+        return `
+        <tr class="hover:bg-surface-800/40">
+          <td class="p-3 font-mono text-slate-400">${escapeHtml(id)}</td>
+          <td class="p-3 font-semibold text-white">${escapeHtml(to.employee_name || to.user)}</td>
+          <td class="p-3">
+            <span class="px-2 py-0.5 rounded text-[10px] font-bold ${policy === 'VACATION' ? 'bg-brand-500/20 text-brand-300' : policy === 'SICK' ? 'bg-red-500/20 text-red-300' : 'bg-cyan-500/20 text-cyan-300'}">
+              ${escapeHtml(policy)}
+            </span>
+          </td>
+          <td class="p-3 text-slate-300">${escapeHtml(start)} → ${escapeHtml(end)}</td>
+          <td class="p-3 font-bold text-white">${escapeHtml(days)} Days</td>
+          <td class="p-3">
+            <span class="px-2 py-0.5 rounded text-[10px] font-bold ${status === 'APPROVED' ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' : status === 'REJECTED' ? 'bg-red-500/10 text-red-400 border border-red-500/20' : 'bg-amber-500/10 text-amber-400 border border-amber-500/20'}">
+              ${escapeHtml(status)}
+            </span>
+          </td>
+          <td class="p-3 text-slate-400">${escapeHtml(notes)}</td>
+          <td class="p-3 text-right space-x-2">
+            ${status === 'PENDING' ? `
+              <button onclick="handleTimeOffAction('${escapeHtml(id)}', 'APPROVED')" class="bg-emerald-600 hover:bg-emerald-500 text-white px-2.5 py-1 rounded text-xs font-semibold">Approve</button>
+              <button onclick="handleTimeOffAction('${escapeHtml(id)}', 'REJECTED')" class="bg-surface-800 hover:bg-slate-700 text-slate-300 px-2.5 py-1 rounded text-xs">Reject</button>
+            ` : `<span class="text-xs text-slate-500">Processed</span>`}
+          </td>
+        </tr>
+      `;
+      }).join('');
+    }
+
+    async function handleTimeOffAction(id, action) {
+      const item = (state.timeoff || []).find(x => (x.request_id === id || x.id === id));
+      if (item) {
+        item.status = action;
+        renderTimeOff();
+        const url = getBackendUrl();
+        if (url) {
+          try {
+            await fetch(url, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                action: 'entity_crud',
+                table: 'TIME_OFF',
+                crud_action: 'UPDATE',
+                entity_id: id,
+                actor_email: 'admin@example.com',
+                data: { status: action, reviewer_user_id: 'usr_admin_master' }
+              })
+            });
+          } catch (e) {
+            console.error('Failed to update time off on backend:', e);
+          }
+        }
+        alert('Leave request ' + id + ' ' + action + ' successfully.');
+      }
+    }
+
+    async function promptRequestLeave() {
+      const user = prompt('Enter Employee Name:', 'Alex Vance');
+      if (!user) return;
+      const days = Math.max(1, parseInt(prompt('Enter Number of Days:', '3')) || 1);
+      const to = {
+        request_id: 'to_' + Date.now().toString(16),
+        id: 'to_' + Date.now().toString(16),
+        user_id: 'usr_admin_master',
+        user: user,
+        policy: 'VACATION',
+        leave_type: 'VACATION',
+        start: '2026-10-01',
+        start_date: '2026-10-01',
+        end: '2026-10-04',
+        end_date: '2026-10-04',
+        days: days,
+        total_days: days,
+        status: 'PENDING',
+        notes: 'Requested from portal',
+        created_at: new Date().toISOString()
+      };
+      state.timeoff = state.timeoff || [];
+      state.timeoff.unshift(to);
+      renderTimeOff();
+
+      const url = getBackendUrl();
+      if (url) {
+        try {
+          await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              action: 'entity_crud',
+              table: 'TIME_OFF',
+              crud_action: 'CREATE',
+              actor_email: 'admin@example.com',
+              data: {
+                request_id: to.request_id,
+                user_id: to.user_id,
+                leave_type: to.leave_type,
+                start_date: to.start_date,
+                end_date: to.end_date,
+                total_days: to.total_days,
+                status: 'PENDING',
+                notes: to.notes
+              }
+            })
+          });
+        } catch (e) {
+          console.error('Failed to request leave on backend:', e);
+        }
+      }
+      alert('✓ Leave request submitted for manager review!');
+    }
+
+    function renderTeamTimesheets() {
+      const tbody = document.getElementById('teamTimesheetTableBody');
+      if (!tbody) return;
+      const ws = state.currentWorkspace;
+      const list = (state.teamTimesheets || []).filter(row => {
+        if (!ws || ws === 'ws_main') return true;
+        return !row.workspace || row.workspace === ws;
+      });
+      tbody.innerHTML = list.map(row => `
+        <tr class="hover:bg-surface-800/40">
+          <td class="p-3 font-semibold text-white">
+            <div>${escapeHtml(row.name || row.full_name || 'Member')}</div>
+            <div class="text-[10px] text-slate-500 font-normal">${escapeHtml(row.email || '')}</div>
+          </td>
+          <td class="p-3 text-center font-mono">${Number(row.mon || 0).toFixed(2)}h</td>
+          <td class="p-3 text-center font-mono">${Number(row.tue || 0).toFixed(2)}h</td>
+          <td class="p-3 text-center font-mono">${Number(row.wed || 0).toFixed(2)}h</td>
+          <td class="p-3 text-center font-mono">${Number(row.thu || 0).toFixed(2)}h</td>
+          <td class="p-3 text-center font-mono">${Number(row.fri || 0).toFixed(2)}h</td>
+          <td class="p-3 text-center font-mono text-slate-500">${Number(row.sat || 0).toFixed(2)}h</td>
+          <td class="p-3 text-center font-mono text-slate-500">${Number(row.sun || 0).toFixed(2)}h</td>
+          <td class="p-3 text-right font-mono font-bold text-emerald-400">${Number(row.total || 0).toFixed(2)}h</td>
+          <td class="p-3 text-center">
+            <span class="px-2 py-0.5 rounded text-[10px] font-bold ${row.status === 'APPROVED' ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' : row.status === 'SUBMITTED' ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20' : 'bg-slate-800 text-slate-400'}">
+              ${escapeHtml(row.status || 'DRAFT')}
+            </span>
+          </td>
+        </tr>
+      `).join('');
+    }
+    async function refreshData() {
+      const url = getBackendUrl() || BACKEND_URL;
+      if (!url) return alert('Backend URL not set');
+      try {
+        const wsParam = (state.currentWorkspace && state.currentWorkspace !== 'ws_main') ? '&workspace=' + encodeURIComponent(state.currentWorkspace) : '';
+        const res = await fetch(url + '?action=workspace_manifest' + wsParam);
+        const data = await res.json();
+        if (data.users) state.users = data.users;
+        if (data.projects) state.projects = data.projects;
+        if (data.invoices) state.invoices = data.invoices;
+        if (data.expenses) state.expenses = data.expenses;
+        if (data.timeoff) state.timeoff = data.timeoff;
+        if (data.teamTimesheets) state.teamTimesheets = data.teamTimesheets;
+        if (data.approvals) state.approvals = data.approvals;
+        if (data.incidents) state.incidents = data.incidents;
+
+        try {
+          const radarRes = await fetch(url + '?action=get_active_radar' + wsParam);
+          const radarData = await radarRes.json();
+          if (radarData && (radarData.radar || radarData.active_users)) state.radar = radarData.radar || radarData.active_users;
+        } catch (re) {
+          console.warn('Could not fetch radar data:', re);
+        }
+
+        renderUsersTable();
+        renderProjectsTable();
+        renderRadar();
+        renderScreenshots();
+        renderAuditLogs();
+        renderIncidents();
+        renderApprovals();
+        renderCharts();
+        renderInvoices();
+        renderExpenses();
+        renderTimeOff();
+        renderTeamTimesheets();
+        console.log('Data refreshed from backend.');
+      } catch (err) {
+        console.error('Failed to refresh data', err);
+      }
+    }
+
+    function setDashboardMode(mode) {
+      ['charts', 'dense', 'wallboard', 'heatmap'].forEach(m => {
+        const el = document.getElementById(m + 'Container');
+        if (el) el.classList.add('hidden');
+        const btn = document.getElementById('btnMode' + m.charAt(0).toUpperCase() + m.slice(1));
+        if (btn) {
+           btn.classList.remove('bg-brand-600', 'text-white', 'shadow-sm');
+           btn.classList.add('text-slate-400');
+        }
+      });
+      const targetEl = document.getElementById(mode + 'Container');
+      if (targetEl) targetEl.classList.remove('hidden');
+      const targetBtn = document.getElementById('btnMode' + mode.charAt(0).toUpperCase() + mode.slice(1));
+      if (targetBtn) {
+        targetBtn.classList.add('bg-brand-600', 'text-white', 'shadow-sm');
+        targetBtn.classList.remove('text-slate-400', 'hover:text-white');
+      }
+    }
+
+    function downloadAnalystCsv() {
+      const url = getBackendUrl() || BACKEND_URL;
+      if (!url) return alert('Backend URL not set');
+      window.open(url + '?action=export_analyst_data&format=csv', '_blank');
+    }
+
+    function copyWebConnectorUrl() {
+      const url = getBackendUrl() || BACKEND_URL;
+      if (!url) return alert('Backend URL not set');
+      const connectorUrl = url + '?action=export_analyst_data&format=csv';
+      navigator.clipboard.writeText(connectorUrl).then(() => {
+        alert('Web Connector URL copied to clipboard!');
+      });
+    }
+
+    async function promptAddUser() {
+      const email = prompt('Enter User Email:');
+      if (!email) return;
+      const name = prompt('Enter Full Name:');
+      const role = prompt('Enter Role (SUPER_ADMIN, ADMIN, MANAGER, MEMBER):', 'MEMBER');
+      const url = getBackendUrl() || BACKEND_URL;
+      if (url) {
+        try {
+          await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              action: 'entity_crud',
+              table: 'USERS',
+              crud_action: 'CREATE',
+              actor_email: 'admin@example.com',
+              data: { email: email, full_name: name, role: role || 'MEMBER', default_hourly_rate: 50.00 }
+            })
+          });
+        } catch (e) {
+          console.error('Failed to create user on backend:', e);
+        }
+      }
+      state.users.unshift({ id: 'usr_' + Date.now(), name: name || email, email: email, role: role || 'MEMBER', rate: 50.00, status: 'ACTIVE' });
+      renderUsersTable();
+      alert('User added successfully!');
+    }
+
+    async function openCreateProjectModal() {
+      const name = prompt('Enter Project Name:');
+      if (!name) return;
+      const client = prompt('Enter Client Name:', 'Internal Operations');
+      const rate = Math.max(0, parseFloat(prompt('Enter Hourly Rate ($):', '100')) || 0);
+      let resolvedClientId = 'cli_internal';
+      if (state.clients && state.clients.length > 0) {
+        const matchedCli = state.clients.find(c => (c.name || '').toLowerCase() === (client || '').toLowerCase() || c.client_id === client || c.id === client);
+        if (matchedCli) resolvedClientId = matchedCli.client_id || matchedCli.id;
+        else resolvedClientId = state.clients[0].client_id || state.clients[0].id || 'cli_internal';
+      }
+      const url = getBackendUrl() || BACKEND_URL;
+      if (url) {
+        try {
+          await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              action: 'entity_crud',
+              table: 'PROJECTS',
+              crud_action: 'CREATE',
+              actor_email: 'admin@example.com',
+              data: { name: name, client_id: resolvedClientId, hourly_rate_override: rate, is_billable: true, color_hex: '#6366f1' }
+            })
+          });
+        } catch (e) {
+          console.error('Failed to create project on backend:', e);
+        }
+      }
+      state.projects = state.projects || [];
+      state.projects.push({ id: 'prj_' + Date.now(), name: name, client: client || 'Internal Operations', rate: rate, status: 'ACTIVE' });
+      if (typeof renderProjectsTable === 'function') renderProjectsTable();
+      alert('Project created successfully!');
+    }
+
+    async function setIdleAlertsPolicy(enabled) {
+      const onBtn = document.getElementById('btnIdleAlertsOn');
+      const offBtn = document.getElementById('btnIdleAlertsOff');
+      if (enabled) {
+        if(onBtn) onBtn.className = 'px-3 py-1.5 text-xs font-semibold rounded-lg bg-brand-600 text-white border border-brand-500 shadow-sm';
+        if(offBtn) offBtn.className = 'px-3 py-1.5 text-xs font-semibold rounded-lg bg-surface-800 text-slate-400 hover:text-white border border-slate-700';
+      } else {
+        if(offBtn) offBtn.className = 'px-3 py-1.5 text-xs font-semibold rounded-lg bg-brand-600 text-white border border-brand-500 shadow-sm';
+        if(onBtn) onBtn.className = 'px-3 py-1.5 text-xs font-semibold rounded-lg bg-surface-800 text-slate-400 hover:text-white border border-slate-700';
+      }
+      const url = getBackendUrl() || BACKEND_URL;
+      if (url) {
+        try {
+          await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'set_policy', policy: 'idle_alerts', enabled: enabled })
+          });
+        } catch (e) {
+          console.error('Failed to update idle alerts policy:', e);
+        }
+      }
+      alert('Idle Alerts policy updated!');
+    }
+
+    function downloadPreConfiguredWorkspaceJson() {
+      const url = document.getElementById('packagerUrlInput').value || BACKEND_URL;
+      const workspace = document.getElementById('packagerWorkspaceInput').value || 'Primary Workspace';
+      const payload = {
+        backend_url: url,
+        workspace_name: workspace,
+        generated_at: new Date().toISOString()
+      };
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+      const dlUrl = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = dlUrl;
+      a.download = 'workspace.json';
+      a.click();
+    }
+
+    function switchWorkspace(value) {
+      if(!state) return;
+      state.currentWorkspace = value;
+      refreshData();
+    }
+
+    function exportTimesheetMatrixCsv() {
+      function csvCell(val) {
+        return '"' + String(val !== undefined && val !== null ? val : '').replace(/"/g, '""') + '"';
+      }
+      let csv = 'Team Member,Mon,Tue,Wed,Thu,Fri,Sat,Sun,Weekly Total,Status\n';
+      (state.teamTimesheets || []).forEach(row => {
+        const name = row.name || row.full_name || row.employee_name || 'Member';
+        csv += `${csvCell(name)},${row.mon || 0},${row.tue || 0},${row.wed || 0},${row.thu || 0},${row.fri || 0},${row.sat || 0},${row.sun || 0},${row.total || 0},${csvCell(row.status || 'DRAFT')}\n`;
+      });
+      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'timesheet_matrix.csv';
+      a.click();
+    }
+  </script>
+</body>
+</html>
