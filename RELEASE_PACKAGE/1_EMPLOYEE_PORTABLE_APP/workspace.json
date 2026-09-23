@@ -1,5 +1,6 @@
 {
-  "backend_url": "http://127.0.0.1:45678",
-  "workspace_name": "Automated Test Workspace",
-  "generated_at": "2026-09-18T13:09:42.3023625Z"
+  "backend_url": "https://script.google.com/macros/s/YOUR_DEPLOYMENT_ID_HERE/exec",
+  "version": "2.3.1",
+  "auto_connect": true,
+  "note": "Replace YOUR_DEPLOYMENT_ID_HERE with your actual Apps Script web app deployment URL"
 }

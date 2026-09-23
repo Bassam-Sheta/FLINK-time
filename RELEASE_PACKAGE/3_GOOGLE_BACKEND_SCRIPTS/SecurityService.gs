@@ -170,10 +170,13 @@ const SecurityService = {
    */
   constantTimeEquals(a, b) {
     if (typeof a !== 'string' || typeof b !== 'string') return false;
-    if (a.length !== b.length) return false;
-    let mismatch = 0;
-    for (let i = 0; i < a.length; i++) {
-      mismatch |= (a.charCodeAt(i) ^ b.charCodeAt(i));
+    // Use the longer length to avoid leaking length information via timing
+    const len = Math.max(a.length, b.length);
+    let mismatch = a.length !== b.length ? 1 : 0;
+    for (let i = 0; i < len; i++) {
+      const charA = i < a.length ? a.charCodeAt(i) : 0;
+      const charB = i < b.length ? b.charCodeAt(i) : 0;
+      mismatch |= (charA ^ charB);
     }
     return mismatch === 0;
   },
@@ -410,10 +413,13 @@ const SecurityService = {
     const cleanCode = String(code).trim();
     if (cleanCode.length !== 6) return { valid: false, timeStep: null };
 
+    // Decrypt once here — generateTotpCode will see it's already plaintext and pass through
     const rawSecret = this.decryptSecret(secret);
 
     for (let errorStep = -window; errorStep <= window; errorStep++) {
       const checkTime = timeMs + (errorStep * stepSeconds * 1000);
+      // rawSecret is already decrypted; generateTotpCode's internal decryptSecret
+      // will detect it's not prefixed with 'enc$v1$' and pass through safely
       const expectedCode = this.generateTotpCode(rawSecret, checkTime, stepSeconds, 6);
       if (this.constantTimeEquals(cleanCode, expectedCode)) {
         return {

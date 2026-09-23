@@ -19,188 +19,26 @@
  * 5. Corrupted Restores: Mitigated by transactional schema validation prior to row replacement.
  */
 
-const SCRIPT_VERSION = "2.3.0-ENTERPRISE-RESTORE";
+const SCRIPT_VERSION = "2.3.1-ENTERPRISE-FIXES";
 const LOCK_TIMEOUT_MS = 15000; // 15-second maximum wait for atomic write lock
 const CACHE_TTL_SECONDS = 300; // 5-minute memory cache lifetime for read operations
 
 /**
- * HTTP GET Router: Handles read-only requests, health checks, and Admin UI serving.
- * 
- * RATIONALE:
- * Separating GET (read-only) from POST (transactional mutations) allows Google's global CDN
- * and Apps Script runtime to process metadata queries with sub-second response times.
- * 
- * POTENTIAL BUGS AVOIDED:
- * - Browser caching stale project lists: Mitigated by CacheService invalidation on CRUD.
- * - Unauthorized UI access: Can be embedded inside an authenticated Google Site.
+ * NOTE: doGet() and doPost() are defined in App.gs as the canonical HTTP entry points.
+ * Legacy versions previously existed here and have been removed to eliminate the
+ * duplicate global function conflict (Google Apps Script only allows one doGet/doPost).
+ *
+ * This file now contains only legacy helper functions called by multiple services:
+ * - handleFullDatabaseRestore, handleBatchSyncToMasterVault, getTimeEntriesSheetForYear
+ * - handleEntityCrud, handleSubmitTimesheet, handleApprovalAction
+ * - queryReports, getWorkspaceManifest, getActiveWorkforceRadar
+ * - handleDataAnalystExport, recordAuditLog, sanitizeCellValue
+ * - getUserRecord, updateUserLastActive, jsonResponse, jsonError
  */
-function doGet(e) {
-  try {
-    const params = e ? e.parameter : {};
-    const action = params.action;
 
-    // Default route: Serve the Super Admin Single Page Application (SPA)
-    if (!action || action === 'admin_ui') {
-      return HtmlService.createHtmlOutputFromFile('admin_ui')
-        .setTitle('Ultra-Account Super Admin Controller')
-        .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL)
-        .addMetaTag('viewport', 'width=device-width, initial-scale=1');
-    }
-
-    // Health check endpoint for client automated connection pairing
-    if (action === 'ping') {
-      return jsonResponse({
-        status: 'OK',
-        version: SCRIPT_VERSION,
-        role: 'SUPER_ADMIN_GATEWAY',
-        active_year: new Date().getFullYear(),
-        timestamp: new Date().toISOString()
-      });
-    }
-
-    // Returns all clients, projects, tasks, and tags (cached in RAM)
-    if (action === 'workspace_manifest') {
-      return jsonResponse(getWorkspaceManifest(params.user_email));
-    }
-
-    // Real-time workforce radar (active timers, ongoing window titles, latest screenshots)
-    if (action === 'get_active_radar') {
-      return jsonResponse(getActiveWorkforceRadar());
-    }
-
-    // Aggregates reports and analytics across projects and users
-    if (action === 'get_reports') {
-      return jsonResponse(queryReports(params));
-    }
-
-    // Universal Data Analyst Export endpoint (CSV & JSON format)
-    if (action === 'export_analyst_data') {
-      return handleDataAnalystExport(params);
-    }
-
-    return jsonError('Unknown GET action: ' + action, 400);
-  } catch (err) {
-    Logger.log('doGet Critical Failure: ' + err.toString());
-    return jsonError(err.toString(), 500);
-  }
-}
-
-/**
- * HTTP POST Router: Handles all transactional mutations, batch syncs, and database restores.
- * 
- * RATIONALE:
- * All state modifications must pass through a concurrency lock to guarantee ACID compliance
- * on Google Sheets. Without LockService, two employees starting a timer at the exact same
- * millisecond would overwrite each other's spreadsheet rows.
- * 
- * POTENTIAL BUGS AVOIDED:
- * - Lost updates & row collisions: Prevented by LockService tryLock(15000).
- * - Malformed JSON bodies: Caught and returned with HTTP 400 Bad Request.
- * - Suspended user access: Checked against USERS table whitelist before processing.
- */
-function doPost(e) {
-  const lock = LockService.getScriptLock();
-  try {
-    // Acquire atomic mutex lock
-    const hasLock = lock.tryLock(LOCK_TIMEOUT_MS);
-    if (!hasLock) {
-      return jsonError('System busy: concurrent write lock timeout. Client will retry with jitter.', 429);
-    }
-
-    if (!e || !e.postData || !e.postData.contents) {
-      return jsonError('Missing POST request body', 400);
-    }
-
-    let payload;
-    try {
-      payload = JSON.parse(e.postData.contents);
-    } catch (parseErr) {
-      return jsonError('Malformed JSON payload: ' + parseErr.message, 400);
-    }
-
-    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
-      return jsonError('Invalid JSON payload: expected JSON object', 400);
-    }
-    const action = payload.action;
-
-    // Optional auth token verification if client provides one
-    if (payload.auth_token && !verifyAuthToken(payload.auth_token)) {
-      return jsonError('Unauthorized: Invalid auth token.', 401);
-    }
-
-    // Security Gate: Reject requests from suspended, inactive, or deleted users immediately
-    const userEmail = (payload.user && payload.user.email) ? payload.user.email : (action === 'auth_handshake' ? (payload.email || (payload.user ? payload.user.email : null)) : null);
-    if (userEmail) {
-      const userRecord = getUserRecord(userEmail);
-      if (userRecord) {
-        if (userRecord.status === 'SUSPENDED' || userRecord.status === 'INACTIVE' || userRecord.status === 'DELETED') {
-          return jsonError('Forbidden: Your account is ' + userRecord.status.toLowerCase() + '. Access denied.', 403);
-        }
-      } else {
-        // User record does not exist in USERS table
-        if (action === 'sync_batch' || action === 'batch_sync' || action === 'submit_timesheet') {
-          return jsonError('Forbidden: User account does not exist or has been deleted.', 403);
-        }
-        if (action === 'auth_handshake' && isUserDeleted(userEmail)) {
-          return jsonError('Forbidden: User account has been deleted by administrator.', 403);
-        }
-      }
-    }
-
-    let result;
-    switch (action) {
-      case 'setup_db':
-        result = setupDatabase(payload.year);
-        break;
-      case 'auth_handshake':
-        result = handleAuthHandshake(payload);
-        break;
-      case 'sync_batch':
-      case 'batch_sync':
-        result = handleBatchSyncToMasterVault(payload);
-        break;
-      case 'submit_timesheet':
-        result = handleSubmitTimesheet(payload);
-        break;
-      case 'approval_action':
-        result = handleApprovalAction(payload);
-        break;
-      case 'entity_crud':
-        result = handleEntityCrud(payload);
-        break;
-      case 'incident_report':
-        result = handleIncidentReport(payload);
-        break;
-      case 'query_reports':
-        result = queryReports(payload.filters);
-        break;
-      case 'restore_database':
-        result = handleFullDatabaseRestore(payload);
-        break;
-      case 'create_backup':
-        result = createNightlyBackupSnapshot();
-        break;
-      case 'set_policy':
-        result = handleSetPolicy(payload);
-        break;
-      default:
-        result = { error: 'Unknown POST action: ' + action };
-        break;
-    }
-
-    if (result && result.status === 'ERROR') {
-      return jsonError(result.error || result.message || 'Error processing request', result.code || 400);
-    }
-
-    return jsonResponse(result);
-  } catch (err) {
-    Logger.log('doPost Critical Failure: ' + err.toString());
-    return jsonError(err.toString(), 500);
-  } finally {
-    // Always release lock even if exceptions occurred to prevent lock starvation
-    lock.releaseLock();
-  }
-}
+// Legacy doPost() removed — see App.gs for the canonical HTTP POST handler.
+// The helper functions below (handleBatchSyncToMasterVault, handleEntityCrud, etc.)
+// are still available as global functions called by the App.gs dispatcher.
 
 // ============================================================================
 // FULL DATABASE DISASTER RECOVERY & RESTORE ENGINE
@@ -293,7 +131,7 @@ function handleFullDatabaseRestore(payload) {
   }
 
   // Clear in-memory script cache to ensure fresh data is served immediately
-  CacheService.getScriptCache().removeAll(['manifest_all']);
+  invalidateManifestCache();
 
   // Record tamper-evident audit entry for forensic compliance
   recordAuditLog(
@@ -836,6 +674,41 @@ function handleAuthHandshake(payload) {
   return { status: 'SUCCESS', user: user, workspace: getWorkspaceManifest(email) };
 }
 
+/**
+ * Invalidates ALL manifest cache entries (both global and per-user).
+ * CacheService.getScriptCache() has no "clear all" or "remove by prefix" method,
+ * so we track known user emails from the USERS sheet and remove each key individually.
+ */
+function invalidateManifestCache() {
+  try {
+    const cache = CacheService.getScriptCache();
+    const keysToRemove = ['manifest_all'];
+
+    // Also clear per-user manifest caches
+    try {
+      const ss = SpreadsheetApp.getActiveSpreadsheet();
+      const usersSheet = ss.getSheetByName('USERS');
+      if (usersSheet) {
+        const data = usersSheet.getDataRange().getValues();
+        const headers = data[0].map(h => String(h).trim().toLowerCase());
+        const emailIdx = headers.indexOf('email');
+        if (emailIdx !== -1) {
+          for (let i = 1; i < data.length; i++) {
+            const email = String(data[i][emailIdx]).trim();
+            if (email) keysToRemove.push('manifest_' + email);
+          }
+        }
+      }
+    } catch (e) {
+      // If USERS sheet lookup fails, at least clear the global key
+    }
+
+    cache.removeAll(keysToRemove);
+  } catch (e) {
+    // Cache invalidation is best-effort — don't crash the caller
+  }
+}
+
 function getWorkspaceManifest(userEmail) {
   const cacheKey = 'manifest_' + (userEmail || 'all');
   const cache = CacheService.getScriptCache();
@@ -1152,7 +1025,7 @@ function handleEntityCrud(payload) {
     sheet.appendRow(row);
 
     // Invalidate manifest cache so all clients see the new project immediately
-    CacheService.getScriptCache().removeAll(['manifest_all']);
+    invalidateManifestCache();
     recordAuditLog(payload.actor_user_id || actorEmail || 'admin', 'ENTITY_CREATE', table, newId, null, recordData);
     return { status: 'SUCCESS', action: 'CREATE', entity_id: newId, data: recordData };
   }
@@ -1178,7 +1051,7 @@ function handleEntityCrud(payload) {
           sheet.getRange(rowIndex, colIdx + 1).setValue(sanitizeCellValue(val));
         }
       }
-      CacheService.getScriptCache().removeAll(['manifest_all']);
+      invalidateManifestCache();
       recordAuditLog(payload.actor_user_id || actorEmail || 'admin', 'ENTITY_UPDATE', table, targetId, null, updateFields);
       return { status: 'SUCCESS', action: 'UPDATE', entity_id: targetId, data: updateFields };
     }
@@ -1212,7 +1085,7 @@ function handleEntityCrud(payload) {
         const statusCol = headers.indexOf('status') + 1;
         if (statusCol > 0) sheet.getRange(rowIndex, statusCol).setValue('ARCHIVED');
       }
-      CacheService.getScriptCache().removeAll(['manifest_all']);
+      invalidateManifestCache();
       recordAuditLog(payload.actor_user_id || actorEmail || 'admin', 'ENTITY_' + crudAction, table, targetId, null, { status: 'DELETED' });
       return { status: 'SUCCESS', action: crudAction, entity_id: targetId };
     }
@@ -1357,12 +1230,18 @@ function handleApprovalAction(payload) {
 
   if (apprSheet) {
     const data = apprSheet.getDataRange().getValues();
+    // Use header row to find column indices dynamically instead of hardcoding
+    const headers = data[0].map(h => String(h).trim().toLowerCase());
+    const statusCol = headers.indexOf('status');
+    const reviewerCol = headers.indexOf('reviewer_user_id');
+    const reviewedAtCol = headers.indexOf('reviewed_at');
+
     for (let i = 1; i < data.length; i++) {
       if (String(data[i][0]) === String(payload.approval_id)) {
         if (!targetUserId) targetUserId = data[i][1];
-        apprSheet.getRange(i + 1, 7).setValue(targetStatus);
-        apprSheet.getRange(i + 1, 8).setValue(payload.reviewer_id || 'admin');
-        apprSheet.getRange(i + 1, 11).setValue(now);
+        if (statusCol !== -1) apprSheet.getRange(i + 1, statusCol + 1).setValue(targetStatus);
+        if (reviewerCol !== -1) apprSheet.getRange(i + 1, reviewerCol + 1).setValue(payload.reviewer_id || 'admin');
+        if (reviewedAtCol !== -1) apprSheet.getRange(i + 1, reviewedAtCol + 1).setValue(now);
         break;
       }
     }
@@ -1425,11 +1304,22 @@ function handleSetPolicy(payload) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const cfgSheet = ss.getSheetByName('CONFIGS');
   if (!cfgSheet) return { status: 'ERROR', message: 'CONFIGS sheet not found' };
-  
+
+  // Whitelist of allowed policy keys to prevent arbitrary config injection
+  const ALLOWED_POLICY_KEYS = [
+    'IDLE_ALERTS_ENABLED', 'BLUR_SCREENSHOTS_BY_DEFAULT', 'SCREENSHOTS_ENABLED',
+    'SCREENSHOT_INTERVAL_MINUTES', 'IDLE_THRESHOLD_SECONDS', 'AUTO_LOCK_TIMESHEETS',
+    'DLP_SCANNING_ENABLED', 'DEFAULT_CURRENCY', 'WORKSPACE_NAME'
+  ];
+
   let key = payload.key || '';
   if (payload.policy === 'idle_alerts') key = 'IDLE_ALERTS_ENABLED';
   else if (payload.policy === 'blur') key = 'BLUR_SCREENSHOTS_BY_DEFAULT';
   else if (payload.policy === 'screenshots') key = 'SCREENSHOTS_ENABLED';
+
+  if (!key || !ALLOWED_POLICY_KEYS.includes(key)) {
+    return { status: 'ERROR', message: 'Invalid or disallowed policy key: ' + key };
+  }
   
   const val = String(payload.enabled !== undefined ? payload.enabled : (payload.value !== undefined ? payload.value : 'true'));
   const now = new Date().toISOString();
@@ -1448,7 +1338,7 @@ function handleSetPolicy(payload) {
     cfgSheet.appendRow([key, val, 'Runtime policy setting', now]);
   }
   
-  CacheService.getScriptCache().removeAll(['manifest_all']);
+  invalidateManifestCache();
   recordAuditLog(payload.actor_email || 'admin', 'POLICY_UPDATE', 'CONFIGS', key, null, { key: key, value: val });
   return { status: 'SUCCESS', policy: key, value: val };
 }
@@ -1567,16 +1457,22 @@ function handleDataAnalystExport(params) {
   });
 
   const csvContent = csvLines.join('\r\n');
+  // NOTE: downloadAsFile() is NOT a valid Apps Script method on TextOutput.
+  // Setting MimeType.CSV is sufficient — the browser will handle it as a download.
   return ContentService.createTextOutput(csvContent)
-    .setMimeType(ContentService.MimeType.CSV)
-    .downloadAsFile('UltraAccount_Analytics_' + year + '.csv');
+    .setMimeType(ContentService.MimeType.CSV);
 }
 
-// TODO: Wire this to Google OAuth id_token verification
+/**
+ * @deprecated Legacy auth token verification stub.
+ * Authentication is now handled by SessionService.validateSession() via App.gs.
+ * This function returns false (deny-by-default) to prevent accidental auth bypass.
+ */
 function verifyAuthToken(token) {
   if (!token) return false;
-  // Stub for token validation
-  return true;
+  console.warn('verifyAuthToken() is deprecated. Use SessionService.validateSession() instead.');
+  // SECURITY: deny-by-default — legacy token verification is not implemented
+  return false;
 }
 
 function getOrCreateSubFolder(parent, name) {

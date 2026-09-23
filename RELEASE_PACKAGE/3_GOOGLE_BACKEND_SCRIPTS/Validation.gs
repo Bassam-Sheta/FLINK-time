@@ -55,6 +55,19 @@ const Validation = {
     if (password.length > CONSTANTS.LIMITS.MAX_PASSWORD_LENGTH) {
       throw new AppError(ERROR_CODES.VALIDATION_ERROR, `Password cannot exceed ${CONSTANTS.LIMITS.MAX_PASSWORD_LENGTH} characters.`);
     }
+    // Complexity: require at least one uppercase, one lowercase, one digit, one special character
+    if (!/[A-Z]/.test(password)) {
+      throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'Password must contain at least one uppercase letter.');
+    }
+    if (!/[a-z]/.test(password)) {
+      throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'Password must contain at least one lowercase letter.');
+    }
+    if (!/[0-9]/.test(password)) {
+      throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'Password must contain at least one digit.');
+    }
+    if (!/[^A-Za-z0-9]/.test(password)) {
+      throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'Password must contain at least one special character.');
+    }
     return password;
   },
 
@@ -88,6 +101,12 @@ const Validation = {
   },
 
   generateId(prefix = 'ID') {
+    // Use Utilities.getUuid() for better entropy than Math.random()
+    if (typeof Utilities !== 'undefined' && Utilities.getUuid) {
+      const uuid = Utilities.getUuid().replace(/-/g, '').substring(0, 12);
+      return `${prefix}-${uuid}`.toUpperCase();
+    }
+    // Fallback for testing environments without Apps Script Utilities
     const randomHex = () => Math.floor((1 + Math.random()) * 0x10000).toString(16).substring(1);
     const ts = Date.now().toString(36);
     return `${prefix}-${ts}-${randomHex()}${randomHex()}`.toUpperCase();

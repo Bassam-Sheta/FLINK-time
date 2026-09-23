@@ -1,8 +1,8 @@
 /**
  * FLINK Time & Workforce Platform — System Constants & Schema Specifications
  * Obeying strict Google Workspace constraints:
- * - Master Control Sheet Schema (11 Tabs)
- * - Workspace Sheet Schema (18 Tabs)
+ * - Master Control Sheet Schema (18 Tabs)
+ * - Workspace Sheet Schema (20 Tabs)
  * - 3-Role RBAC Model (SUPER_ADMIN, ADMIN, USER)
  * - Admin Max 3 Active Workspaces
  */
