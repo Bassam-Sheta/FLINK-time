@@ -5,9 +5,35 @@
  */
 
 function doGet(e) {
+  const params = e ? e.parameter : {};
+  const action = params ? params.action : '';
+  const view = params ? params.view : '';
+
+  // Serve Super Admin UI if requested explicitly via action or view parameter
+  if (action === 'admin_ui' || view === 'admin') {
+    try {
+      const template = HtmlService.createTemplateFromFile('admin_ui');
+      const output = template.evaluate();
+      output.setTitle('Ultra-Account Super Admin Controller');
+      output.setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
+      output.addMetaTag('viewport', 'width=device-width, initial-scale=1');
+      return output;
+    } catch (adminErr) {
+      try {
+        return HtmlService.createHtmlOutputFromFile('admin_ui')
+          .setTitle('Ultra-Account Super Admin Controller')
+          .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL)
+          .addMetaTag('viewport', 'width=device-width, initial-scale=1');
+      } catch (e2) {
+        return ContentService.createTextOutput('Admin UI Template not found: ' + adminErr.message)
+          .setMimeType(ContentService.MimeType.TEXT);
+      }
+    }
+  }
+
   // If action query parameter is passed, treat as GET API request
-  if (e && e.parameter && e.parameter.action) {
-    return handleApiRequest(e.parameter.action, e.parameter);
+  if (action) {
+    return handleApiRequest(action, params);
   }
 
   // Otherwise serve the Google Workspace-Native Web Application UI
@@ -164,45 +190,162 @@ const ACTION_PERMISSIONS = {
  * Universal API Request Handler
  */
 function handleApiRequest(action, requestData) {
+  // 1. Check if action is handled by modern modular App RBAC matrix
   const perm = ACTION_PERMISSIONS[action];
-  if (!perm) {
-    return buildJsonResponse({
-      ok: false,
-      error: { code: ERROR_CODES.NOT_FOUND, message: `Unknown or forbidden API action: ${action}` }
-    });
-  }
+  if (perm) {
+    let lock = null;
+    if (perm.isWrite && typeof LockService !== 'undefined' && LockService.getScriptLock) {
+      try {
+        lock = LockService.getScriptLock();
+        lock.waitLock(15000); // Wait up to 15 seconds for concurrent operations
+      } catch (lockErr) {
+        return buildJsonResponse({
+          ok: false,
+          error: { code: ERROR_CODES.CONFLICT, message: 'Server is busy processing concurrent writes. Please retry.' }
+        });
+      }
+    }
 
-  let lock = null;
-  if (perm.isWrite && typeof LockService !== 'undefined' && LockService.getScriptLock) {
     try {
-      lock = LockService.getScriptLock();
-      lock.waitLock(15000); // Wait up to 15 seconds for concurrent operations
-    } catch (lockErr) {
+      const result = dispatchAction(action, requestData);
+      return buildJsonResponse({ ok: true, data: result });
+    } catch (err) {
+      if (err instanceof AppError) {
+        return buildJsonResponse(err.toJSON());
+      }
       return buildJsonResponse({
         ok: false,
-        error: { code: ERROR_CODES.CONFLICT, message: 'Server is busy processing concurrent writes. Please retry.' }
+        error: {
+          code: ERROR_CODES.INTERNAL_ERROR,
+          message: err.message || 'An unexpected internal error occurred.'
+        }
       });
+    } finally {
+      if (lock) {
+        try { lock.releaseLock(); } catch (e) {}
+      }
     }
   }
 
+  // 2. Fallback: Ultra-Account Portable Desktop Tracker & Super Admin Controller actions
+  return handleDesktopAndControllerAction(action, requestData);
+}
+
+/**
+ * Handles actions from UltraAccount.exe desktop tracker, UltraPackager.exe,
+ * and admin_ui.html Super Admin Controller.
+ */
+function handleDesktopAndControllerAction(action, payload) {
   try {
-    const result = dispatchAction(action, requestData);
-    return buildJsonResponse({ ok: true, data: result });
-  } catch (err) {
-    if (err instanceof AppError) {
-      return buildJsonResponse(err.toJSON());
+    // Read-only GET actions
+    if (action === 'ping') {
+      return jsonResponse({
+        status: 'OK',
+        version: typeof SCRIPT_VERSION !== 'undefined' ? SCRIPT_VERSION : '2.3.1',
+        role: 'SUPER_ADMIN_GATEWAY',
+        active_year: new Date().getFullYear(),
+        timestamp: new Date().toISOString()
+      });
     }
-    return buildJsonResponse({
-      ok: false,
-      error: {
-        code: ERROR_CODES.INTERNAL_ERROR,
-        message: err.message || 'An unexpected internal error occurred.'
+
+    if (action === 'workspace_manifest') {
+      const email = payload.user_email || payload.email || (payload.user && payload.user.email) || null;
+      return jsonResponse(getWorkspaceManifest(email));
+    }
+
+    if (action === 'get_active_radar') {
+      return jsonResponse(getActiveWorkforceRadar());
+    }
+
+    if (action === 'get_reports') {
+      return jsonResponse(queryReports(payload));
+    }
+
+    if (action === 'export_analyst_data') {
+      return handleDataAnalystExport(payload);
+    }
+
+    // Mutating POST actions requiring concurrency lock
+    const mutatingActions = [
+      'setup_db', 'auth_handshake', 'sync_batch', 'batch_sync', 'submit_timesheet',
+      'approval_action', 'entity_crud', 'incident_report', 'query_reports',
+      'restore_database', 'create_backup', 'set_policy'
+    ];
+
+    if (!mutatingActions.includes(action)) {
+      return buildJsonResponse({
+        ok: false,
+        error: { code: ERROR_CODES.NOT_FOUND, message: `Unknown or forbidden API action: ${action}` }
+      });
+    }
+
+    let lock = null;
+    if (typeof LockService !== 'undefined' && LockService.getScriptLock) {
+      try {
+        lock = LockService.getScriptLock();
+        const hasLock = lock.tryLock(15000);
+        if (!hasLock) {
+          return jsonError('System busy: concurrent write lock timeout. Client will retry with jitter.', 429);
+        }
+      } catch (lockErr) {
+        return jsonError('Lock error: ' + lockErr.message, 500);
       }
-    });
-  } finally {
-    if (lock) {
-      try { lock.releaseLock(); } catch (e) {}
     }
+
+    try {
+      let result;
+      switch (action) {
+        case 'setup_db':
+          result = setupDatabase(payload.year);
+          break;
+        case 'auth_handshake':
+          result = handleAuthHandshake(payload);
+          break;
+        case 'sync_batch':
+        case 'batch_sync':
+          result = handleBatchSyncToMasterVault(payload);
+          break;
+        case 'submit_timesheet':
+          result = handleSubmitTimesheet(payload);
+          break;
+        case 'approval_action':
+          result = handleApprovalAction(payload);
+          break;
+        case 'entity_crud':
+          result = handleEntityCrud(payload);
+          break;
+        case 'incident_report':
+          result = handleIncidentReport(payload);
+          break;
+        case 'query_reports':
+          result = queryReports(payload.filters || payload);
+          break;
+        case 'restore_database':
+          result = handleFullDatabaseRestore(payload);
+          break;
+        case 'create_backup':
+          result = createNightlyBackupSnapshot();
+          break;
+        case 'set_policy':
+          result = handleSetPolicy(payload);
+          break;
+        default:
+          result = { error: 'Unknown POST action: ' + action };
+          break;
+      }
+
+      if (result && result.status === 'ERROR') {
+        return jsonError(result.error || result.message || 'Error processing request', result.code || 400);
+      }
+
+      return jsonResponse(result);
+    } finally {
+      if (lock) {
+        try { lock.releaseLock(); } catch (e) {}
+      }
+    }
+  } catch (err) {
+    return jsonError(err.toString(), 500);
   }
 }
 

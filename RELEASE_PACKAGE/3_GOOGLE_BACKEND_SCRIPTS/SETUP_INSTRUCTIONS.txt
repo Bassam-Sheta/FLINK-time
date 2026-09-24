@@ -1,25 +1,91 @@
 ================================================================================
-FLINK TIME & WORKFORCE PLATFORM — BACKEND DEPLOYMENT INSTRUCTIONS
+FLINK TIME & WORKFORCE PLATFORM — COMPLETE SETUP & DEPLOYMENT GUIDE
 ================================================================================
-1. Open Google Sheets at https://sheets.new and name it:
-   "FLINK_Time_Master_Control"
 
+STEP 1: CREATE GOOGLE SPREADSHEET (MASTER CONTROL VAULT)
+--------------------------------------------------------------------------------
+1. Open Google Sheets at https://sheets.new and title it:
+   "FLINK_Time_Master_Control"
 2. Go to Extensions > Apps Script.
 
-3. In the Apps Script project editor, copy all files from this directory into the editor:
-   - All .gs script files (Constants.gs, App.gs, AuthService.gs, MasterRepository.gs,
-     JobService.gs, IntegrityService.gs, etc.)
-   - index.html (Create HTML file named "index" and paste contents)
-   - Enable "Show appsscript.json" in Project Settings and paste appsscript.json
+STEP 2: UPLOAD BACKEND SCRIPTS & HTML FILES
+--------------------------------------------------------------------------------
+In the Apps Script editor:
+1. Create/paste all .gs script files from this folder:
+   - Constants.gs
+   - Errors.gs
+   - Validation.gs
+   - SecurityService.gs
+   - AuthService.gs
+   - SessionService.gs
+   - MasterRepository.gs
+   - SheetRepository.gs
+   - WorkspaceRouter.gs
+   - WorkspaceService.gs
+   - UserService.gs
+   - TimerService.gs
+   - TimeEntryService.gs
+   - TimesheetService.gs
+   - ApprovalService.gs
+   - MasterDataServices.gs
+   - AdminRequestService.gs
+   - AuthorizationService.gs
+   - ReportService.gs
+   - RollupService.gs
+   - JobService.gs
+   - DashboardService.gs
+   - BackupAndAuditServices.gs
+   - ExportAndMigrationServices.gs
+   - IntegrityService.gs
+   - SetupService.gs
+   - SpreadsheetSchema.gs
+   - Code.gs
+   - App.gs
 
-4. Run MigrationService.bootstrapMasterSheet (or SetupService.processStep) to
-   initialize all 18 Master Control Sheet tabs.
+2. Create TWO HTML files in the Apps Script project:
+   - File > New > HTML: name it "index" (paste contents of index.html)
+   - File > New > HTML: name it "admin_ui" (paste contents of admin_ui.html)
 
-5. Click Deploy > New deployment > Web app:
-   - Description: FLINK Time Platform Production v1.0
-   - Execute as: Me
-   - Who has access: Anyone
+3. Update project manifest:
+   - In Apps Script Settings (gear icon), check "Show 'appsscript.json' manifest file in editor"
+   - In appsscript.json, paste the contents of appsscript.json from this folder.
 
-6. Copy the deployed Web App URL and embed it into your Google Site!
-   Refer to docs/DEPLOYMENT_GUIDE.md and docs/OPERATIONS_RUNBOOK.md for full details.
+STEP 3: INITIALIZE DATABASE SCHEMA
+--------------------------------------------------------------------------------
+1. In the Apps Script editor toolbar, select the function "setupDatabase" or
+   "MigrationService.bootstrapMasterSheet" from the function dropdown.
+2. Click "Run" and grant the required permissions when prompted.
+3. Your Google Sheet will automatically be populated with all relational tabs,
+   frozen headers, validations, and initial admin records.
+
+STEP 4: DEPLOY WEB APP
+--------------------------------------------------------------------------------
+1. In the top right, click Deploy > New deployment.
+2. Select type: "Web app" (gear icon > Web app).
+3. Configure settings:
+   - Description: "FLINK Time Platform Production"
+   - Execute as: "Me" (your Google account)
+   - Who has access: "Anyone"
+4. Click "Deploy".
+5. COPY THE WEB APP URL (ends in /exec).
+   Format: https://script.google.com/macros/s/AKfycb.../exec
+
+STEP 5: CONNECT CLIENTS
+--------------------------------------------------------------------------------
+A. Employee Portable App (1_EMPLOYEE_PORTABLE_APP):
+   1. Open workspace.json in 1_EMPLOYEE_PORTABLE_APP.
+   2. Set "backend_url" to your copied Web App URL.
+   3. Distribute the folder (UltraAccount.exe + workspace.json) to employees.
+   4. Employees double-click UltraAccount.exe or Launch_Portable_Tracker.bat.
+
+B. Super Admin Controller (2_SUPER_ADMIN_CONTROLLER):
+   1. Double-click Launch_Admin_Controller.bat (or open admin_ui.html in browser).
+   2. When prompted for Backend URL (or in Settings), paste your Web App URL.
+   3. You can also access the Admin Controller directly in any browser at:
+      <YOUR_WEB_APP_URL>?view=admin
+
+C. FLINK Web Platform (Google Sites / Direct Web):
+   - Access directly in browser: <YOUR_WEB_APP_URL>
+   - Or embed inside Google Sites: Insert > Embed > By URL > paste Web App URL.
+
 ================================================================================
