@@ -49,8 +49,12 @@ const WorkspaceService = {
       // Populate WorkspaceInfo row
       const infoSheet = newSpreadsheet.getSheetByName(CONSTANTS.WORKSPACE_TABS.WORKSPACE_INFO);
       if (infoSheet) {
+        const workspaceCode = workspacePayload.code
+          ? Validation.sanitizeCellValue(String(workspacePayload.code).trim().toUpperCase())
+          : Validation.sanitizeCellValue(workspaceId);
         infoSheet.appendRow([
           workspaceId,
+          workspaceCode,
           Validation.sanitizeCellValue(workspaceName),
           CONSTANTS.WORKSPACE_STATUS.ACTIVE,
           timezone,
