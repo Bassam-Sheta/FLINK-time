@@ -181,19 +181,9 @@ function handleApiRequest(action, requestData, httpMethod = 'POST') {
         }
       });
     }
-    let lock = null;
-    if (perm.isWrite && typeof LockService !== 'undefined' && LockService.getScriptLock) {
-      try {
-        lock = LockService.getScriptLock();
-        lock.waitLock(15000); // Wait up to 15 seconds for concurrent operations
-      } catch (lockErr) {
-        return buildJsonResponse({
-          ok: false,
-          error: { code: ERROR_CODES.CONFLICT, message: 'Server is busy processing concurrent writes. Please retry.' }
-        });
-      }
-    }
-
+    // Transactional locking is owned by the service performing the mutation.
+    // Do not take a dispatcher-wide ScriptLock here: many services already lock
+    // internally and nested/global locking serializes unrelated workspace writes.
     try {
       const result = dispatchAction(action, requestData);
       return buildJsonResponse({ ok: true, data: result });
@@ -208,10 +198,6 @@ function handleApiRequest(action, requestData, httpMethod = 'POST') {
           message: err.message || 'An unexpected internal error occurred.'
         }
       });
-    } finally {
-      if (lock) {
-        try { lock.releaseLock(); } catch (e) {}
-      }
     }
   }
 
