@@ -147,6 +147,120 @@ const TimerService = {
   },
 
   /**
+   * Finalizes an already-resolved active timer while the caller owns the ScriptLock.
+   * Used by normal timer stop and administrative user deactivation without nested locks.
+   */
+  _finalizeActiveTimerLocked(ownerContext, workspaceId, activeTimer, stopPayload = {}, auditActorContext = null) {
+    if (!activeTimer) {
+      throw new AppError(ERROR_CODES.TIMER_NOT_FOUND, 'No running timer found in this workspace.', 404);
+    }
+
+    const now = new Date();
+    const endUTC = now.toISOString();
+    const startedAtMs = new Date(activeTimer.StartedAtUTC).getTime();
+    if (isNaN(startedAtMs)) {
+      throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'Active timer has an invalid StartedAtUTC value.', 400);
+    }
+
+    let durationSeconds = Math.max(1, Math.round((now.getTime() - startedAtMs) / 1000));
+    const maxSeconds = CONSTANTS.LIMITS.MAX_SINGLE_ENTRY_HOURS * 3600;
+    if (durationSeconds > maxSeconds) durationSeconds = maxSeconds;
+
+    const mergedTrackingPayload = {
+      projectId: stopPayload.projectId !== undefined ? stopPayload.projectId : activeTimer.ProjectID,
+      taskId: stopPayload.taskId !== undefined ? stopPayload.taskId : activeTimer.TaskID,
+      description: stopPayload.description !== undefined ? stopPayload.description : activeTimer.Description,
+      tags: stopPayload.tags !== undefined ? stopPayload.tags : activeTimer.TagIDs,
+      billable: stopPayload.billable !== undefined ? stopPayload.billable : activeTimer.Billable
+    };
+
+    const tracking = TrackingPolicyService.validateTrackingContext(
+      ownerContext,
+      workspaceId,
+      mergedTrackingPayload,
+      { manual: false, enforceRequired: false }
+    );
+
+    const hourlyRateSnapshot = tracking.project ? (parseFloat(tracking.project.HourlyRate) || 0) : 0;
+    const costRateSnapshot = tracking.project ? (parseFloat(tracking.project.CostRate) || 0) : 0;
+    const entryId = Validation.generateId('ENT');
+
+    const timeEntry = {
+      EntryID: entryId,
+      UserID: ownerContext.userId,
+      ProjectID: tracking.projectId,
+      TaskID: tracking.taskId,
+      Description: tracking.description,
+      Tags: tracking.tagIdsCsv,
+      StartUTC: activeTimer.StartedAtUTC,
+      EndUTC: endUTC,
+      DurationSeconds: durationSeconds,
+      Billable: tracking.billable === true || tracking.billable === 'TRUE' || tracking.billable === 1,
+      HourlyRateSnapshot: hourlyRateSnapshot,
+      CostRateSnapshot: costRateSnapshot,
+      EntrySource: activeTimer.Source || CONSTANTS.ENTRY_SOURCE.WEB,
+      ManualEntry: false,
+      Status: 'ACTIVE',
+      ApprovalStatus: CONSTANTS.TIMESHEET_STATUS.OPEN,
+      TimesheetID: '',
+      Locked: false,
+      CreatedAt: endUTC,
+      CreatedBy: ownerContext.userId,
+      UpdatedAt: endUTC,
+      UpdatedBy: ownerContext.userId,
+      DeletedAt: '',
+      DeletedBy: '',
+      Version: 1
+    };
+
+    let entryCreated = false;
+    try {
+      SheetRepository.createTimeEntry(workspaceId, timeEntry);
+      entryCreated = true;
+      SheetRepository.deleteActiveTimer(workspaceId, ownerContext.userId);
+    } catch (mutationErr) {
+      if (entryCreated) {
+        try {
+          SheetRepository.updateTimeEntry(workspaceId, entryId, {
+            Status: 'DELETED',
+            DeletedAt: new Date().toISOString(),
+            DeletedBy: (auditActorContext && auditActorContext.userId) || ownerContext.userId
+          });
+        } catch (rollbackErr) {
+          console.error(`Timer finalization rollback failed for entry ${entryId}: ${rollbackErr.message}`);
+        }
+      }
+      throw mutationErr;
+    }
+
+    if (typeof SpreadsheetApp !== 'undefined' && SpreadsheetApp.flush) {
+      try { SpreadsheetApp.flush(); } catch (fErr) {}
+    }
+
+    try {
+      if (typeof RollupService !== 'undefined' && RollupService.recordTimeEntry) {
+        RollupService.recordTimeEntry(workspaceId, timeEntry);
+      }
+    } catch (e) {
+      console.warn('Rollup calculation notice: ' + e.message);
+    }
+
+    const auditActor = auditActorContext || ownerContext;
+    SheetRepository.logWorkspaceAudit(workspaceId, {
+      ActorUserID: auditActor.userId,
+      ActorRole: auditActor.role,
+      EntityType: 'TIME_ENTRY',
+      EntityID: entryId,
+      Action: CONSTANTS.AUDIT_EVENTS.TIMER_STOPPED,
+      AfterJSON: timeEntry,
+      Reason: stopPayload.reason || '',
+      ClientType: activeTimer.Source || 'WEB'
+    });
+
+    return timeEntry;
+  },
+
+  /**
    * Authoritatively stops the running timer inside LockService critical section, calculates duration,
    * appends TimeEntry, removes ActiveTimer, and updates rollups.
    */
@@ -168,103 +282,12 @@ const TimerService = {
         throw new AppError(ERROR_CODES.TIMER_NOT_FOUND, 'No running timer found in this workspace.', 404);
       }
 
-      const now = new Date();
-      const endUTC = now.toISOString();
-      const startedAtMs = new Date(activeTimer.StartedAtUTC).getTime();
-      const endMs = now.getTime();
-
-      let durationSeconds = Math.max(1, Math.round((endMs - startedAtMs) / 1000));
-      const maxSeconds = CONSTANTS.LIMITS.MAX_SINGLE_ENTRY_HOURS * 3600;
-      if (durationSeconds > maxSeconds) {
-        durationSeconds = maxSeconds; // Clamp to max permitted single entry duration
-      }
-
-      const mergedTrackingPayload = {
-        projectId: stopPayload.projectId !== undefined ? stopPayload.projectId : activeTimer.ProjectID,
-        taskId: stopPayload.taskId !== undefined ? stopPayload.taskId : activeTimer.TaskID,
-        description: stopPayload.description !== undefined ? stopPayload.description : activeTimer.Description,
-        tags: stopPayload.tags !== undefined ? stopPayload.tags : activeTimer.TagIDs,
-        billable: stopPayload.billable !== undefined ? stopPayload.billable : activeTimer.Billable
-      };
-      const tracking = TrackingPolicyService.validateTrackingContext(
+      const timeEntry = this._finalizeActiveTimerLocked(
         authContext,
         workspaceId,
-        mergedTrackingPayload,
-        { manual: false, enforceRequired: false }
+        activeTimer,
+        stopPayload
       );
-
-      const projectId = tracking.projectId;
-      const taskId = tracking.taskId;
-      const description = tracking.description;
-      const tags = tracking.tagIdsCsv;
-      const billable = tracking.billable;
-
-      let hourlyRateSnapshot = 0;
-      let costRateSnapshot = 0;
-      if (tracking.project) {
-        hourlyRateSnapshot = parseFloat(tracking.project.HourlyRate) || 0;
-        costRateSnapshot = parseFloat(tracking.project.CostRate) || 0;
-      }
-
-      const entryId = Validation.generateId('ENT');
-      const timeEntry = {
-        EntryID: entryId,
-        entryId: entryId,
-        UserID: authContext.userId,
-        userId: authContext.userId,
-        ProjectID: projectId,
-        TaskID: taskId,
-        Description: description,
-        Tags: tags,
-        StartUTC: activeTimer.StartedAtUTC,
-        EndUTC: endUTC,
-        DurationSeconds: durationSeconds,
-        Billable: billable === true || billable === 'TRUE' || billable === 1,
-        HourlyRateSnapshot: hourlyRateSnapshot,
-        CostRateSnapshot: costRateSnapshot,
-        EntrySource: activeTimer.Source || CONSTANTS.ENTRY_SOURCE.WEB,
-        ManualEntry: false,
-        Status: 'ACTIVE',
-        ApprovalStatus: CONSTANTS.TIMESHEET_STATUS.OPEN,
-        TimesheetID: '',
-        Locked: false,
-        CreatedAt: endUTC,
-        CreatedBy: authContext.userId,
-        UpdatedAt: endUTC,
-        UpdatedBy: authContext.userId,
-        DeletedAt: '',
-        DeletedBy: '',
-        Version: 1
-      };
-
-      // Append completed entry to TimeEntries
-      SheetRepository.createTimeEntry(workspaceId, timeEntry);
-
-      // Delete ActiveTimer row
-      SheetRepository.deleteActiveTimer(workspaceId, authContext.userId);
-
-      if (typeof SpreadsheetApp !== 'undefined' && SpreadsheetApp.flush) {
-        try { SpreadsheetApp.flush(); } catch (fErr) {}
-      }
-
-      // Update Rollups asynchronously/synchronously
-      try {
-        if (typeof RollupService !== 'undefined' && RollupService.recordTimeEntry) {
-          RollupService.recordTimeEntry(workspaceId, timeEntry);
-        }
-      } catch (e) {
-        console.warn('Rollup calculation notice: ' + e.message);
-      }
-
-      SheetRepository.logWorkspaceAudit(workspaceId, {
-        ActorUserID: authContext.userId,
-        ActorRole: authContext.role,
-        EntityType: 'TIME_ENTRY',
-        EntityID: entryId,
-        Action: CONSTANTS.AUDIT_EVENTS.TIMER_STOPPED,
-        AfterJSON: timeEntry,
-        ClientType: activeTimer.Source || 'WEB'
-      });
 
       return TimeEntryService.toTimeEntryDTO(
         timeEntry,
