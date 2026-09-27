@@ -148,7 +148,35 @@ const UserService = {
       const allowedUpdates = {};
       if (updates.displayName) allowedUpdates.DisplayName = Validation.sanitizeCellValue(updates.displayName.trim());
       if (updates.email !== undefined) allowedUpdates.Email = Validation.sanitizeCellValue(updates.email.trim());
-      if (updates.role) allowedUpdates.Role = Validation.validateRole(updates.role);
+
+      if (updates.role) {
+        const requestedRole = Validation.validateRole(updates.role);
+        if (requestedRole !== existing.Role) {
+          if (requestedRole === CONSTANTS.ROLES.SUPER_ADMIN) {
+            throw new AppError(
+              ERROR_CODES.PERMISSION_DENIED,
+              'Promotion to SUPER_ADMIN is not allowed through the generic user-update endpoint.',
+              403
+            );
+          }
+
+          const activeAccesses = MasterRepository.getWorkspaceAccessForUser(targetUserId);
+          if (
+            requestedRole === CONSTANTS.ROLES.ADMIN &&
+            activeAccesses.length > CONSTANTS.LIMITS.ADMIN_MAX_ACTIVE_WORKSPACES
+          ) {
+            throw new AppError(
+              ERROR_CODES.ADMIN_LIMIT_EXCEEDED,
+              `Cannot promote this user to Admin while assigned to ${activeAccesses.length} workspaces. Maximum is ${CONSTANTS.LIMITS.ADMIN_MAX_ACTIVE_WORKSPACES}.`,
+              400
+            );
+          }
+
+          allowedUpdates.Role = requestedRole;
+          MasterRepository.syncWorkspaceAccessRole(targetUserId, requestedRole);
+        }
+      }
+
       if (updates.primaryWorkspaceId !== undefined) {
         const requestedPrimary = updates.primaryWorkspaceId || '';
         if (requestedPrimary) {
