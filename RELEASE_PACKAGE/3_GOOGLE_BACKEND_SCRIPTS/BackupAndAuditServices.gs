@@ -161,6 +161,30 @@ const BackupService = {
   createBackup(superAdminContext, workspaceId = null) {
     AuthorizationService.assertRole(superAdminContext, [CONSTANTS.ROLES.SUPER_ADMIN]);
 
+    let scriptLock = null;
+    if (typeof LockService !== 'undefined' && LockService.getScriptLock) {
+      scriptLock = LockService.getScriptLock();
+      if (!scriptLock.tryLock(30000)) {
+        throw new AppError(ERROR_CODES.SERVER_BUSY, 'Could not acquire backup lock. Please retry.', 409);
+      }
+    }
+
+    try {
+      return this._createBackupUnlocked(superAdminContext, workspaceId);
+    } finally {
+      if (scriptLock) {
+        try { scriptLock.releaseLock(); } catch (e) {}
+      }
+    }
+  },
+
+  /**
+   * Internal snapshot implementation for callers that already own ScriptLock
+   * (notably restore safety-backup creation).
+   */
+  _createBackupUnlocked(superAdminContext, workspaceId = null) {
+    AuthorizationService.assertRole(superAdminContext, [CONSTANTS.ROLES.SUPER_ADMIN]);
+
     const scope = workspaceId ? 'WORKSPACE' : 'MASTER';
     const timestamp = new Date().toISOString();
     const fileTimestamp = timestamp.replace(/[:.]/g, '-');
@@ -366,7 +390,7 @@ const BackupService = {
       const record = this._getRegistryRecord(backupId);
 
       // Safety snapshot of the currently live workspace before any pointer change.
-      const safetyBackup = this.createBackup(superAdminContext, workspaceId);
+      const safetyBackup = this._createBackupUnlocked(superAdminContext, workspaceId);
 
       const backupFile = DriveApp.getFileById(record.BackupFileID);
       const candidateName = `RESTORE_${workspaceId}_${new Date().toISOString().replace(/[:.]/g, '-')}`;
