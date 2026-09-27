@@ -108,24 +108,51 @@ const SecurityService = {
   },
 
   /**
-   * Computes HMAC-SHA256
+   * Encodes a JavaScript string to UTF-8 bytes without relying on TextEncoder.
+   */
+  _utf8Bytes(value) {
+    const str = String(value);
+    const encoded = unescape(encodeURIComponent(str));
+    const bytes = [];
+    for (let i = 0; i < encoded.length; i++) {
+      bytes.push(encoded.charCodeAt(i) & 0xff);
+    }
+    return bytes;
+  },
+
+  _toSignedBytes(bytes) {
+    return Array.from(bytes || []).map(b => {
+      const value = Number(b) & 0xff;
+      return value > 127 ? value - 256 : value;
+    });
+  },
+
+  /**
+   * Computes HMAC-SHA256 over true bytes in both Node and Apps Script.
    */
   hmacSha256(key, message) {
     const nodeCrypto = this._getCrypto();
+    const keyBytes = Array.isArray(key) ? Array.from(key) : this._utf8Bytes(String(key));
+    const messageBytes = Array.isArray(message) ? Array.from(message) : this._utf8Bytes(String(message));
+
     if (nodeCrypto && nodeCrypto.createHmac) {
-      const keyBuf = Buffer.isBuffer(key)
-        ? key
-        : (Array.isArray(key) ? Buffer.from(key) : Buffer.from(String(key), 'utf8'));
-      const msgBuf = Buffer.isBuffer(message)
-        ? message
-        : (Array.isArray(message) ? Buffer.from(message) : Buffer.from(String(message), 'utf8'));
-      return Array.from(nodeCrypto.createHmac('sha256', keyBuf).update(msgBuf).digest());
+      return Array.from(
+        nodeCrypto
+          .createHmac('sha256', Buffer.from(keyBytes))
+          .update(Buffer.from(messageBytes))
+          .digest()
+      );
     }
-    const keyStr = Array.isArray(key) ? key.map(b => String.fromCharCode(b)).join('') : String(key);
-    const msgStr = Array.isArray(message) ? message.map(b => String.fromCharCode(b)).join('') : String(message);
-    const sig = Utilities.computeHmacSha256Signature(msgStr, keyStr, Utilities.Charset.UTF_8);
-    // Convert signed bytes (-128..127) to unsigned array (0..255)
-    return sig.map(b => (b < 0 ? b + 256 : b));
+
+    if (typeof Utilities === 'undefined' || !Utilities.computeHmacSha256Signature) {
+      throw new AppError(ERROR_CODES.CRYPTO_FAILURE, 'HMAC-SHA256 runtime is unavailable.', 500);
+    }
+
+    const sig = Utilities.computeHmacSha256Signature(
+      this._toSignedBytes(messageBytes),
+      this._toSignedBytes(keyBytes)
+    );
+    return Array.from(sig).map(b => (b < 0 ? b + 256 : b));
   },
 
   /**
@@ -138,37 +165,36 @@ const SecurityService = {
       return nodeCrypto.pbkdf2Sync(password, salt, iterations, keyLenBytes, 'sha256').toString('hex');
     }
 
-    const hLen = 32; // SHA-256 output length in bytes
-    const l = Math.ceil(keyLenBytes / hLen);
-    const r = keyLenBytes - (l - 1) * hLen;
-    const dk = [];
+    const hLen = 32;
+    const blockCount = Math.ceil(keyLenBytes / hLen);
+    const finalBlockLength = keyLenBytes - (blockCount - 1) * hLen;
+    const derived = [];
+    const passwordBytes = this._utf8Bytes(password);
+    const saltBytes = this._utf8Bytes(salt);
 
-    for (let i = 1; i <= l; i++) {
-      // U1 = PRF(P, S || INT_32_BE(i))
+    for (let i = 1; i <= blockCount; i++) {
       const blockIndex = [
-        (i >> 24) & 0xff,
-        (i >> 16) & 0xff,
-        (i >> 8) & 0xff,
+        (i >>> 24) & 0xff,
+        (i >>> 16) & 0xff,
+        (i >>> 8) & 0xff,
         i & 0xff
-      ].map(b => String.fromCharCode(b)).join('');
+      ];
 
-      let u = this.hmacSha256(password, salt + blockIndex);
-      let t = [...u];
+      let u = this.hmacSha256(passwordBytes, saltBytes.concat(blockIndex));
+      const t = Array.from(u);
 
       for (let j = 1; j < iterations; j++) {
-        const uMsg = u.map(b => String.fromCharCode(b)).join('');
-        u = this.hmacSha256(password, uMsg);
+        u = this.hmacSha256(passwordBytes, u);
         for (let k = 0; k < hLen; k++) {
           t[k] ^= u[k];
         }
       }
 
-      for (let m = 0; m < (i === l ? r : hLen); m++) {
-        dk.push(t[m]);
-      }
+      const take = i === blockCount ? finalBlockLength : hLen;
+      for (let m = 0; m < take; m++) derived.push(t[m] & 0xff);
     }
 
-    return dk.map(b => b.toString(16).padStart(2, '0')).join('');
+    return derived.map(b => b.toString(16).padStart(2, '0')).join('');
   },
 
   /**
@@ -406,13 +432,17 @@ const SecurityService = {
       const msgBuf = Buffer.from(counterBytes);
       hmacResult = Array.from(nodeCrypto.createHmac('sha1', keyBuf).update(msgBuf).digest());
     } else if (typeof Utilities !== 'undefined' && Utilities.computeHmacSignature) {
-      // Google Apps Script environment
-      const msgStr = counterBytes.map(b => String.fromCharCode(b)).join('');
-      const keyStr = keyBytes.map(b => String.fromCharCode(b)).join('');
-      const algo = (Utilities.MacAlgorithm && Utilities.MacAlgorithm.HMAC_SHA_1) ? Utilities.MacAlgorithm.HMAC_SHA_1 : 'HMAC_SHA_1';
-      const charset = (Utilities.Charset && Utilities.Charset.US_ASCII) ? Utilities.Charset.US_ASCII : 'US-ASCII';
-      const sig = Utilities.computeHmacSignature(algo, msgStr, keyStr, charset);
-      hmacResult = sig.map(b => (b < 0 ? b + 256 : b));
+      // Google Apps Script byte[] overload. Never route binary key/counter bytes
+      // through JavaScript strings/character encodings.
+      const algo = (Utilities.MacAlgorithm && Utilities.MacAlgorithm.HMAC_SHA_1)
+        ? Utilities.MacAlgorithm.HMAC_SHA_1
+        : 'HMAC_SHA_1';
+      const sig = Utilities.computeHmacSignature(
+        algo,
+        this._toSignedBytes(counterBytes),
+        this._toSignedBytes(keyBytes)
+      );
+      hmacResult = Array.from(sig).map(b => (b < 0 ? b + 256 : b));
     }
 
     const offset = hmacResult[hmacResult.length - 1] & 0x0f;
