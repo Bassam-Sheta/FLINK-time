@@ -141,9 +141,20 @@ const TimeEntryService = {
 
       const updated = SheetRepository.updateTimeEntry(workspaceId, entryId, allowed);
 
-      // Explicit flush in Google Apps Script to guarantee write persistence before lock release
+      const affectsRollups =
+        allowed.ProjectID !== undefined ||
+        allowed.Billable !== undefined ||
+        allowed.StartUTC !== undefined ||
+        allowed.EndUTC !== undefined ||
+        allowed.DurationSeconds !== undefined;
+
+      // Explicit flush in Google Apps Script to guarantee write persistence before reconciliation.
       if (typeof SpreadsheetApp !== 'undefined' && SpreadsheetApp.flush) {
         try { SpreadsheetApp.flush(); } catch (fErr) {}
+      }
+
+      if (affectsRollups && typeof RollupService !== 'undefined' && RollupService.rebuildRollups) {
+        RollupService.rebuildRollups(workspaceId);
       }
 
       updated.entryId = updated.EntryID || entryId;
@@ -243,6 +254,10 @@ const TimeEntryService = {
 
       if (typeof SpreadsheetApp !== 'undefined' && SpreadsheetApp.flush) {
         try { SpreadsheetApp.flush(); } catch (fErr) {}
+      }
+
+      if (typeof RollupService !== 'undefined' && RollupService.rebuildRollups) {
+        RollupService.rebuildRollups(workspaceId);
       }
 
       SheetRepository.logWorkspaceAudit(workspaceId, {
@@ -387,6 +402,14 @@ const TimeEntryService = {
 
       if (typeof SpreadsheetApp !== 'undefined' && SpreadsheetApp.flush) {
         try { SpreadsheetApp.flush(); } catch (fErr) {}
+      }
+
+      if (
+        (normalizedAction === 'DELETE' || normalizedAction === 'CHANGE_PROJECT') &&
+        typeof RollupService !== 'undefined' &&
+        RollupService.rebuildRollups
+      ) {
+        RollupService.rebuildRollups(workspaceId);
       }
 
       return entries.length;
