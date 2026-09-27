@@ -5,6 +5,57 @@
  */
 
 const AuthService = {
+  _mfaChallengeMemory: {},
+
+  _mfaChallengePropertyKey(userId) {
+    return 'FLINK_MFA_CHALLENGE_' + String(userId || '').replace(/[^A-Za-z0-9_-]/g, '');
+  },
+
+  _storeMfaChallenge(userId, challengeToken, expiresAtMs) {
+    const record = JSON.stringify({
+      tokenHash: SecurityService.hashToken(challengeToken),
+      expiresAtMs: Number(expiresAtMs)
+    });
+
+    if (typeof PropertiesService !== 'undefined' && PropertiesService.getScriptProperties) {
+      PropertiesService
+        .getScriptProperties()
+        .setProperty(this._mfaChallengePropertyKey(userId), record);
+      return;
+    }
+
+    // Local/unit-test fallback only.
+    this._mfaChallengeMemory[userId] = record;
+  },
+
+  _getMfaChallenge(userId) {
+    let raw = '';
+    if (typeof PropertiesService !== 'undefined' && PropertiesService.getScriptProperties) {
+      raw = PropertiesService
+        .getScriptProperties()
+        .getProperty(this._mfaChallengePropertyKey(userId)) || '';
+    } else {
+      raw = this._mfaChallengeMemory[userId] || '';
+    }
+
+    if (!raw) return null;
+    try {
+      return JSON.parse(raw);
+    } catch (e) {
+      return null;
+    }
+  },
+
+  _deleteMfaChallenge(userId) {
+    if (typeof PropertiesService !== 'undefined' && PropertiesService.getScriptProperties) {
+      PropertiesService
+        .getScriptProperties()
+        .deleteProperty(this._mfaChallengePropertyKey(userId));
+    } else {
+      delete this._mfaChallengeMemory[userId];
+    }
+  },
+
   /**
    * Authenticates user with username and password
    */
@@ -92,11 +143,36 @@ const AuthService = {
       throw invalidAuthError;
     }
 
-    // Login Successful: Reset failure counters & issue session
+    // A correct password clears password-stage failures, but MFA-enabled
+    // accounts are not considered logged in until the second factor succeeds.
     MasterRepository.updateCredentials(account.UserID, {
       FailedLoginCount: 0,
       LockUntil: ''
     });
+
+    if (cred.MfaEnabled === true || cred.MfaEnabled === 'TRUE') {
+      const timestamp = Date.now();
+      const sig = SecurityService
+        .hashToken(`${account.UserID}|${timestamp}|${SecurityService.getPepper()}`)
+        .substring(0, 16);
+      const mfaChallengeToken = `MFA_${account.UserID}_${timestamp}_${sig}`;
+      this._storeMfaChallenge(account.UserID, mfaChallengeToken, timestamp + 5 * 60 * 1000);
+
+      MasterRepository.logSecurityEvent({
+        UserID: account.UserID,
+        Username: account.Username,
+        EventType: 'MFA_CHALLENGE_ISSUED',
+        Success: true,
+        metadata: { clientType }
+      });
+
+      return {
+        mfaRequired: true,
+        mfaChallengeToken,
+        userId: account.UserID,
+        clientType
+      };
+    }
 
     MasterRepository.updateAccount(account.UserID, {
       LastLoginAt: new Date().toISOString()
@@ -107,21 +183,8 @@ const AuthService = {
       Username: account.Username,
       EventType: CONSTANTS.AUDIT_EVENTS.LOGIN_SUCCESS,
       Success: true,
-      metadata: { clientType }
+      metadata: { clientType, mfa: false }
     });
-
-    // Check if user has MFA enabled
-    if (cred.MfaEnabled === true || cred.MfaEnabled === 'TRUE') {
-      const timestamp = Date.now();
-      const sig = SecurityService.hashToken(`${account.UserID}|${timestamp}|${SecurityService.getPepper()}`).substring(0, 16);
-      const mfaChallengeToken = `MFA_${account.UserID}_${timestamp}_${sig}`;
-      return {
-        mfaRequired: true,
-        mfaChallengeToken,
-        userId: account.UserID,
-        clientType
-      };
-    }
 
     const sessionData = SessionService.createSession(account.UserID, clientType);
 
@@ -172,6 +235,21 @@ const AuthService = {
       throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'MFA challenge token signature invalid.', 401);
     }
 
+    const storedChallenge = this._getMfaChallenge(userId);
+    const suppliedChallengeHash = SecurityService.hashToken(mfaChallengeToken);
+    if (
+      !storedChallenge ||
+      !storedChallenge.tokenHash ||
+      !SecurityService.constantTimeEquals(storedChallenge.tokenHash, suppliedChallengeHash) ||
+      Number(storedChallenge.expiresAtMs || 0) < now
+    ) {
+      throw new AppError(
+        ERROR_CODES.AUTH_REQUIRED,
+        'MFA challenge is invalid, expired, replaced, or already used. Please log in again.',
+        401
+      );
+    }
+
     const mfaLock = LockService.getScriptLock();
     mfaLock.waitLock(10000);
     try {
@@ -185,7 +263,17 @@ const AuthService = {
       account.Status === CONSTANTS.ACCOUNT_STATUS.LOCKED ||
       (cred.LockUntil && new Date(cred.LockUntil).getTime() > now)
     ) {
+      this._deleteMfaChallenge(userId);
       throw new AppError(ERROR_CODES.ACCOUNT_LOCKED, 'Account is temporarily locked. Try again later.', 403);
+    }
+
+    if (account.Status !== CONSTANTS.ACCOUNT_STATUS.ACTIVE) {
+      this._deleteMfaChallenge(userId);
+      throw new AppError(
+        ERROR_CODES.ACCOUNT_PASSIVE,
+        'This account is inactive or has been deactivated.',
+        403
+      );
     }
 
     const verification = SecurityService.verifyTotpWithStep(cred.TotpSecret, code);
@@ -245,6 +333,10 @@ const AuthService = {
       LastSuccessfulTotpStep: currentStep
     });
 
+    // Consume the server-side challenge before minting a session. A later TOTP
+    // cannot reuse the same 5-minute challenge to create another session.
+    this._deleteMfaChallenge(userId);
+
     MasterRepository.updateAccount(account.UserID, {
       LastLoginAt: new Date().toISOString()
     });
@@ -255,6 +347,13 @@ const AuthService = {
       EventType: CONSTANTS.AUDIT_EVENTS.MFA_VERIFIED,
       Success: true,
       metadata: { clientType, step: currentStep }
+    });
+    MasterRepository.logSecurityEvent({
+      UserID: account.UserID,
+      Username: account.Username,
+      EventType: CONSTANTS.AUDIT_EVENTS.LOGIN_SUCCESS,
+      Success: true,
+      metadata: { clientType, mfa: true }
     });
 
     const sessionData = SessionService.createSession(account.UserID, clientType);
