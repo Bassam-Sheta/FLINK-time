@@ -2298,42 +2298,200 @@
       }
     }
 
-    /* Subtab 12: Backups & 5-Step Restore Wizard */
-    function renderSaBackups() {
+    /* Subtab 12: Backups & Restore */
+    async function renderSaBackups() {
       const container = document.getElementById('saSubtabContent');
       container.innerHTML = `
         <div class="card">
           <div class="card-header">
             <div>
               <div class="card-title">Google Drive Backup & Disaster Recovery</div>
-              <div class="card-subtitle">Automated Drive snapshots with 5-step safe restoration</div>
+              <div class="card-subtitle">Registered snapshots with schema and HMAC content verification</div>
             </div>
             <button class="btn btn-success btn-sm" onclick="triggerDriveBackup()">RUN BACKUP NOW</button>
           </div>
-          <div style="background: var(--bg-card); padding: 1.5rem; border-radius: 8px; margin-bottom: 1.5rem;">
-            <div style="display: flex; justify-content: space-between; align-items: center;">
-              <div>
-                <strong>Backup Status: HEALTHY</strong>
-                <div style="font-size: 0.8rem; color: var(--text-muted); margin-top: 0.2rem;">All workspaces backed up to company Google Drive folder.</div>
-              </div>
-              <button class="btn btn-warning btn-sm" onclick="openRestoreWizard()">5-Step Safe Restore Wizard</button>
-            </div>
-          </div>
+          <div id="backupRegistryHost"></div>
         </div>
       `;
+
+      const host = document.getElementById('backupRegistryHost');
+      try {
+        const backups = await apiCall('backups.list', { workspaceId: state.currentWorkspace });
+        if (!Array.isArray(backups) || backups.length === 0) {
+          const empty = document.createElement('div');
+          empty.style.padding = '1.5rem';
+          empty.style.color = 'var(--text-muted)';
+          empty.textContent = 'No registered backups exist for this workspace yet.';
+          host.appendChild(empty);
+          return;
+        }
+
+        const wrapper = document.createElement('div');
+        wrapper.className = 'table-responsive';
+        const table = document.createElement('table');
+        const thead = document.createElement('thead');
+        const hrow = document.createElement('tr');
+        ['Backup ID', 'Created', 'Status', 'Verified', 'Actions'].forEach(label => {
+          const th = document.createElement('th');
+          th.textContent = label;
+          hrow.appendChild(th);
+        });
+        thead.appendChild(hrow);
+        table.appendChild(thead);
+
+        const tbody = document.createElement('tbody');
+        backups.forEach(backup => {
+          const tr = document.createElement('tr');
+
+          const id = document.createElement('td');
+          id.style.fontFamily = 'var(--font-mono)';
+          id.textContent = String(backup.backupId || '');
+
+          const created = document.createElement('td');
+          created.textContent = String(backup.createdAt || '').substring(0, 19);
+
+          const status = document.createElement('td');
+          status.textContent = String(backup.status || '');
+
+          const verified = document.createElement('td');
+          verified.textContent = backup.verified ? 'YES' : 'NO';
+
+          const actions = document.createElement('td');
+          const verifyBtn = document.createElement('button');
+          verifyBtn.className = 'btn btn-secondary btn-sm';
+          verifyBtn.textContent = 'Verify';
+          verifyBtn.onclick = async () => {
+            try {
+              const result = await apiCall('backups.restoreValidate', {
+                workspaceId: state.currentWorkspace,
+                backupId: backup.backupId
+              });
+              alert('Backup verified: ' + result.backupId);
+            } catch (e) {
+              alert(e.message || 'Backup validation failed.');
+            }
+          };
+
+          const restoreBtn = document.createElement('button');
+          restoreBtn.className = 'btn btn-warning btn-sm';
+          restoreBtn.style.marginLeft = '0.5rem';
+          restoreBtn.textContent = 'Restore';
+          restoreBtn.disabled = !backup.verified || backup.status !== 'AVAILABLE';
+          restoreBtn.onclick = () => openRestoreWizard(backup.backupId);
+
+          actions.append(verifyBtn, restoreBtn);
+          tr.append(id, created, status, verified, actions);
+          tbody.appendChild(tr);
+        });
+
+        table.appendChild(tbody);
+        wrapper.appendChild(table);
+        host.appendChild(wrapper);
+      } catch (e) {
+        renderError(host, 'Failed to load backup registry: ', e);
+      }
     }
 
     async function triggerDriveBackup() {
       try {
         const res = await apiCall('backups.create');
-        alert('Drive Backup generated successfully:\n' + res.backupFileName);
+        alert('Drive backup generated and verified successfully: ' + res.backupId);
+        await renderSaBackups();
       } catch (e) {
         alert(e.message || 'Backup failed.');
       }
     }
 
-    function openRestoreWizard() {
-      alert('5-Step Safe Restore Wizard:\n1. Select Drive Snapshot\n2. Target Workspace\n3. Restore to Temporary Sheet\n4. Validate Schema Integrity\n5. Swap Spreadsheet ID in Master Registry');
+    function openRestoreWizard(backupId) {
+      const modal = document.getElementById('modalContainer');
+      modal.replaceChildren();
+      modal.dataset.restoreBackupId = String(backupId || '');
+
+      const backdrop = document.createElement('div');
+      backdrop.className = 'modal-backdrop';
+      const box = document.createElement('div');
+      box.className = 'modal';
+
+      const title = document.createElement('h3');
+      title.style.marginBottom = '0.5rem';
+      title.style.color = '#FBBF24';
+      title.textContent = 'Verified Workspace Restore';
+
+      const intro = document.createElement('p');
+      intro.style.color = 'var(--text-secondary)';
+      intro.style.fontSize = '0.85rem';
+      intro.style.marginBottom = '1.25rem';
+      intro.textContent =
+        'The selected registered backup will be re-verified, copied to an isolated restore candidate, active timers cleared, sessions revoked, rollups reconciled, and the workspace pointer changed only if all stages succeed.';
+
+      const idLine = document.createElement('div');
+      idLine.style.marginBottom = '1rem';
+      idLine.style.fontFamily = 'var(--font-mono)';
+      idLine.textContent = 'Backup ID: ' + String(backupId || '');
+
+      const passwordLabel = document.createElement('label');
+      passwordLabel.textContent = 'Confirm Super Admin Password';
+      const password = document.createElement('input');
+      password.type = 'password';
+      password.id = 'restoreAdminPassword';
+      password.autocomplete = 'current-password';
+
+      const warning = document.createElement('div');
+      warning.style.marginTop = '1rem';
+      warning.style.marginBottom = '1.5rem';
+      warning.style.color = '#FBBF24';
+      warning.style.fontSize = '0.85rem';
+      warning.textContent = 'A safety backup of the current live workspace will be created automatically before the restore pointer changes.';
+
+      const actions = document.createElement('div');
+      actions.style.display = 'flex';
+      actions.style.gap = '0.75rem';
+      actions.style.justifyContent = 'flex-end';
+
+      const cancel = document.createElement('button');
+      cancel.className = 'btn btn-secondary';
+      cancel.textContent = 'Cancel';
+      cancel.onclick = closeModal;
+
+      const apply = document.createElement('button');
+      apply.className = 'btn btn-warning';
+      apply.textContent = 'Verify & Restore';
+      apply.onclick = submitRestoreBackup;
+
+      actions.append(cancel, apply);
+      box.append(title, intro, idLine, passwordLabel, password, warning, actions);
+      backdrop.appendChild(box);
+      modal.appendChild(backdrop);
+    }
+
+    async function submitRestoreBackup() {
+      const modal = document.getElementById('modalContainer');
+      const backupId = modal.dataset.restoreBackupId || '';
+      const adminPassword = document.getElementById('restoreAdminPassword')?.value || '';
+      if (!backupId || !adminPassword) {
+        return alert('Backup ID and Super Admin password are required.');
+      }
+
+      try {
+        await apiCall('backups.restoreValidate', {
+          workspaceId: state.currentWorkspace,
+          backupId
+        });
+        const result = await apiCall('backups.restoreApply', {
+          workspaceId: state.currentWorkspace,
+          backupId,
+          adminPassword
+        });
+
+        closeModal();
+        alert(
+          'Restore completed successfully. Safety backup: ' +
+          String(result.safetyBackupId || 'created')
+        );
+        await renderSaBackups();
+      } catch (e) {
+        alert(e.message || 'Restore failed. The live workspace pointer was not changed or was rolled back.');
+      }
     }
 
     /* Subtab 13: System Health */
