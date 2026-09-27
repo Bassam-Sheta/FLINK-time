@@ -105,6 +105,65 @@ const BackupService = {
     };
   },
 
+  _validateWorkspaceRollupTotals(spreadsheet) {
+    if (!spreadsheet) {
+      throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'Restore candidate spreadsheet is unavailable.', 400);
+    }
+
+    const entriesSheet = spreadsheet.getSheetByName(CONSTANTS.WORKSPACE_TABS.TIME_ENTRIES);
+    if (!entriesSheet) {
+      throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'Restore candidate is missing TimeEntries.', 400);
+    }
+
+    const entryHeaders = WORKSPACE_SCHEMA.TimeEntries;
+    const entryRows = Math.max(0, entriesSheet.getLastRow() - 1);
+    let rawSeconds = 0;
+
+    if (entryRows > 0) {
+      const values = entriesSheet
+        .getRange(2, 1, entryRows, entryHeaders.length)
+        .getValues();
+      const statusIdx = entryHeaders.indexOf('Status');
+      const durationIdx = entryHeaders.indexOf('DurationSeconds');
+      for (const row of values) {
+        if (String(row[statusIdx] || '') === 'DELETED') continue;
+        rawSeconds += parseInt(row[durationIdx], 10) || 0;
+      }
+    }
+
+    const checked = {};
+    for (const tab of [
+      CONSTANTS.WORKSPACE_TABS.DAILY_ROLLUPS,
+      CONSTANTS.WORKSPACE_TABS.WEEKLY_ROLLUPS,
+      CONSTANTS.WORKSPACE_TABS.MONTHLY_ROLLUPS
+    ]) {
+      const sheet = spreadsheet.getSheetByName(tab);
+      const headers = WORKSPACE_SCHEMA[tab];
+      if (!sheet || !headers) {
+        throw new AppError(ERROR_CODES.VALIDATION_ERROR, `Restore candidate is missing rollup tab ${tab}.`, 400);
+      }
+
+      const rowCount = Math.max(0, sheet.getLastRow() - 1);
+      let total = 0;
+      if (rowCount > 0) {
+        const values = sheet.getRange(2, 1, rowCount, headers.length).getValues();
+        const totalIdx = headers.indexOf('TotalSeconds');
+        for (const row of values) total += parseInt(row[totalIdx], 10) || 0;
+      }
+      checked[tab] = total;
+
+      if (total !== rawSeconds) {
+        throw new AppError(
+          ERROR_CODES.CONFLICT,
+          `Restore candidate rollup mismatch in ${tab}: raw=${rawSeconds}s, rollup=${total}s.`,
+          409
+        );
+      }
+    }
+
+    return { ok: true, rawSeconds, rollups: checked };
+  },
+
   _getRegistryRecord(backupId) {
     if (!backupId) {
       throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'backupId is required.', 400);
@@ -403,6 +462,10 @@ const BackupService = {
         throw new AppError(ERROR_CODES.CRYPTO_FAILURE, 'Restore working copy failed integrity verification.', 409);
       }
 
+      // Validate aggregate consistency while the candidate is still isolated.
+      // A stale/corrupt rollup set is rejected rather than exposed live.
+      const candidateRollupValidation = this._validateWorkspaceRollupTotals(candidateSpreadsheet);
+
       // Quiesce all normal workspace operations before changing the live pointer.
       MasterRepository.updateWorkspace(workspaceId, {
         Status: CONSTANTS.WORKSPACE_STATUS.MAINTENANCE,
@@ -431,19 +494,19 @@ const BackupService = {
         SessionService.revokeAllUserSessions(access.UserID);
       }
 
-      // Re-open only while holding the restore ScriptLock, then reconcile rollups.
+      // Commit ACTIVE only after candidate integrity, timer cleanup, pointer switch,
+      // and session revocation have all succeeded. No normal request can observe
+      // the candidate while it is still in MAINTENANCE.
+      if (typeof SpreadsheetApp !== 'undefined' && SpreadsheetApp.flush) {
+        SpreadsheetApp.flush();
+      }
+
       MasterRepository.updateWorkspace(workspaceId, {
         Status: CONSTANTS.WORKSPACE_STATUS.ACTIVE,
         UpdatedAt: new Date().toISOString()
       });
       if (typeof WorkspaceRouter !== 'undefined' && WorkspaceRouter.clearCache) {
         WorkspaceRouter.clearCache();
-      }
-
-      RollupService.rebuildRollups(workspaceId);
-
-      if (typeof SpreadsheetApp !== 'undefined' && SpreadsheetApp.flush) {
-        SpreadsheetApp.flush();
       }
 
       MasterRepository.logGlobalAudit({
@@ -457,7 +520,8 @@ const BackupService = {
         AfterJSON: {
           spreadsheetId: candidateFileId,
           restoredBackupId: backupId,
-          safetyBackupId: safetyBackup.backupId
+          safetyBackupId: safetyBackup.backupId,
+          candidateRollupValidation
         },
         Reason: 'Verified registered workspace restore applied through isolated working copy'
       });
