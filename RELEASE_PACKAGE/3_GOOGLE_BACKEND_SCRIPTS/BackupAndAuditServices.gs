@@ -301,10 +301,22 @@ const BackupService = {
    * Restores a registered workspace backup through a new working copy.
    * The immutable backup file itself never becomes the live workspace.
    */
-  restoreBackup(superAdminContext, workspaceId, backupId) {
+  restoreBackup(superAdminContext, workspaceId, backupId, adminPassword) {
     AuthorizationService.assertRole(superAdminContext, [CONSTANTS.ROLES.SUPER_ADMIN]);
-    if (!workspaceId || !backupId) {
-      throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'workspaceId and backupId are required for restore.', 400);
+    if (!workspaceId || !backupId || !adminPassword) {
+      throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'workspaceId, backupId, and Super Admin password are required for restore.', 400);
+    }
+
+    const credentials = MasterRepository.getCredentials(superAdminContext.userId);
+    if (!credentials || !SecurityService.verifyPassword(adminPassword, credentials.PasswordHash)) {
+      MasterRepository.logSecurityEvent({
+        UserID: superAdminContext.userId,
+        Username: superAdminContext.user ? superAdminContext.user.Username : '',
+        EventType: 'RESTORE_REAUTH_FAILED',
+        Success: false,
+        metadata: { workspaceId, backupId }
+      });
+      throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'Super Admin password confirmation failed.', 401);
     }
 
     let scriptLock = null;
