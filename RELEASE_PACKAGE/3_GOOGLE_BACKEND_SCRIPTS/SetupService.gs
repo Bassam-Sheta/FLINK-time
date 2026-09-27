@@ -112,7 +112,7 @@ const SetupService = {
     if (payload.password !== payload.confirmPassword) {
       throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'Passwords do not match.');
     }
-    Validation.assertPasswordComplexity(payload.password);
+    Validation.validatePassword(payload.password);
 
     // Verify no Super Admin already registered
     const { rows: accounts } = MasterRepository.getTableData(CONSTANTS.MASTER_TABS.ACCOUNTS);
@@ -142,9 +142,7 @@ const SetupService = {
       MustChangePassword: false
     };
 
-    MasterRepository.createAccount(accountRecord);
-
-    MasterRepository.createCredential({
+    MasterRepository.createAccount(accountRecord, {
       UserID: adminUserId,
       PasswordHash: hash,
       PasswordVersion: 1,
@@ -273,7 +271,13 @@ const SetupService = {
         department: u.department || '',
         jobTitle: u.jobTitle || '',
         employeeCode: u.employeeCode || '',
-        temporaryPassword: u.temporaryPassword || 'TempUserPassword123!',
+        temporaryPassword: (() => {
+          if (!u.temporaryPassword) {
+            throw new AppError(ERROR_CODES.VALIDATION_ERROR, `temporaryPassword is required for user ${u.username}.`);
+          }
+          Validation.validatePassword(u.temporaryPassword);
+          return u.temporaryPassword;
+        })(),
         mustChangePassword: true
       });
       createdUsers.push(created);
@@ -296,7 +300,7 @@ const SetupService = {
     let clientId = '';
     if (payload.clientName) {
       const client = ClientService.createClient(authContext, wsId, {
-        name: payload.clientName,
+        clientName: payload.clientName,
         notes: 'Created via setup wizard'
       });
       clientId = client.ClientID;
@@ -304,9 +308,9 @@ const SetupService = {
 
     const project = ProjectService.createProject(authContext, wsId, {
       clientId,
-      name: payload.projectName,
+      projectName: payload.projectName,
       code: payload.projectCode || payload.projectName.substring(0, 6).toUpperCase(),
-      billable: payload.billable !== false,
+      billableDefault: payload.billable !== false,
       hourlyRate: payload.hourlyRate || 0,
       estimateHours: payload.estimateHours || 0
     });
@@ -317,8 +321,8 @@ const SetupService = {
     for (const tName of tasks) {
       const task = TaskService.createTask(authContext, wsId, {
         projectId: project.ProjectID,
-        name: tName,
-        billable: project.Billable
+        taskName: tName,
+        billableDefault: project.BillableDefault
       });
       createdTasks.push(task);
     }
