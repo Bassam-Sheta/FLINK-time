@@ -172,22 +172,52 @@ const AuthService = {
       throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'MFA challenge token signature invalid.', 401);
     }
 
+    const mfaLock = LockService.getScriptLock();
+    mfaLock.waitLock(10000);
+    try {
     const account = MasterRepository.findAccountById(userId);
     const cred = MasterRepository.getCredentials(userId);
     if (!account || !cred || !cred.TotpSecret) {
       throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'User credentials or MFA configuration not found.', 401);
     }
 
+    if (
+      account.Status === CONSTANTS.ACCOUNT_STATUS.LOCKED ||
+      (cred.LockUntil && new Date(cred.LockUntil).getTime() > now)
+    ) {
+      throw new AppError(ERROR_CODES.ACCOUNT_LOCKED, 'Account is temporarily locked. Try again later.', 403);
+    }
+
     const verification = SecurityService.verifyTotpWithStep(cred.TotpSecret, code);
     if (!verification.valid) {
+      const failedCount = (parseInt(cred.FailedLoginCount, 10) || 0) + 1;
+      const credUpdates = { FailedLoginCount: failedCount };
+
+      if (failedCount >= CONSTANTS.LIMITS.MAX_FAILED_LOGIN_ATTEMPTS) {
+        const lockUntil = new Date(
+          now + CONSTANTS.LIMITS.LOCKOUT_DURATION_MINUTES * 60 * 1000
+        ).toISOString();
+        credUpdates.LockUntil = lockUntil;
+        MasterRepository.updateAccount(account.UserID, {
+          Status: CONSTANTS.ACCOUNT_STATUS.LOCKED
+        });
+      }
+
+      MasterRepository.updateCredentials(account.UserID, credUpdates);
       MasterRepository.logSecurityEvent({
         UserID: account.UserID,
         Username: account.Username,
         EventType: CONSTANTS.AUDIT_EVENTS.LOGIN_FAIL,
         Success: false,
-        metadata: { reason: 'Invalid MFA TOTP code' }
+        metadata: { reason: 'Invalid MFA TOTP code', failedAttempts: failedCount }
       });
-      throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'Invalid two-factor authentication code.', 401);
+      throw new AppError(
+        failedCount >= CONSTANTS.LIMITS.MAX_FAILED_LOGIN_ATTEMPTS ? ERROR_CODES.ACCOUNT_LOCKED : ERROR_CODES.AUTH_REQUIRED,
+        failedCount >= CONSTANTS.LIMITS.MAX_FAILED_LOGIN_ATTEMPTS
+          ? 'Account locked after repeated invalid two-factor codes.'
+          : 'Invalid two-factor authentication code.',
+        failedCount >= CONSTANTS.LIMITS.MAX_FAILED_LOGIN_ATTEMPTS ? 403 : 401
+      );
     }
 
     // RFC 6238 §5.2 Replay Protection: reject previously validated timestep
@@ -245,6 +275,9 @@ const AuthService = {
         mustChangePassword: account.MustChangePassword === true || account.MustChangePassword === 'TRUE'
       }
     };
+    } finally {
+      mfaLock.releaseLock();
+    }
   },
 
   /**
