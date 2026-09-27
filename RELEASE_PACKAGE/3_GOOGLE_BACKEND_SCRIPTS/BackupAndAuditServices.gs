@@ -4,180 +4,389 @@
  */
 
 const BackupService = {
+  _manifestHmac(payload) {
+    const key = SecurityService.getPepper() + '_FLINK_BACKUP_MANIFEST';
+    const bytes = SecurityService.hmacSha256(key, JSON.stringify(payload));
+    return Array.from(bytes)
+      .map(b => (b < 0 ? b + 256 : b).toString(16).padStart(2, '0'))
+      .join('');
+  },
+
+  _expectedSchema(scope) {
+    return scope === 'MASTER' ? MASTER_SCHEMA : WORKSPACE_SCHEMA;
+  },
+
+  _buildManifest(spreadsheet, scope, workspaceId = '') {
+    if (!spreadsheet) {
+      throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'Backup spreadsheet could not be opened.', 400);
+    }
+
+    const expectedSchema = this._expectedSchema(scope);
+    const sheetSummaries = [];
+
+    for (const [tabName, expectedHeaders] of Object.entries(expectedSchema)) {
+      const sheet = spreadsheet.getSheetByName(tabName);
+      if (!sheet) {
+        throw new AppError(ERROR_CODES.VALIDATION_ERROR, `Backup is missing required tab '${tabName}'.`, 400);
+      }
+      if (sheet.getLastRow() < 1 || sheet.getLastColumn() < expectedHeaders.length) {
+        throw new AppError(ERROR_CODES.VALIDATION_ERROR, `Backup tab '${tabName}' has an invalid header row.`, 400);
+      }
+
+      const actualHeaders = sheet
+        .getRange(1, 1, 1, expectedHeaders.length)
+        .getValues()[0]
+        .map(v => String(v).trim());
+
+      for (let i = 0; i < expectedHeaders.length; i++) {
+        if (actualHeaders[i] !== expectedHeaders[i]) {
+          throw new AppError(
+            ERROR_CODES.VALIDATION_ERROR,
+            `Backup tab '${tabName}' schema mismatch at column ${i + 1}: expected '${expectedHeaders[i]}', found '${actualHeaders[i]}'.`,
+            400
+          );
+        }
+      }
+
+      const rowCount = Math.max(0, sheet.getLastRow() - 1);
+      let contentHash = SecurityService.hashToken(JSON.stringify(actualHeaders));
+
+      // Hash data in bounded chunks to avoid building one huge in-memory JSON string.
+      const chunkSize = 250;
+      for (let offset = 0; offset < rowCount; offset += chunkSize) {
+        const count = Math.min(chunkSize, rowCount - offset);
+        const values = sheet
+          .getRange(2 + offset, 1, count, expectedHeaders.length)
+          .getValues();
+        contentHash = SecurityService.hashToken(contentHash + '|' + JSON.stringify(values));
+      }
+
+      sheetSummaries.push({
+        name: tabName,
+        rows: rowCount,
+        columns: expectedHeaders.length,
+        contentHash
+      });
+    }
+
+    if (scope === 'WORKSPACE') {
+      const infoSheet = spreadsheet.getSheetByName(CONSTANTS.WORKSPACE_TABS.WORKSPACE_INFO);
+      if (!infoSheet || infoSheet.getLastRow() < 2) {
+        throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'Backup WorkspaceInfo row is missing.', 400);
+      }
+      const info = infoSheet.getRange(2, 1, 1, WORKSPACE_SCHEMA.WorkspaceInfo.length).getValues()[0];
+      if (String(info[0]) !== String(workspaceId)) {
+        throw new AppError(
+          ERROR_CODES.WORKSPACE_DENIED,
+          `Backup belongs to workspace '${info[0] || 'UNKNOWN'}', not '${workspaceId}'.`,
+          403
+        );
+      }
+      if (String(info[5]) !== String(CONSTANTS.SCHEMA_VERSION)) {
+        throw new AppError(
+          ERROR_CODES.VALIDATION_ERROR,
+          `Backup schema version ${info[5]} is incompatible with required version ${CONSTANTS.SCHEMA_VERSION}.`,
+          400
+        );
+      }
+    }
+
+    const manifest = {
+      scope,
+      workspaceId: scope === 'WORKSPACE' ? workspaceId : 'MASTER',
+      schemaVersion: CONSTANTS.SCHEMA_VERSION,
+      sheetCount: sheetSummaries.length,
+      sheets: sheetSummaries
+    };
+
+    return {
+      ...manifest,
+      manifestHash: this._manifestHmac(manifest)
+    };
+  },
+
+  _getRegistryRecord(backupId) {
+    if (!backupId) {
+      throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'backupId is required.', 400);
+    }
+    const { rows } = MasterRepository.getTableData(CONSTANTS.MASTER_TABS.BACKUP_REGISTRY);
+    const record = rows.find(row => row.BackupID === backupId);
+    if (!record) {
+      throw new AppError(ERROR_CODES.NOT_FOUND, `Registered backup '${backupId}' was not found.`, 404);
+    }
+    return record;
+  },
+
+  _parseStoredManifest(record) {
+    try {
+      const metadata = JSON.parse(record.ChecksumMetadata || '{}');
+      if (!metadata || !metadata.manifestHash || !Array.isArray(metadata.sheets)) {
+        throw new Error('manifest fields missing');
+      }
+      return metadata;
+    } catch (e) {
+      throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'Backup registry manifest is missing or malformed.', 400);
+    }
+  },
+
+  _openBackupSpreadsheet(fileId) {
+    if (!fileId) throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'Backup file ID is missing.', 400);
+
+    if (typeof DriveApp !== 'undefined' && DriveApp.getFileById) {
+      let file;
+      try {
+        file = DriveApp.getFileById(fileId);
+        if (file.isTrashed && file.isTrashed()) {
+          throw new Error('file is in trash');
+        }
+      } catch (e) {
+        throw new AppError(ERROR_CODES.NOT_FOUND, 'Backup Drive file is unavailable: ' + e.message, 404);
+      }
+    }
+
+    if (typeof SpreadsheetApp === 'undefined' || !SpreadsheetApp.openById) {
+      throw new AppError(ERROR_CODES.INTERNAL_ERROR, 'Spreadsheet service is unavailable.', 500);
+    }
+
+    try {
+      return SpreadsheetApp.openById(fileId);
+    } catch (e) {
+      throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'Backup file is not an accessible Google Spreadsheet: ' + e.message, 400);
+    }
+  },
+
   /**
-   * Creates a snapshot copy of a workspace or master sheet in Google Drive
+   * Creates an immutable registered snapshot and records a pepper-keyed content manifest.
    */
   createBackup(superAdminContext, workspaceId = null) {
     AuthorizationService.assertRole(superAdminContext, [CONSTANTS.ROLES.SUPER_ADMIN]);
 
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const scope = workspaceId ? 'WORKSPACE' : 'MASTER';
+    const timestamp = new Date().toISOString();
+    const fileTimestamp = timestamp.replace(/[:.]/g, '-');
     let sourceSpreadsheetId = '';
     let backupPrefix = '';
 
     if (workspaceId) {
       const ws = MasterRepository.getWorkspace(workspaceId);
-      if (!ws) throw new AppError(ERROR_CODES.NOT_FOUND, `Workspace ${workspaceId} not found.`);
+      if (!ws) throw new AppError(ERROR_CODES.NOT_FOUND, `Workspace ${workspaceId} not found.`, 404);
+      if (ws.Status !== CONSTANTS.WORKSPACE_STATUS.ACTIVE) {
+        throw new AppError(ERROR_CODES.WORKSPACE_DENIED, 'Only an active workspace can be backed up.', 403);
+      }
       sourceSpreadsheetId = ws.SpreadsheetID;
-      backupPrefix = `${ws.WorkspaceID}_${ws.WorkspaceName.replace(/\s+/g, '_')}`;
+      backupPrefix = `${ws.WorkspaceID}_${String(ws.WorkspaceName || 'Workspace').replace(/[^A-Za-z0-9_-]+/g, '_')}`;
     } else {
       const masterSs = MasterRepository.getMasterSpreadsheet();
       sourceSpreadsheetId = masterSs.getId();
       backupPrefix = 'MASTER_CONTROL_SHEET';
     }
 
-    const backupFileName = `${backupPrefix}_BACKUP_${timestamp}`;
-    let backupFileId = '';
-
-    if (typeof DriveApp !== 'undefined' && DriveApp.getFileById) {
-      try {
-        const file = DriveApp.getFileById(sourceSpreadsheetId);
-        const copy = file.makeCopy(backupFileName);
-        backupFileId = copy.getId();
-      } catch (e) {
-        throw new AppError(ERROR_CODES.INTERNAL_ERROR, 'Drive backup failed: ' + e.message);
-      }
-    } else {
-      // Mock environment ID
-      backupFileId = `mock_backup_${Date.now()}`;
+    if (!sourceSpreadsheetId) {
+      throw new AppError(ERROR_CODES.INTERNAL_ERROR, 'Backup source spreadsheet ID is missing.', 500);
     }
 
-    const auditRecord = {
-      backupFileId,
-      backupFileName,
-      sourceSpreadsheetId,
-      workspaceId: workspaceId || 'MASTER',
-      createdAt: new Date().toISOString()
-    };
+    const backupId = Validation.generateId('BKP');
+    const backupFileName = `${backupPrefix}_BACKUP_${fileTimestamp}`;
+    let backupFileId = '';
 
-    MasterRepository.logGlobalAudit({
-      ActorUserID: superAdminContext.userId,
-      ActorRole: superAdminContext.role,
-      WorkspaceID: workspaceId || '',
-      EntityType: 'BACKUP',
-      EntityID: backupFileId,
-      Action: CONSTANTS.AUDIT_EVENTS.BACKUP_CREATED,
-      AfterJSON: auditRecord,
-      Reason: 'Snapshot backup completed'
-    });
+    try {
+      if (typeof DriveApp === 'undefined' || !DriveApp.getFileById) {
+        throw new Error('Drive service is unavailable');
+      }
+      const sourceFile = DriveApp.getFileById(sourceSpreadsheetId);
+      const copy = sourceFile.makeCopy(backupFileName);
+      backupFileId = copy.getId();
 
-    return {
-      ok: true,
-      backupFileId,
-      backupFileName,
-      backupId: backupFileId
-    };
+      const backupSpreadsheet = this._openBackupSpreadsheet(backupFileId);
+      const manifest = this._buildManifest(backupSpreadsheet, scope, workspaceId || '');
+
+      MasterRepository.appendRow(CONSTANTS.MASTER_TABS.BACKUP_REGISTRY, {
+        BackupID: backupId,
+        Scope: scope,
+        WorkspaceID: workspaceId || 'MASTER',
+        SourceFileID: sourceSpreadsheetId,
+        BackupFileID: backupFileId,
+        CreatedAt: timestamp,
+        Status: 'AVAILABLE',
+        Verified: true,
+        ChecksumMetadata: JSON.stringify(manifest)
+      });
+
+      MasterRepository.logGlobalAudit({
+        ActorUserID: superAdminContext.userId,
+        ActorRole: superAdminContext.role,
+        WorkspaceID: workspaceId || '',
+        EntityType: 'BACKUP',
+        EntityID: backupId,
+        Action: CONSTANTS.AUDIT_EVENTS.BACKUP_CREATED,
+        AfterJSON: {
+          backupId,
+          backupFileId,
+          sourceSpreadsheetId,
+          scope,
+          manifestHash: manifest.manifestHash
+        },
+        Reason: 'Registered snapshot backup completed and verified'
+      });
+
+      return {
+        ok: true,
+        backupId,
+        backupFileId,
+        backupFileName,
+        scope,
+        workspaceId: workspaceId || 'MASTER',
+        verified: true,
+        manifestHash: manifest.manifestHash
+      };
+    } catch (e) {
+      if (backupFileId) {
+        try { DriveApp.getFileById(backupFileId).setTrashed(true); } catch (trashErr) {}
+      }
+      if (e instanceof AppError) throw e;
+      throw new AppError(ERROR_CODES.INTERNAL_ERROR, 'Drive backup failed: ' + e.message, 500);
+    }
   },
 
-  /**
-   * Convenience alias for createBackup scoped to a workspace
-   */
   createWorkspaceBackup(superAdminContext, workspaceId) {
     return this.createBackup(superAdminContext, workspaceId);
   },
 
   /**
-   * Validates snapshot integrity, tab schema and manifest consistency before applying restore
+   * Reopens and fully verifies a registered backup. Arbitrary Drive file IDs are rejected.
    */
   validateBackup(superAdminContext, workspaceId, backupId) {
     AuthorizationService.assertRole(superAdminContext, [CONSTANTS.ROLES.SUPER_ADMIN]);
-    if (workspaceId) {
-      const ws = MasterRepository.getWorkspace(workspaceId);
-      if (!ws) throw new AppError(ERROR_CODES.NOT_FOUND, `Workspace ${workspaceId} not found.`);
+    if (!workspaceId) {
+      throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'workspaceId is required for workspace restore validation.', 400);
+    }
+
+    const ws = MasterRepository.getWorkspace(workspaceId);
+    if (!ws) throw new AppError(ERROR_CODES.NOT_FOUND, `Workspace ${workspaceId} not found.`, 404);
+
+    const record = this._getRegistryRecord(backupId);
+    if (record.Scope !== 'WORKSPACE' || String(record.WorkspaceID) !== String(workspaceId)) {
+      throw new AppError(ERROR_CODES.WORKSPACE_DENIED, 'Backup is not registered for the requested workspace.', 403);
+    }
+    if (record.Status !== 'AVAILABLE' || !(record.Verified === true || record.Verified === 'TRUE' || record.Verified === 1)) {
+      throw new AppError(ERROR_CODES.CONFLICT, 'Backup registry record is not in a verified AVAILABLE state.', 409);
+    }
+
+    const storedManifest = this._parseStoredManifest(record);
+    const spreadsheet = this._openBackupSpreadsheet(record.BackupFileID);
+    const currentManifest = this._buildManifest(spreadsheet, 'WORKSPACE', workspaceId);
+
+    if (!SecurityService.constantTimeEquals(storedManifest.manifestHash, currentManifest.manifestHash)) {
+      throw new AppError(
+        ERROR_CODES.CRYPTO_FAILURE,
+        'Backup content no longer matches its registered integrity manifest.',
+        409
+      );
     }
 
     return {
       ok: true,
       valid: true,
-      backupId: backupId || 'LATEST',
-      schemaVersion: CONSTANTS.SCHEMA_VERSION,
-      manifest: {
-        workspaceId: workspaceId || 'MASTER',
-        status: 'VERIFIED',
-        schemaVersion: CONSTANTS.SCHEMA_VERSION,
-        validatedAt: new Date().toISOString()
-      },
-      message: 'Backup snapshot verified and intact on temporary sheet.'
+      backupId: record.BackupID,
+      backupFileId: record.BackupFileID,
+      workspaceId,
+      schemaVersion: currentManifest.schemaVersion,
+      manifestHash: currentManifest.manifestHash,
+      createdAt: record.CreatedAt,
+      message: 'Registered backup content and schema verified successfully.'
     };
   },
 
   /**
-   * Applies backup restore with application-level consistency:
-   * 1. Quiesces workspace (sets MAINTENANCE state)
-   * 2. Clears zombie active timers from restored snapshot
-   * 3. Rebuilds rollups
-   * 4. Swaps spreadsheet registry pointer
-   * 5. Restores ACTIVE state and emits immutable audit event
+   * Restores a registered workspace backup through a new working copy.
+   * The immutable backup file itself never becomes the live workspace.
    */
-  restoreBackup(superAdminContext, workspaceId, backupFileId) {
+  restoreBackup(superAdminContext, workspaceId, backupId) {
     AuthorizationService.assertRole(superAdminContext, [CONSTANTS.ROLES.SUPER_ADMIN]);
+    if (!workspaceId || !backupId) {
+      throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'workspaceId and backupId are required for restore.', 400);
+    }
 
     let scriptLock = null;
     if (typeof LockService !== 'undefined' && LockService.getScriptLock) {
       scriptLock = LockService.getScriptLock();
-      const hasLock = scriptLock.tryLock(15000);
-      if (!hasLock) {
-        throw new AppError(ERROR_CODES.SERVER_BUSY, 'Could not acquire lock to apply restore. Please retry.', 409);
+      if (!scriptLock.tryLock(30000)) {
+        throw new AppError(ERROR_CODES.SERVER_BUSY, 'Could not acquire restore lock. Please retry.', 409);
       }
     }
 
+    let previousSpreadsheetId = '';
+    let candidateFileId = '';
+    let workspaceWasQuiesced = false;
+
     try {
       const ws = MasterRepository.getWorkspace(workspaceId);
-      if (!ws) throw new AppError(ERROR_CODES.NOT_FOUND, `Workspace ${workspaceId} not found.`);
+      if (!ws) throw new AppError(ERROR_CODES.NOT_FOUND, `Workspace ${workspaceId} not found.`, 404);
+      if (ws.Status !== CONSTANTS.WORKSPACE_STATUS.ACTIVE) {
+        throw new AppError(ERROR_CODES.WORKSPACE_DENIED, `Workspace must be ACTIVE before restore; current status is ${ws.Status}.`, 403);
+      }
+      previousSpreadsheetId = ws.SpreadsheetID;
 
-      const previousSpreadsheetId = ws.SpreadsheetID;
+      const validation = this.validateBackup(superAdminContext, workspaceId, backupId);
+      const record = this._getRegistryRecord(backupId);
 
-      // 1. Quiesce workspace
-      MasterRepository.updateWorkspace(workspaceId, { Status: 'MAINTENANCE' });
+      // Safety snapshot of the currently live workspace before any pointer change.
+      const safetyBackup = this.createBackup(superAdminContext, workspaceId);
 
-      // 2. Pointer switch in Master registry to restored backup sheet
-      const newSpreadsheetId = backupFileId || previousSpreadsheetId;
+      const backupFile = DriveApp.getFileById(record.BackupFileID);
+      const candidateName = `RESTORE_${workspaceId}_${new Date().toISOString().replace(/[:.]/g, '-')}`;
+      const candidateFile = backupFile.makeCopy(candidateName);
+      candidateFileId = candidateFile.getId();
+
+      const candidateSpreadsheet = this._openBackupSpreadsheet(candidateFileId);
+      const candidateManifest = this._buildManifest(candidateSpreadsheet, 'WORKSPACE', workspaceId);
+      if (!SecurityService.constantTimeEquals(validation.manifestHash, candidateManifest.manifestHash)) {
+        throw new AppError(ERROR_CODES.CRYPTO_FAILURE, 'Restore working copy failed integrity verification.', 409);
+      }
+
+      // Quiesce all normal workspace operations before changing the live pointer.
       MasterRepository.updateWorkspace(workspaceId, {
-        SpreadsheetID: newSpreadsheetId,
-        Status: 'MAINTENANCE',
+        Status: CONSTANTS.WORKSPACE_STATUS.MAINTENANCE,
         UpdatedAt: new Date().toISOString()
       });
+      workspaceWasQuiesced = true;
 
-      // Invalidate router cache so all subsequent operations bind to the restored sheet
+      // Clear stale active timers directly on the candidate while it is still offline.
+      const timersSheet = candidateSpreadsheet.getSheetByName(CONSTANTS.WORKSPACE_TABS.ACTIVE_TIMERS);
+      if (timersSheet && timersSheet.getLastRow() > 1) {
+        timersSheet.deleteRows(2, timersSheet.getLastRow() - 1);
+      }
+
+      MasterRepository.updateWorkspace(workspaceId, {
+        SpreadsheetID: candidateFileId,
+        Status: CONSTANTS.WORKSPACE_STATUS.MAINTENANCE,
+        UpdatedAt: new Date().toISOString()
+      });
       if (typeof WorkspaceRouter !== 'undefined' && WorkspaceRouter.clearCache) {
         WorkspaceRouter.clearCache();
       }
 
-      // 3. Clear any stale active timers in the restored sheet to avoid zombie timers
-      try {
-        const activeTimersData = SheetRepository.getTableData(workspaceId, CONSTANTS.WORKSPACE_TABS.ACTIVE_TIMERS);
-        if (activeTimersData && activeTimersData.rows) {
-          for (const timer of activeTimersData.rows) {
-            SheetRepository.deleteActiveTimer(workspaceId, timer.UserID);
-          }
-        }
-      } catch (e) {}
+      // Revoke all workspace-member sessions before reopening the restored dataset.
+      const accesses = MasterRepository.getWorkspaceAccessForWorkspace(workspaceId);
+      for (const access of accesses) {
+        SessionService.revokeAllUserSessions(access.UserID);
+      }
 
-      // 4. Invalidate all active sessions for users in this workspace to prevent stale client state
-      try {
-        const accesses = MasterRepository.getWorkspaceAccessForWorkspace(workspaceId);
-        for (const acc of accesses) {
-          SessionService.revokeAllUserSessions(acc.UserID);
-        }
-      } catch (e) {}
-
-      // 5. Rebuild rollups for consistency on restored sheet
-      try {
-        if (typeof RollupService !== 'undefined' && RollupService.rebuildRollups) {
-          RollupService.rebuildRollups(workspaceId);
-        }
-      } catch (e) {}
-
-      // 6. Return workspace to ACTIVE status
+      // Re-open only while holding the restore ScriptLock, then reconcile rollups.
       MasterRepository.updateWorkspace(workspaceId, {
         Status: CONSTANTS.WORKSPACE_STATUS.ACTIVE,
         UpdatedAt: new Date().toISOString()
       });
-
-      if (typeof SpreadsheetApp !== 'undefined' && SpreadsheetApp.flush) {
-        try { SpreadsheetApp.flush(); } catch (fErr) {}
+      if (typeof WorkspaceRouter !== 'undefined' && WorkspaceRouter.clearCache) {
+        WorkspaceRouter.clearCache();
       }
 
-      // 6. Emit immutable audit event
+      RollupService.rebuildRollups(workspaceId);
+
+      if (typeof SpreadsheetApp !== 'undefined' && SpreadsheetApp.flush) {
+        SpreadsheetApp.flush();
+      }
+
       MasterRepository.logGlobalAudit({
         ActorUserID: superAdminContext.userId,
         ActorRole: superAdminContext.role,
@@ -186,18 +395,60 @@ const BackupService = {
         EntityID: workspaceId,
         Action: 'RESTORE_COMPLETED',
         BeforeJSON: { spreadsheetId: previousSpreadsheetId },
-        AfterJSON: { spreadsheetId: newSpreadsheetId, restoredFrom: backupFileId },
-        Reason: 'Application-consistent workspace backup restore applied'
+        AfterJSON: {
+          spreadsheetId: candidateFileId,
+          restoredBackupId: backupId,
+          safetyBackupId: safetyBackup.backupId
+        },
+        Reason: 'Verified registered workspace restore applied through isolated working copy'
       });
 
       return {
         ok: true,
         workspaceId,
+        backupId,
+        safetyBackupId: safetyBackup.backupId,
         previousSpreadsheetId,
-        restoredSpreadsheetId: newSpreadsheetId,
+        restoredSpreadsheetId: candidateFileId,
         status: CONSTANTS.WORKSPACE_STATUS.ACTIVE,
-        message: `Workspace ${workspaceId} successfully restored with application-level consistency.`
+        message: `Workspace ${workspaceId} restored from verified backup ${backupId}.`
       };
+    } catch (err) {
+      if (workspaceWasQuiesced && previousSpreadsheetId) {
+        try {
+          MasterRepository.updateWorkspace(workspaceId, {
+            SpreadsheetID: previousSpreadsheetId,
+            Status: CONSTANTS.WORKSPACE_STATUS.ACTIVE,
+            UpdatedAt: new Date().toISOString()
+          });
+          if (typeof WorkspaceRouter !== 'undefined' && WorkspaceRouter.clearCache) {
+            WorkspaceRouter.clearCache();
+          }
+        } catch (rollbackErr) {
+          console.error('Restore rollback failed: ' + rollbackErr.message);
+        }
+      }
+
+      if (candidateFileId) {
+        try { DriveApp.getFileById(candidateFileId).setTrashed(true); } catch (trashErr) {}
+      }
+
+      try {
+        MasterRepository.logGlobalAudit({
+          ActorUserID: superAdminContext.userId,
+          ActorRole: superAdminContext.role,
+          WorkspaceID: workspaceId,
+          EntityType: 'WORKSPACE',
+          EntityID: workspaceId,
+          Action: 'RESTORE_FAILED',
+          BeforeJSON: { spreadsheetId: previousSpreadsheetId },
+          AfterJSON: { backupId, candidateFileId },
+          Reason: err && err.message ? err.message : 'Restore failed'
+        });
+      } catch (auditErr) {}
+
+      if (err instanceof AppError) throw err;
+      throw new AppError(ERROR_CODES.INTERNAL_ERROR, 'Restore failed and was rolled back: ' + err.message, 500);
     } finally {
       if (scriptLock) {
         try { scriptLock.releaseLock(); } catch (e) {}
