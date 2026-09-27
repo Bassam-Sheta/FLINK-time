@@ -302,7 +302,8 @@ const WORKSPACE_SCHEMA = {
   ],
   Timesheets: [
     'TimesheetID', 'UserID', 'PeriodStart', 'PeriodEnd', 'TotalSeconds',
-    'Status', 'SubmittedAt', 'ReviewedBy', 'ReviewedAt', 'ReviewComment', 'LockedAt'
+    'Status', 'SubmittedAt', 'ReviewedBy', 'ReviewedAt', 'ReviewComment', 'LockedAt',
+    'EntrySnapshotJSON'
   ],
   Approvals: [
     'ApprovalID', 'TimesheetID', 'UserID', 'Action', 'ActorUserID',
