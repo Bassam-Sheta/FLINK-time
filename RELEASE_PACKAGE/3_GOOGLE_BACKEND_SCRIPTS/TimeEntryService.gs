@@ -82,9 +82,10 @@ const TimeEntryService = {
         ClientType: 'WEB'
       });
 
-      timeEntry.entryId = timeEntry.EntryID;
-      timeEntry.version = timeEntry.Version;
-      return timeEntry;
+      return this.toTimeEntryDTO(
+        timeEntry,
+        authContext.role !== CONSTANTS.ROLES.USER
+      );
     } finally {
       if (scriptLock) {
         try { scriptLock.releaseLock(); } catch (e) {}
@@ -195,9 +196,6 @@ const TimeEntryService = {
         RollupService.rebuildRollups(workspaceId);
       }
 
-      updated.entryId = updated.EntryID || entryId;
-      updated.version = updated.Version;
-
       SheetRepository.logWorkspaceAudit(workspaceId, {
         ActorUserID: authContext.userId,
         ActorRole: authContext.role,
@@ -208,7 +206,10 @@ const TimeEntryService = {
         AfterJSON: updated
       });
 
-      return updated;
+      return this.toTimeEntryDTO(
+        updated,
+        authContext.role !== CONSTANTS.ROLES.USER
+      );
     } finally {
       if (scriptLock) {
         try { scriptLock.releaseLock(); } catch (e) {}
@@ -219,10 +220,10 @@ const TimeEntryService = {
   /**
    * Domain-to-DTO Mapper: strictly isolates Sheet storage schema from API response contracts
    */
-  toTimeEntryDTO(entry) {
+  toTimeEntryDTO(entry, includeFinancial = false) {
     if (!entry) return null;
     const durationSeconds = parseInt(entry.DurationSeconds, 10) || 0;
-    return {
+    const dto = {
       entryId: entry.EntryID,
       userId: entry.UserID,
       projectId: entry.ProjectID || '',
@@ -234,8 +235,6 @@ const TimeEntryService = {
       durationSeconds: durationSeconds,
       durationHours: +(durationSeconds / 3600).toFixed(2),
       billable: entry.Billable === true || entry.Billable === 'TRUE' || entry.Billable === 1,
-      hourlyRateSnapshot: parseFloat(entry.HourlyRateSnapshot) || 0,
-      costRateSnapshot: parseFloat(entry.CostRateSnapshot) || 0,
       status: entry.Status || 'ACTIVE',
       approvalStatus: entry.ApprovalStatus || 'OPEN',
       locked: entry.Locked === true || entry.Locked === 'TRUE' || entry.Locked === 1,
@@ -243,7 +242,7 @@ const TimeEntryService = {
       version: parseInt(entry.Version, 10) || 1,
       createdAt: entry.CreatedAt,
       updatedAt: entry.UpdatedAt,
-      // Retain PascalCase references for internal backwards compatibility
+      // Non-financial compatibility aliases.
       EntryID: entry.EntryID,
       UserID: entry.UserID,
       DurationSeconds: durationSeconds,
@@ -251,6 +250,13 @@ const TimeEntryService = {
       Locked: entry.Locked === true || entry.Locked === 'TRUE' || entry.Locked === 1,
       Version: parseInt(entry.Version, 10) || 1
     };
+
+    if (includeFinancial) {
+      dto.hourlyRateSnapshot = parseFloat(entry.HourlyRateSnapshot) || 0;
+      dto.costRateSnapshot = parseFloat(entry.CostRateSnapshot) || 0;
+    }
+
+    return dto;
   },
 
   /**
@@ -333,7 +339,8 @@ const TimeEntryService = {
     }
 
     const rows = SheetRepository.listTimeEntries(workspaceId, queryFilters);
-    return rows.map(entry => this.toTimeEntryDTO(entry));
+    const includeFinancial = authContext.role !== CONSTANTS.ROLES.USER;
+    return rows.map(entry => this.toTimeEntryDTO(entry, includeFinancial));
   },
 
   /**
