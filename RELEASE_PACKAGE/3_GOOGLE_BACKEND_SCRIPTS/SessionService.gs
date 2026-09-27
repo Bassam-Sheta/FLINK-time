@@ -15,7 +15,9 @@ const SessionService = {
     const sessionId = Validation.generateId('SES');
 
     const idleTimeoutMs = CONSTANTS.LIMITS.SESSION_IDLE_TIMEOUT_HOURS * 3600 * 1000;
+    const absoluteTimeoutMs = CONSTANTS.LIMITS.SESSION_ABSOLUTE_TIMEOUT_HOURS * 3600 * 1000;
     const expiresAt = new Date(now.getTime() + idleTimeoutMs);
+    const absoluteExpiresAt = new Date(now.getTime() + absoluteTimeoutMs);
 
     const sessionRecord = {
       SessionID: sessionId,
@@ -25,6 +27,7 @@ const SessionService = {
       CreatedAt: now.toISOString(),
       LastSeenAt: now.toISOString(),
       ExpiresAt: expiresAt.toISOString(),
+      AbsoluteExpiresAt: absoluteExpiresAt.toISOString(),
       Revoked: false,
       RevokedAt: ''
     };
@@ -58,11 +61,18 @@ const SessionService = {
     const lastSeenAt = new Date(session.LastSeenAt).getTime();
     const createdAt = new Date(session.CreatedAt).getTime();
 
-    // Check expiration and idle timeout
     const idleTimeoutMs = CONSTANTS.LIMITS.SESSION_IDLE_TIMEOUT_HOURS * 3600 * 1000;
     const absoluteTimeoutMs = CONSTANTS.LIMITS.SESSION_ABSOLUTE_TIMEOUT_HOURS * 3600 * 1000;
+    const storedAbsoluteExpiresAt = new Date(session.AbsoluteExpiresAt || '').getTime();
+    const absoluteExpiresAt = isNaN(storedAbsoluteExpiresAt)
+      ? createdAt + absoluteTimeoutMs
+      : storedAbsoluteExpiresAt;
 
-    if (now > expiresAt || (now - lastSeenAt) > idleTimeoutMs || (now - createdAt) > absoluteTimeoutMs) {
+    if (
+      now > expiresAt ||
+      (now - lastSeenAt) > idleTimeoutMs ||
+      now > absoluteExpiresAt
+    ) {
       MasterRepository.updateSession(session.SessionID, {
         Revoked: true,
         RevokedAt: new Date().toISOString()
@@ -88,12 +98,19 @@ const SessionService = {
       throw new AppError(ERROR_CODES.ACCOUNT_PASSIVE, 'Account is inactive or suspended.', 403);
     }
 
-    // Slide expiration forward (capped at absolute timeout)
-    const newExpiresMs = Math.min(now + idleTimeoutMs, createdAt + absoluteTimeoutMs);
-    MasterRepository.updateSession(session.SessionID, {
-      LastSeenAt: new Date().toISOString(),
-      ExpiresAt: new Date(newExpiresMs).toISOString()
-    });
+    // Persist activity at a coarse interval instead of writing to Sheets on
+    // every authenticated read/poll. Idle semantics remain unchanged because
+    // the touch interval is tiny compared with the idle timeout.
+    const touchIntervalMs =
+      (CONSTANTS.LIMITS.SESSION_TOUCH_INTERVAL_MINUTES || 5) * 60 * 1000;
+    if ((now - lastSeenAt) >= touchIntervalMs) {
+      const newExpiresMs = Math.min(now + idleTimeoutMs, absoluteExpiresAt);
+      MasterRepository.updateSession(session.SessionID, {
+        LastSeenAt: new Date(now).toISOString(),
+        ExpiresAt: new Date(newExpiresMs).toISOString(),
+        AbsoluteExpiresAt: new Date(absoluteExpiresAt).toISOString()
+      });
+    }
 
     return {
       session,
