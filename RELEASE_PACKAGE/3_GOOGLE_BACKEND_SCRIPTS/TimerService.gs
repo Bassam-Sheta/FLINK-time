@@ -266,7 +266,10 @@ const TimerService = {
         ClientType: activeTimer.Source || 'WEB'
       });
 
-      return timeEntry;
+      return TimeEntryService.toTimeEntryDTO(
+        timeEntry,
+        authContext.role !== CONSTANTS.ROLES.USER
+      );
     } finally {
       if (scriptLock) {
         try { scriptLock.releaseLock(); } catch (e) {}
