@@ -16,7 +16,14 @@ const ReportService = {
       ? params.groupings.slice(0, 3)
       : ['project', 'user'];
 
-    const entries = SheetRepository.listTimeEntries(workspaceId, params.filters || {});
+    const isRegularUser = authContext.role === CONSTANTS.ROLES.USER;
+    const filters = { ...(params.filters || {}) };
+    if (isRegularUser) {
+      // USER reports are always self-scoped regardless of client-supplied filters.
+      filters.userId = authContext.userId;
+    }
+
+    const entries = SheetRepository.listTimeEntries(workspaceId, filters);
 
     // Cache project and user names
     const projects = SheetRepository.listProjects(workspaceId);
@@ -128,20 +135,37 @@ const ReportService = {
 
     const tree = buildGroupTree(entries, 0);
 
+    // Financial rates/cost/revenue are management-only data.
+    if (isRegularUser) {
+      const stripFinancialFields = node => {
+        if (!node || typeof node !== 'object') return;
+        delete node.costCents;
+        delete node.revenueCents;
+        delete node.cost;
+        delete node.revenue;
+        (node.groups || []).forEach(stripFinancialFields);
+      };
+      stripFinancialFields(tree);
+    }
+
+    const overall = {
+      totalSeconds: tree.totalSeconds,
+      billableSeconds: tree.billableSeconds,
+      totalHours: tree.totalHours,
+      billableHours: tree.billableHours
+    };
+    if (!isRegularUser) {
+      overall.costCents = tree.costCents;
+      overall.revenueCents = tree.revenueCents;
+      overall.cost = tree.cost;
+      overall.revenue = tree.revenue;
+    }
+
     return {
       workspaceId,
       groupings,
       totalEntries: entries.length,
-      overall: {
-        totalSeconds: tree.totalSeconds,
-        billableSeconds: tree.billableSeconds,
-        totalHours: tree.totalHours,
-        billableHours: tree.billableHours,
-        costCents: tree.costCents,
-        revenueCents: tree.revenueCents,
-        cost: tree.cost,
-        revenue: tree.revenue
-      },
+      overall,
       tree: tree.groups || []
     };
   },
@@ -152,7 +176,12 @@ const ReportService = {
   getDetailedReport(authContext, workspaceId, params = {}) {
     AuthorizationService.assertWorkspaceAccess(authContext, workspaceId);
 
-    const entries = SheetRepository.listTimeEntries(workspaceId, params.filters || {});
+    const filters = { ...(params.filters || {}) };
+    if (authContext.role === CONSTANTS.ROLES.USER) {
+      // Ignore any attempt by a USER client to request another user's records.
+      filters.userId = authContext.userId;
+    }
+    const entries = SheetRepository.listTimeEntries(workspaceId, filters);
 
     // Resolve entities for human-readable labels
     const projects = SheetRepository.listProjects(workspaceId);
