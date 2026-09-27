@@ -198,6 +198,22 @@ const MasterRepository = {
         Active: false
       });
     }
+
+    // PrimaryWorkspaceID is only a UI/default-selection hint. Keep it synchronized
+    // so revoked workspaces are not shown as the user's default workspace.
+    const account = this.findAccountById(userId);
+    if (account && account.PrimaryWorkspaceID === workspaceId) {
+      const replacement = rows.find(r =>
+        r.UserID === userId &&
+        r.WorkspaceID !== workspaceId &&
+        (r.Active === true || r.Active === 'TRUE' || r.Active === 1)
+      );
+      this.updateAccount(userId, {
+        PrimaryWorkspaceID: replacement ? replacement.WorkspaceID : '',
+        UpdatedAt: new Date().toISOString(),
+        UpdatedBy: 'SYSTEM'
+      });
+    }
   },
 
   /* ------------------- SESSIONS ------------------- */
