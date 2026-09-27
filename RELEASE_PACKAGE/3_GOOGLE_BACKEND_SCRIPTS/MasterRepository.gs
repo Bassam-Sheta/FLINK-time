@@ -190,6 +190,13 @@ const MasterRepository = {
     return this.appendRow(CONSTANTS.MASTER_TABS.WORKSPACE_ACCESS, accessData);
   },
 
+  syncWorkspaceAccessRole(userId, role) {
+    const { rows } = this.getTableData(CONSTANTS.MASTER_TABS.WORKSPACE_ACCESS);
+    rows
+      .filter(r => r.UserID === userId && (r.Active === true || r.Active === 'TRUE' || r.Active === 1))
+      .forEach(r => this.updateRow(CONSTANTS.MASTER_TABS.WORKSPACE_ACCESS, r._rowIndex, { Role: role }));
+  },
+
   removeWorkspaceAccess(userId, workspaceId) {
     const { rows } = this.getTableData(CONSTANTS.MASTER_TABS.WORKSPACE_ACCESS);
     const existing = rows.find(r => r.UserID === userId && r.WorkspaceID === workspaceId);
