@@ -46,7 +46,7 @@ const TimesheetService = {
     const timesheets = SheetRepository.listTimesheets(workspaceId, { userId });
     const existingTimesheet = timesheets.find(ts => {
       const pStart = new Date(ts.PeriodStart).getTime();
-      return Math.abs(pStart - startDate.getTime()) < 86400000;
+      return pStart === startDate.getTime();
     }) || null;
 
     // Build project/task matrix
@@ -128,14 +128,33 @@ const TimesheetService = {
 
     try {
       const userId = authContext.userId;
-      const startDate = new Date(payload.periodStart);
-      const endDate = new Date(payload.periodEnd);
-      if (isNaN(startDate.getTime()) || isNaN(endDate.getTime()) || endDate.getTime() < startDate.getTime()) {
+      const requestedStart = new Date(payload.periodStart);
+      const requestedEnd = new Date(payload.periodEnd);
+      if (
+        isNaN(requestedStart.getTime()) ||
+        isNaN(requestedEnd.getTime()) ||
+        requestedEnd.getTime() < requestedStart.getTime()
+      ) {
         throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'A valid timesheet periodStart and periodEnd are required.');
       }
-      if ((endDate.getTime() - startDate.getTime()) > (8 * 24 * 3600 * 1000)) {
-        throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'Timesheet submission period cannot exceed one week.');
+
+      // Canonicalize the period on the server. Clients may submit only one exact
+      // configured workspace week; arbitrary/overlapping partial ranges are rejected.
+      const expectedWeek = TimezoneService.getWeekBounds(workspaceId, requestedStart);
+      const startDate = expectedWeek.startUtc;
+      const endDate = expectedWeek.endUtc;
+      const toleranceMs = 1000;
+      if (
+        Math.abs(requestedStart.getTime() - startDate.getTime()) > toleranceMs ||
+        Math.abs(requestedEnd.getTime() - endDate.getTime()) > toleranceMs
+      ) {
+        throw new AppError(
+          ERROR_CODES.VALIDATION_ERROR,
+          `Timesheet period must match the configured workspace week (${expectedWeek.startLocalDate} to ${expectedWeek.endLocalDate}, ${expectedWeek.timezone}).`,
+          400
+        );
       }
+
       const startIso = startDate.toISOString();
       const endIso = endDate.toISOString();
 
@@ -159,7 +178,7 @@ const TimesheetService = {
       const existingTimesheets = SheetRepository.listTimesheets(workspaceId, { userId });
       const existing = existingTimesheets.find(ts => {
         const pStart = new Date(ts.PeriodStart).getTime();
-        return Math.abs(pStart - startDate.getTime()) < 86400000;
+        return pStart === startDate.getTime();
       });
 
       if (existing && existing.Status === CONSTANTS.TIMESHEET_STATUS.APPROVED) {
