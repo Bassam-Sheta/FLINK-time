@@ -34,6 +34,16 @@ const SetupService = {
     const setupFlag = MasterRepository.getGlobalSetting('SETUP_COMPLETE', 'false');
     isSetupComplete = (setupFlag === 'true' || setupFlag === true) && superAdminExists && workspaceCount > 0;
 
+    // Once initialization is complete, the public setup-status endpoint only needs
+    // to tell the login page that setup is finished. Do not expose company settings,
+    // workspace counts, or account counts to unauthenticated callers.
+    if (isSetupComplete) {
+      return {
+        initialized: true,
+        setupComplete: true
+      };
+    }
+
     const companyName = MasterRepository.getGlobalSetting('COMPANY_NAME', 'FLINK Business Solutions');
     const defaultTimezone = MasterRepository.getGlobalSetting('DEFAULT_TIMEZONE', 'Africa/Cairo');
 
