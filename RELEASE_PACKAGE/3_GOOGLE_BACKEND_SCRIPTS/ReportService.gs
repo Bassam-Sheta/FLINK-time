@@ -242,7 +242,7 @@ const ReportService = {
     const userDays = {};
 
     for (const e of entries) {
-      const dateKey = (e.StartUTC || '').substring(0, 10);
+      const dateKey = TimezoneService.formatDateKey(workspaceId, e.StartUTC);
       const userKey = e.UserID;
       const compositeKey = `${userKey}__${dateKey}`;
 
@@ -270,7 +270,13 @@ const ReportService = {
       }
     }
 
-    const targetSecondsPerDay = 8 * 3600; // Standard 8h target
+    const configuredTargetHours = parseFloat(
+      MasterRepository.getGlobalSetting(
+        `WS_${workspaceId}_DAILY_TARGET`,
+        MasterRepository.getGlobalSetting('DEFAULT_WORKDAY_HOURS', '8')
+      )
+    ) || 8;
+    const targetSecondsPerDay = configuredTargetHours * 3600;
     const results = Object.values(userDays).map(row => {
       const trackedHours = +(row.totalSeconds / 3600).toFixed(2);
       const targetHours = +(targetSecondsPerDay / 3600).toFixed(2);
