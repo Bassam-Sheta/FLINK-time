@@ -823,7 +823,7 @@
               else reject(res ? res.error : new Error('Unknown error'));
             })
             .withFailureHandler(err => reject(err))
-            .handleApiRequest(action, body);
+            .handleClientRequest(action, body);
         });
       }
 
