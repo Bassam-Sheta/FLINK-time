@@ -118,6 +118,16 @@ const SetupService = {
   /* ---------------- WIZARD STEP IMPLEMENTATIONS ---------------- */
 
   _step1_SystemOwner(payload) {
+    const lock = LockService.getScriptLock();
+    lock.waitLock(15000);
+    try {
+      return this._step1_SystemOwnerLocked(payload);
+    } finally {
+      lock.releaseLock();
+    }
+  },
+
+  _step1_SystemOwnerLocked(payload) {
     Validation.assertRequired(payload, ['setupKey', 'fullName', 'username', 'password', 'confirmPassword']);
 
     let setupLock = null;
