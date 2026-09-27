@@ -103,6 +103,12 @@ const TimesheetService = {
       const userId = authContext.userId;
       const startDate = new Date(payload.periodStart);
       const endDate = new Date(payload.periodEnd);
+      if (isNaN(startDate.getTime()) || isNaN(endDate.getTime()) || endDate.getTime() < startDate.getTime()) {
+        throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'A valid timesheet periodStart and periodEnd are required.');
+      }
+      if ((endDate.getTime() - startDate.getTime()) > (8 * 24 * 3600 * 1000)) {
+        throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'Timesheet submission period cannot exceed one week.');
+      }
       const startIso = startDate.toISOString();
       const endIso = endDate.toISOString();
 
@@ -132,9 +138,36 @@ const TimesheetService = {
       if (existing && existing.Status === CONSTANTS.TIMESHEET_STATUS.APPROVED) {
         throw new AppError(ERROR_CODES.CONFLICT, 'This timesheet has already been approved and cannot be resubmitted.', 409);
       }
+      if (existing && existing.Status === CONSTANTS.TIMESHEET_STATUS.SUBMITTED) {
+        throw new AppError(ERROR_CODES.CONFLICT, 'This timesheet is already submitted and pending review.', 409);
+      }
 
       const now = new Date().toISOString();
-      let timesheetId = existing ? existing.TimesheetID : Validation.generateId('TMS');
+      const timesheetId = existing ? existing.TimesheetID : Validation.generateId('TMS');
+
+      for (const entry of entries) {
+        const isLocked = entry.Locked === true || entry.Locked === 'TRUE' || entry.Locked === 1;
+        const isApproved = entry.ApprovalStatus === CONSTANTS.TIMESHEET_STATUS.APPROVED;
+        const belongsToOtherSubmission =
+          entry.ApprovalStatus === CONSTANTS.TIMESHEET_STATUS.SUBMITTED &&
+          entry.TimesheetID &&
+          entry.TimesheetID !== timesheetId;
+        if (isLocked || isApproved || belongsToOtherSubmission) {
+          throw new AppError(
+            ERROR_CODES.CONFLICT,
+            `Time entry ${entry.EntryID} is already locked or belongs to another submitted/approved timesheet.`,
+            409
+          );
+        }
+      }
+
+      const entrySnapshot = entries.map(entry => ({
+        entryId: entry.EntryID,
+        version: parseInt(entry.Version, 10) || 1,
+        durationSeconds: parseInt(entry.DurationSeconds, 10) || 0,
+        hourlyRateSnapshot: parseFloat(entry.HourlyRateSnapshot) || 0,
+        costRateSnapshot: parseFloat(entry.CostRateSnapshot) || 0
+      }));
 
       const tsData = {
         TimesheetID: timesheetId,
@@ -147,7 +180,8 @@ const TimesheetService = {
         ReviewedBy: '',
         ReviewedAt: '',
         ReviewComment: '',
-        LockedAt: ''
+        LockedAt: '',
+        EntrySnapshotJSON: JSON.stringify(entrySnapshot)
       };
 
       if (existing) {
@@ -160,7 +194,8 @@ const TimesheetService = {
       for (const entry of entries) {
         SheetRepository.updateTimeEntry(workspaceId, entry.EntryID, {
           TimesheetID: timesheetId,
-          ApprovalStatus: CONSTANTS.TIMESHEET_STATUS.SUBMITTED
+          ApprovalStatus: CONSTANTS.TIMESHEET_STATUS.SUBMITTED,
+          Locked: true
         });
       }
 
