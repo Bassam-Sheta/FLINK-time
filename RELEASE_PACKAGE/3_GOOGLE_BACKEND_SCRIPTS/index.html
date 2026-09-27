@@ -1663,10 +1663,23 @@
       try {
         const health = await apiCall('system.health');
         const list = document.getElementById('wzHealthCheckList');
-        list.innerHTML = '';
-        health.checks.forEach(c => {
-          const icon = c.passed ? '<span style="color:#34D399; font-weight:800;">✓</span>' : '<span style="color:#EF4444; font-weight:800;">✕</span>';
-          list.innerHTML += `<div>${icon} <strong>${c.name}</strong> — <span style="color:var(--text-muted);">${c.detail}</span></div>`;
+        list.replaceChildren();
+        (health.checks || []).forEach(check => {
+          const row = document.createElement('div');
+          const icon = document.createElement('span');
+          icon.style.color = check.passed ? '#34D399' : '#EF4444';
+          icon.style.fontWeight = '800';
+          icon.textContent = check.passed ? '✓' : '✕';
+
+          const name = document.createElement('strong');
+          name.textContent = String(check.name || '');
+
+          const detail = document.createElement('span');
+          detail.style.color = 'var(--text-muted)';
+          detail.textContent = String(check.detail || '');
+
+          row.append(icon, document.createTextNode(' '), name, document.createTextNode(' — '), detail);
+          list.appendChild(row);
         });
 
         const actions = document.getElementById('wzHealthActions');
