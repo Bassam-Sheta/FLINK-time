@@ -163,3 +163,88 @@ test('inactive workspace is denied even for Super Admin', () => {
       err.statusCode === 403
   );
 });
+
+
+test('non-super-admin workspace DTO excludes physical storage identifiers', () => {
+  installCommon();
+  global.MasterRepository = {
+    listWorkspaces() {
+      return [{
+        WorkspaceID: 'W1',
+        WorkspaceCode: 'OPS',
+        WorkspaceName: 'Operations',
+        SpreadsheetID: 'secret-sheet-id',
+        DriveFolderID: 'secret-folder-id',
+        Status: 'ACTIVE',
+        Timezone: 'Africa/Cairo',
+        SchemaVersion: 1,
+        CreatedAt: '2026-09-27'
+      }];
+    },
+    getWorkspaceAccessForUser() {
+      return [{ WorkspaceID: 'W1', Active: true }];
+    }
+  };
+
+  const workspacePath = path.resolve(
+    __dirname,
+    '../RELEASE_PACKAGE/3_GOOGLE_BACKEND_SCRIPTS/WorkspaceService.gs'
+  );
+  delete require.cache[require.resolve(workspacePath)];
+  const { WorkspaceService } = require(workspacePath);
+
+  const rows = WorkspaceService.listWorkspaces({ userId: 'U1', role: 'USER' });
+  assert.equal(rows.length, 1);
+  assert.equal(Object.hasOwn(rows[0], 'SpreadsheetID'), false);
+  assert.equal(Object.hasOwn(rows[0], 'DriveFolderID'), false);
+  assert.equal(rows[0].WorkspaceName, 'Operations');
+});
+
+test('user DTO never leaks repository row index', () => {
+  installCommon();
+  const userPath = path.resolve(
+    __dirname,
+    '../RELEASE_PACKAGE/3_GOOGLE_BACKEND_SCRIPTS/UserService.gs'
+  );
+  global.MasterRepository = {
+    getTableData(tab) {
+      if (tab === 'Accounts') {
+        return {
+          rows: [{
+            _rowIndex: 7,
+            UserID: 'U1',
+            Username: 'worker',
+            DisplayName: 'Worker',
+            Role: 'USER',
+            Status: 'ACTIVE',
+            PrimaryWorkspaceID: 'W1',
+            Email: 'worker@example.com',
+            CreatedBy: 'SA1'
+          }]
+        };
+      }
+      return { rows: [{ UserID: 'U1', WorkspaceID: 'W1', Active: true }] };
+    },
+    getWorkspaceAccessForUser() {
+      return [{ WorkspaceID: 'W1', Active: true }];
+    }
+  };
+  global.LockService = {
+    getScriptLock() { return { waitLock() {}, releaseLock() {} }; }
+  };
+
+  // UserService reads these tab-name constants.
+  global.CONSTANTS.MASTER_TABS = {
+    ACCOUNTS: 'Accounts',
+    WORKSPACE_ACCESS: 'WorkspaceAccess'
+  };
+
+  delete require.cache[require.resolve(userPath)];
+  const { UserService } = require(userPath);
+  const rows = UserService.listUsers({ userId: 'U1', role: 'USER' });
+
+  assert.equal(rows.length, 1);
+  assert.equal(Object.hasOwn(rows[0], '_rowIndex'), false);
+  assert.equal(Object.hasOwn(rows[0], 'CreatedBy'), false);
+  assert.equal(rows[0].Username, 'worker');
+});
