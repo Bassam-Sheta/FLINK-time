@@ -23,6 +23,39 @@ const AdminRequestService = {
       throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'Target user ID is required for this request type.');
     }
 
+    if (
+      requestType === CONSTANTS.REQUEST_TYPES.MAKE_PASSIVE ||
+      requestType === CONSTANTS.REQUEST_TYPES.PASSWORD_RESET
+    ) {
+      const targetAccount = MasterRepository.findAccountById(targetUserId);
+      if (!targetAccount) {
+        throw new AppError(ERROR_CODES.NOT_FOUND, `Target user ${targetUserId} was not found.`, 404);
+      }
+
+      const targetAccess = MasterRepository
+        .getWorkspaceAccessForUser(targetUserId)
+        .some(access => access.WorkspaceID === workspaceId);
+
+      if (!targetAccess) {
+        throw new AppError(
+          ERROR_CODES.WORKSPACE_DENIED,
+          'The target user is not actively assigned to the requested workspace.',
+          403
+        );
+      }
+    }
+
+    if (requestType === CONSTANTS.REQUEST_TYPES.NEW_USER && requestedData) {
+      const requestedRole = requestedData.role || CONSTANTS.ROLES.USER;
+      if (requestedRole !== CONSTANTS.ROLES.USER) {
+        throw new AppError(
+          ERROR_CODES.PERMISSION_DENIED,
+          'Admin-created user requests may only request ordinary USER accounts.',
+          403
+        );
+      }
+    }
+
     const requestId = Validation.generateId('REQ');
     const now = new Date().toISOString();
 
@@ -128,15 +161,37 @@ const AdminRequestService = {
         const userPayload = {
           ...requestedData,
           primaryWorkspaceId: req.WorkspaceID,
-          role: requestedData.role || CONSTANTS.ROLES.USER
+          role: CONSTANTS.ROLES.USER
         };
         executionResult = UserService.createUser(superAdminContext, userPayload);
-      } else if (req.RequestType === CONSTANTS.REQUEST_TYPES.MAKE_PASSIVE) {
-        executionResult = UserService.makeUserPassive(superAdminContext, req.TargetUserID, req.Reason);
-      } else if (req.RequestType === CONSTANTS.REQUEST_TYPES.PASSWORD_RESET) {
-        const tempPassword = 'Flk-' + SecurityService.generateRandomHex(4) + '!9';
-        executionResult = AuthService.resetPasswordByAdmin(superAdminContext, req.TargetUserID, tempPassword);
-        executionResult.temporaryPassword = tempPassword;
+      } else if (
+        req.RequestType === CONSTANTS.REQUEST_TYPES.MAKE_PASSIVE ||
+        req.RequestType === CONSTANTS.REQUEST_TYPES.PASSWORD_RESET
+      ) {
+        // Revalidate membership at execution time. A request must not retain authority
+        // after the target user's workspace access has been revoked or moved.
+        const targetAccount = MasterRepository.findAccountById(req.TargetUserID);
+        if (!targetAccount) {
+          throw new AppError(ERROR_CODES.NOT_FOUND, `Target user ${req.TargetUserID} was not found.`, 404);
+        }
+        const stillAssigned = MasterRepository
+          .getWorkspaceAccessForUser(req.TargetUserID)
+          .some(access => access.WorkspaceID === req.WorkspaceID);
+        if (!stillAssigned) {
+          throw new AppError(
+            ERROR_CODES.WORKSPACE_DENIED,
+            'Request can no longer be executed because the target user is not actively assigned to the originating workspace.',
+            403
+          );
+        }
+
+        if (req.RequestType === CONSTANTS.REQUEST_TYPES.MAKE_PASSIVE) {
+          executionResult = UserService.makeUserPassive(superAdminContext, req.TargetUserID, req.Reason);
+        } else {
+          const tempPassword = 'Flk-' + SecurityService.generateRandomHex(4) + '!9';
+          executionResult = AuthService.resetPasswordByAdmin(superAdminContext, req.TargetUserID, tempPassword);
+          executionResult.temporaryPassword = tempPassword;
+        }
       }
 
       const updated = MasterRepository.updateRequest(requestId, {
