@@ -170,6 +170,11 @@ const WorkspaceService = {
   assignUserToWorkspace(superAdminContext, targetUserId, workspaceId) {
     AuthorizationService.assertRole(superAdminContext, [CONSTANTS.ROLES.SUPER_ADMIN, CONSTANTS.ROLES.ADMIN]);
 
+    // An Admin may only assign ordinary users inside a workspace the Admin already manages.
+    if (superAdminContext.role === CONSTANTS.ROLES.ADMIN) {
+      AuthorizationService.assertWorkspaceAccess(superAdminContext, workspaceId);
+    }
+
     const lock = LockService.getScriptLock();
     lock.waitLock(10000);
     try {
@@ -177,6 +182,13 @@ const WorkspaceService = {
       if (!userAccount) throw new AppError(ERROR_CODES.NOT_FOUND, `User ${targetUserId} not found.`);
       if (userAccount.Status !== CONSTANTS.ACCOUNT_STATUS.ACTIVE) {
         throw new AppError(ERROR_CODES.ACCOUNT_PASSIVE, `User ${userAccount.Username} is not active (${userAccount.Status}).`, 400);
+      }
+      if (userAccount.Role !== CONSTANTS.ROLES.USER) {
+        throw new AppError(
+          ERROR_CODES.PERMISSION_DENIED,
+          'The generic user-assignment endpoint may only assign USER accounts. Admin access must be granted by Super Admin through workspaces.assignAdmin.',
+          403
+        );
       }
 
       const ws = MasterRepository.getWorkspace(workspaceId);
@@ -281,9 +293,6 @@ const WorkspaceService = {
 
     const accesses = MasterRepository.getWorkspaceAccessForUser(authContext.userId);
     const allowedIds = new Set(accesses.map(a => a.WorkspaceID));
-    if (authContext.user && authContext.user.PrimaryWorkspaceID) {
-      allowedIds.add(authContext.user.PrimaryWorkspaceID);
-    }
 
     return allWorkspaces.filter(w => allowedIds.has(w.WorkspaceID));
   }
