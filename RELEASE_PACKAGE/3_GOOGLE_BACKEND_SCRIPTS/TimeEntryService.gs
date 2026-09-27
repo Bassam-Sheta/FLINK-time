@@ -285,38 +285,116 @@ const TimeEntryService = {
    */
   bulkAction(authContext, workspaceId, entryIds = [], actionType, params = {}) {
     AuthorizationService.assertWorkspaceAccess(authContext, workspaceId);
-    let affected = 0;
-    const now = new Date().toISOString();
 
-    for (const id of entryIds) {
-      try {
-        const entry = SheetRepository.getTimeEntry(workspaceId, id);
-        if (!entry) continue;
-
-        if (actionType === 'DELETE') {
-          if (authContext.role === CONSTANTS.ROLES.SUPER_ADMIN || (entry.Locked !== true && entry.ApprovalStatus !== CONSTANTS.TIMESHEET_STATUS.APPROVED)) {
-            SheetRepository.updateTimeEntry(workspaceId, id, { Status: 'DELETED', DeletedAt: now, DeletedBy: authContext.userId });
-            affected++;
-          }
-        } else if (actionType === 'APPROVE') {
-          SheetRepository.updateTimeEntry(workspaceId, id, { ApprovalStatus: CONSTANTS.TIMESHEET_STATUS.APPROVED, Locked: true, UpdatedAt: now, UpdatedBy: authContext.userId });
-          affected++;
-        } else if (actionType === 'LOCK') {
-          SheetRepository.updateTimeEntry(workspaceId, id, { Locked: true, UpdatedAt: now, UpdatedBy: authContext.userId });
-          affected++;
-        } else if (actionType === 'UNLOCK') {
-          if (authContext.role === CONSTANTS.ROLES.SUPER_ADMIN) {
-            SheetRepository.updateTimeEntry(workspaceId, id, { Locked: false, UpdatedAt: now, UpdatedBy: authContext.userId });
-            affected++;
-          }
-        } else if (actionType === 'CHANGE_PROJECT' && params.projectId) {
-          SheetRepository.updateTimeEntry(workspaceId, id, { ProjectID: params.projectId, TaskID: params.taskId || '', UpdatedAt: now, UpdatedBy: authContext.userId });
-          affected++;
-        }
-      } catch (e) {}
+    if (!Array.isArray(entryIds) || entryIds.length === 0) {
+      throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'entryIds must contain at least one time entry.');
     }
 
-    return affected;
+    const normalizedAction = String(actionType || '').toUpperCase();
+    const allowedActions = ['DELETE', 'LOCK', 'UNLOCK', 'CHANGE_PROJECT'];
+    if (!allowedActions.includes(normalizedAction)) {
+      throw new AppError(
+        ERROR_CODES.VALIDATION_ERROR,
+        normalizedAction === 'APPROVE'
+          ? 'Bulk approval is not allowed. Approve the submitted timesheet instead.'
+          : `Unsupported bulk action: ${normalizedAction}`
+      );
+    }
+
+    if (
+      (normalizedAction === 'LOCK' || normalizedAction === 'UNLOCK') &&
+      ![CONSTANTS.ROLES.SUPER_ADMIN, CONSTANTS.ROLES.ADMIN].includes(authContext.role)
+    ) {
+      throw new AppError(ERROR_CODES.PERMISSION_DENIED, 'Only Admin or Super Admin can lock/unlock entries.', 403);
+    }
+
+    let scriptLock = null;
+    if (typeof LockService !== 'undefined' && LockService.getScriptLock) {
+      scriptLock = LockService.getScriptLock();
+      if (!scriptLock.tryLock(15000)) {
+        throw new AppError(ERROR_CODES.CONFLICT, 'Could not acquire lock for bulk action. Please retry.', 409);
+      }
+    }
+
+    try {
+      // Phase 1: validate the entire batch before changing any record.
+      const entries = entryIds.map(id => {
+        const entry = SheetRepository.getEntry(workspaceId, id);
+        if (!entry) throw new AppError(ERROR_CODES.NOT_FOUND, `Time entry ${id} not found.`, 404);
+
+        AuthorizationService.assertRecordOwnership(authContext, entry.UserID);
+
+        const isLocked = entry.Locked === true || entry.Locked === 'TRUE' || entry.Locked === 1;
+        const isSubmitted = entry.ApprovalStatus === CONSTANTS.TIMESHEET_STATUS.SUBMITTED;
+        const isApproved = entry.ApprovalStatus === CONSTANTS.TIMESHEET_STATUS.APPROVED;
+
+        if (
+          (normalizedAction === 'DELETE' || normalizedAction === 'CHANGE_PROJECT' || normalizedAction === 'UNLOCK') &&
+          (isLocked || isSubmitted || isApproved)
+        ) {
+          throw new AppError(
+            ERROR_CODES.ENTRY_LOCKED,
+            `Entry ${entry.EntryID} is locked or belongs to a submitted/approved timesheet. Reopen/reject the timesheet first.`,
+            403
+          );
+        }
+
+        return entry;
+      });
+
+      if (normalizedAction === 'CHANGE_PROJECT' && !params.projectId) {
+        throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'projectId is required for CHANGE_PROJECT.');
+      }
+
+      // Phase 2: apply only after the whole batch passes validation.
+      const now = new Date().toISOString();
+      for (const entry of entries) {
+        const nextVersion = (parseInt(entry.Version, 10) || 1) + 1;
+
+        if (normalizedAction === 'DELETE') {
+          SheetRepository.updateTimeEntry(workspaceId, entry.EntryID, {
+            Status: 'DELETED',
+            DeletedAt: now,
+            DeletedBy: authContext.userId,
+            UpdatedAt: now,
+            UpdatedBy: authContext.userId,
+            Version: nextVersion
+          });
+        } else if (normalizedAction === 'LOCK') {
+          SheetRepository.updateTimeEntry(workspaceId, entry.EntryID, {
+            Locked: true,
+            UpdatedAt: now,
+            UpdatedBy: authContext.userId,
+            Version: nextVersion
+          });
+        } else if (normalizedAction === 'UNLOCK') {
+          SheetRepository.updateTimeEntry(workspaceId, entry.EntryID, {
+            Locked: false,
+            UpdatedAt: now,
+            UpdatedBy: authContext.userId,
+            Version: nextVersion
+          });
+        } else if (normalizedAction === 'CHANGE_PROJECT') {
+          SheetRepository.updateTimeEntry(workspaceId, entry.EntryID, {
+            ProjectID: params.projectId,
+            TaskID: params.taskId || '',
+            UpdatedAt: now,
+            UpdatedBy: authContext.userId,
+            Version: nextVersion
+          });
+        }
+      }
+
+      if (typeof SpreadsheetApp !== 'undefined' && SpreadsheetApp.flush) {
+        try { SpreadsheetApp.flush(); } catch (fErr) {}
+      }
+
+      return entries.length;
+    } finally {
+      if (scriptLock) {
+        try { scriptLock.releaseLock(); } catch (e) {}
+      }
+    }
   }
 };
 
