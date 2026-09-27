@@ -415,43 +415,105 @@ const TimeEntryService = {
         throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'projectId is required for CHANGE_PROJECT.');
       }
 
-      // Phase 2: apply only after the whole batch passes validation.
+      // Validate target project/task/access for every affected entry before writing.
+      // This also refreshes the rate snapshots so financial rollups cannot retain
+      // rates from the previous project.
+      const changeContexts = new Map();
+      if (normalizedAction === 'CHANGE_PROJECT') {
+        for (const entry of entries) {
+          const tracking = TrackingPolicyService.validateTrackingContext(
+            authContext,
+            workspaceId,
+            {
+              projectId: params.projectId,
+              taskId: params.taskId || '',
+              description: entry.Description || '',
+              tags: entry.Tags || '',
+              billable: entry.Billable
+            },
+            { manual: false, enforceRequired: true }
+          );
+          changeContexts.set(entry.EntryID, tracking);
+        }
+      }
+
+      // Phase 2: create the complete mutation plan after all validation succeeds.
       const now = new Date().toISOString();
-      for (const entry of entries) {
+      const plans = entries.map(entry => {
         const nextVersion = (parseInt(entry.Version, 10) || 1) + 1;
+        let updates = null;
 
         if (normalizedAction === 'DELETE') {
-          SheetRepository.updateTimeEntry(workspaceId, entry.EntryID, {
+          updates = {
             Status: 'DELETED',
             DeletedAt: now,
             DeletedBy: authContext.userId,
             UpdatedAt: now,
             UpdatedBy: authContext.userId,
             Version: nextVersion
-          });
+          };
         } else if (normalizedAction === 'LOCK') {
-          SheetRepository.updateTimeEntry(workspaceId, entry.EntryID, {
+          updates = {
             Locked: true,
             UpdatedAt: now,
             UpdatedBy: authContext.userId,
             Version: nextVersion
-          });
+          };
         } else if (normalizedAction === 'UNLOCK') {
-          SheetRepository.updateTimeEntry(workspaceId, entry.EntryID, {
+          updates = {
             Locked: false,
             UpdatedAt: now,
             UpdatedBy: authContext.userId,
             Version: nextVersion
-          });
+          };
         } else if (normalizedAction === 'CHANGE_PROJECT') {
-          SheetRepository.updateTimeEntry(workspaceId, entry.EntryID, {
-            ProjectID: params.projectId,
-            TaskID: params.taskId || '',
+          const tracking = changeContexts.get(entry.EntryID);
+          updates = {
+            ProjectID: tracking.projectId,
+            TaskID: tracking.taskId,
+            Billable: tracking.billable,
+            HourlyRateSnapshot: tracking.project ? (parseFloat(tracking.project.HourlyRate) || 0) : 0,
+            CostRateSnapshot: tracking.project ? (parseFloat(tracking.project.CostRate) || 0) : 0,
             UpdatedAt: now,
             UpdatedBy: authContext.userId,
             Version: nextVersion
-          });
+          };
         }
+
+        return { entry, updates };
+      });
+
+      // Sheets has no multi-row transaction. Apply the fully validated plan and
+      // roll back any already-written records if a later write fails.
+      const changedPlans = [];
+      try {
+        for (const plan of plans) {
+          SheetRepository.updateTimeEntry(workspaceId, plan.entry.EntryID, plan.updates);
+          changedPlans.push(plan);
+        }
+      } catch (mutationErr) {
+        for (const plan of changedPlans.reverse()) {
+          const before = plan.entry;
+          try {
+            SheetRepository.updateTimeEntry(workspaceId, before.EntryID, {
+              ProjectID: before.ProjectID || '',
+              TaskID: before.TaskID || '',
+              Billable: before.Billable,
+              HourlyRateSnapshot: before.HourlyRateSnapshot || 0,
+              CostRateSnapshot: before.CostRateSnapshot || 0,
+              Status: before.Status || 'ACTIVE',
+              Locked: before.Locked === true || before.Locked === 'TRUE' || before.Locked === 1,
+              DeletedAt: before.DeletedAt || '',
+              DeletedBy: before.DeletedBy || '',
+              UpdatedAt: before.UpdatedAt || '',
+              UpdatedBy: before.UpdatedBy || '',
+              Version: parseInt(before.Version, 10) || 1
+            });
+          } catch (rollbackErr) {
+            console.error(`Bulk action rollback failed for entry ${before.EntryID}: ${rollbackErr.message}`);
+          }
+        }
+        throw mutationErr;
       }
 
       if (typeof SpreadsheetApp !== 'undefined' && SpreadsheetApp.flush) {
