@@ -5,6 +5,86 @@
  */
 
 const JobService = {
+  _scheduledTriggerSpecs: [
+    { handler: 'scheduledHousekeeping', hour: 1, purpose: 'Expired session cleanup' },
+    { handler: 'scheduledRollups', hour: 2, purpose: 'Rollup reconciliation' }
+  ],
+
+  getScheduledTriggerStatus() {
+    if (
+      typeof ScriptApp === 'undefined' ||
+      !ScriptApp.getProjectTriggers
+    ) {
+      return {
+        supported: false,
+        healthy: false,
+        expected: this._scheduledTriggerSpecs.map(spec => spec.handler),
+        installed: [],
+        missing: this._scheduledTriggerSpecs.map(spec => spec.handler),
+        detail: 'Apps Script trigger runtime is unavailable.'
+      };
+    }
+
+    const triggers = ScriptApp.getProjectTriggers();
+    const installed = triggers
+      .map(trigger => trigger.getHandlerFunction ? trigger.getHandlerFunction() : '')
+      .filter(Boolean);
+    const installedSet = new Set(installed);
+    const missing = this._scheduledTriggerSpecs
+      .map(spec => spec.handler)
+      .filter(handler => !installedSet.has(handler));
+
+    return {
+      supported: true,
+      healthy: missing.length === 0,
+      expected: this._scheduledTriggerSpecs.map(spec => spec.handler),
+      installed,
+      missing,
+      detail: missing.length === 0
+        ? 'All required scheduled triggers are installed.'
+        : `Missing scheduled trigger(s): ${missing.join(', ')}`
+    };
+  },
+
+  ensureScheduledTriggers() {
+    if (
+      typeof ScriptApp === 'undefined' ||
+      !ScriptApp.getProjectTriggers ||
+      !ScriptApp.newTrigger
+    ) {
+      throw new AppError(
+        ERROR_CODES.INTERNAL_ERROR,
+        'Apps Script trigger runtime is unavailable.',
+        500
+      );
+    }
+
+    const existing = new Set(
+      ScriptApp.getProjectTriggers()
+        .map(trigger => trigger.getHandlerFunction ? trigger.getHandlerFunction() : '')
+        .filter(Boolean)
+    );
+    const created = [];
+
+    for (const spec of this._scheduledTriggerSpecs) {
+      if (existing.has(spec.handler)) continue;
+      ScriptApp
+        .newTrigger(spec.handler)
+        .timeBased()
+        .everyDays(1)
+        .atHour(spec.hour)
+        .create();
+      created.push(spec.handler);
+    }
+
+    const status = this.getScheduledTriggerStatus();
+    return {
+      ok: status.healthy,
+      created,
+      ...status
+    };
+  },
+
   /**
    * Central Housekeeping Dispatcher
    * Cleans up expired sessions, archives stale cache, and logs execution.
@@ -289,6 +369,14 @@ const JobService = {
     }
   }
 };
+
+function scheduledHousekeeping() {
+  return JobService.dispatchHousekeeping();
+}
+
+function scheduledRollups() {
+  return JobService.dispatchRollups();
+}
 
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
