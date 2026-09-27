@@ -94,18 +94,9 @@ const ApprovalService = {
       const now = new Date().toISOString();
       const cleanComment = comment ? Validation.sanitizeCellValue(comment) : 'Approved';
 
-      // Update Timesheet record
-      const updatedTimesheet = SheetRepository.updateTimesheet(workspaceId, timesheetId, {
-        Status: CONSTANTS.TIMESHEET_STATUS.APPROVED,
-        ReviewedBy: authContext.userId,
-        ReviewedAt: now,
-        ReviewComment: cleanComment,
-        LockedAt: now
-      });
-
-      // Approve only the immutable submission membership.
+      // Resolve and validate the immutable submission membership BEFORE mutating
+      // the timesheet header. This prevents an APPROVED header with invalid entries.
       const entries = this._resolveSubmissionEntries(workspaceId, timesheet);
-
       for (const entry of entries) {
         if (entry.ApprovalStatus !== CONSTANTS.TIMESHEET_STATUS.SUBMITTED) {
           throw new AppError(
@@ -114,11 +105,42 @@ const ApprovalService = {
             409
           );
         }
-        SheetRepository.updateTimeEntry(workspaceId, entry.EntryID, {
-          TimesheetID: timesheetId,
-          ApprovalStatus: CONSTANTS.TIMESHEET_STATUS.APPROVED,
-          Locked: true
+      }
+
+      const changedEntryIds = [];
+      try {
+        for (const entry of entries) {
+          SheetRepository.updateTimeEntry(workspaceId, entry.EntryID, {
+            TimesheetID: timesheetId,
+            ApprovalStatus: CONSTANTS.TIMESHEET_STATUS.APPROVED,
+            Locked: true
+          });
+          changedEntryIds.push(entry.EntryID);
+        }
+
+        // Commit the timesheet state only after every member entry succeeds.
+        var updatedTimesheet = SheetRepository.updateTimesheet(workspaceId, timesheetId, {
+          Status: CONSTANTS.TIMESHEET_STATUS.APPROVED,
+          ReviewedBy: authContext.userId,
+          ReviewedAt: now,
+          ReviewComment: cleanComment,
+          LockedAt: now
         });
+      } catch (mutationErr) {
+        // Best-effort rollback of any entries already changed in this critical section.
+        for (const entry of entries) {
+          if (!changedEntryIds.includes(entry.EntryID)) continue;
+          try {
+            SheetRepository.updateTimeEntry(workspaceId, entry.EntryID, {
+              TimesheetID: timesheetId,
+              ApprovalStatus: CONSTANTS.TIMESHEET_STATUS.SUBMITTED,
+              Locked: true
+            });
+          } catch (rollbackErr) {
+            console.error(`Approval rollback failed for entry ${entry.EntryID}: ${rollbackErr.message}`);
+          }
+        }
+        throw mutationErr;
       }
 
       if (typeof SpreadsheetApp !== 'undefined' && SpreadsheetApp.flush) {
@@ -189,22 +211,47 @@ const ApprovalService = {
       const now = new Date().toISOString();
       const cleanComment = Validation.sanitizeCellValue(reasonComment.trim());
 
-      // Update Timesheet record to REJECTED
-      const updatedTimesheet = SheetRepository.updateTimesheet(workspaceId, timesheetId, {
-        Status: CONSTANTS.TIMESHEET_STATUS.REJECTED,
-        ReviewedBy: authContext.userId,
-        ReviewedAt: now,
-        ReviewComment: cleanComment
-      });
-
-      // Unlock only the entries that were part of this submission.
+      // Validate exact submission membership before changing the header state.
       const entries = this._resolveSubmissionEntries(workspaceId, timesheet);
-
       for (const entry of entries) {
-        SheetRepository.updateTimeEntry(workspaceId, entry.EntryID, {
-          ApprovalStatus: CONSTANTS.TIMESHEET_STATUS.REJECTED,
-          Locked: false
+        if (entry.ApprovalStatus !== CONSTANTS.TIMESHEET_STATUS.SUBMITTED) {
+          throw new AppError(
+            ERROR_CODES.CONFLICT,
+            `Entry ${entry.EntryID} is not in SUBMITTED state.`,
+            409
+          );
+        }
+      }
+
+      const changedEntryIds = [];
+      try {
+        for (const entry of entries) {
+          SheetRepository.updateTimeEntry(workspaceId, entry.EntryID, {
+            ApprovalStatus: CONSTANTS.TIMESHEET_STATUS.REJECTED,
+            Locked: false
+          });
+          changedEntryIds.push(entry.EntryID);
+        }
+
+        var updatedTimesheet = SheetRepository.updateTimesheet(workspaceId, timesheetId, {
+          Status: CONSTANTS.TIMESHEET_STATUS.REJECTED,
+          ReviewedBy: authContext.userId,
+          ReviewedAt: now,
+          ReviewComment: cleanComment
         });
+      } catch (mutationErr) {
+        for (const entry of entries) {
+          if (!changedEntryIds.includes(entry.EntryID)) continue;
+          try {
+            SheetRepository.updateTimeEntry(workspaceId, entry.EntryID, {
+              ApprovalStatus: CONSTANTS.TIMESHEET_STATUS.SUBMITTED,
+              Locked: true
+            });
+          } catch (rollbackErr) {
+            console.error(`Rejection rollback failed for entry ${entry.EntryID}: ${rollbackErr.message}`);
+          }
+        }
+        throw mutationErr;
       }
 
       if (typeof SpreadsheetApp !== 'undefined' && SpreadsheetApp.flush) {
@@ -271,19 +318,45 @@ const ApprovalService = {
       const now = new Date().toISOString();
       const cleanReason = reason ? Validation.sanitizeCellValue(reason) : 'Reopened by Super Admin';
 
-      const updated = SheetRepository.updateTimesheet(workspaceId, timesheetId, {
-        Status: CONSTANTS.TIMESHEET_STATUS.OPEN,
-        LockedAt: ''
-      });
-
-      // Unlock only the exact entries that were approved with this timesheet.
+      // Resolve the original immutable membership while the header is still APPROVED.
       const entries = this._resolveSubmissionEntries(workspaceId, timesheet);
-
       for (const entry of entries) {
-        SheetRepository.updateTimeEntry(workspaceId, entry.EntryID, {
-          ApprovalStatus: CONSTANTS.TIMESHEET_STATUS.OPEN,
-          Locked: false
+        if (entry.ApprovalStatus !== CONSTANTS.TIMESHEET_STATUS.APPROVED) {
+          throw new AppError(
+            ERROR_CODES.CONFLICT,
+            `Entry ${entry.EntryID} is not in APPROVED state.`,
+            409
+          );
+        }
+      }
+
+      const changedEntryIds = [];
+      try {
+        for (const entry of entries) {
+          SheetRepository.updateTimeEntry(workspaceId, entry.EntryID, {
+            ApprovalStatus: CONSTANTS.TIMESHEET_STATUS.OPEN,
+            Locked: false
+          });
+          changedEntryIds.push(entry.EntryID);
+        }
+
+        var updated = SheetRepository.updateTimesheet(workspaceId, timesheetId, {
+          Status: CONSTANTS.TIMESHEET_STATUS.OPEN,
+          LockedAt: ''
         });
+      } catch (mutationErr) {
+        for (const entry of entries) {
+          if (!changedEntryIds.includes(entry.EntryID)) continue;
+          try {
+            SheetRepository.updateTimeEntry(workspaceId, entry.EntryID, {
+              ApprovalStatus: CONSTANTS.TIMESHEET_STATUS.APPROVED,
+              Locked: true
+            });
+          } catch (rollbackErr) {
+            console.error(`Reopen rollback failed for entry ${entry.EntryID}: ${rollbackErr.message}`);
+          }
+        }
+        throw mutationErr;
       }
 
       if (typeof SpreadsheetApp !== 'undefined' && SpreadsheetApp.flush) {
