@@ -487,9 +487,17 @@ const AuthService = {
         UpdatedBy: authContext.userId
       });
 
-      // Invalidate all active sessions for security, and issue fresh session
+      // Invalidate all active sessions and any outstanding MFA login challenge.
       SessionService.revokeAllUserSessions(authContext.userId);
-      const newSession = SessionService.createSession(authContext.userId, 'WEB');
+      this._deleteMfaChallenge(authContext.userId);
+      const replacementClientType =
+        authContext.session && authContext.session.ClientType
+          ? authContext.session.ClientType
+          : 'WEB';
+      const newSession = SessionService.createSession(
+        authContext.userId,
+        replacementClientType
+      );
 
       MasterRepository.logSecurityEvent({
         UserID: authContext.userId,
@@ -524,9 +532,26 @@ const AuthService = {
     try {
       const targetAccount = MasterRepository.findAccountById(targetUserId);
       if (!targetAccount) throw new AppError(ERROR_CODES.NOT_FOUND, 'Target account not found.');
+      if (
+        targetAccount.Status === CONSTANTS.ACCOUNT_STATUS.ARCHIVED ||
+        targetAccount.Status === CONSTANTS.ACCOUNT_STATUS.DELETED
+      ) {
+        throw new AppError(
+          ERROR_CODES.CONFLICT,
+          'Archived or deleted accounts cannot receive a password reset.',
+          409
+        );
+      }
 
       const targetCred = MasterRepository.getCredentials(targetUserId);
+      if (!targetCred) {
+        throw new AppError(ERROR_CODES.NOT_FOUND, 'Target credentials record not found.');
+      }
       const newHash = SecurityService.hashPassword(temporaryPassword);
+      const nextStatus =
+        targetAccount.Status === CONSTANTS.ACCOUNT_STATUS.LOCKED
+          ? CONSTANTS.ACCOUNT_STATUS.ACTIVE
+          : targetAccount.Status;
 
       MasterRepository.updateCredentials(targetUserId, {
         PasswordHash: newHash,
@@ -538,13 +563,15 @@ const AuthService = {
 
       MasterRepository.updateAccount(targetUserId, {
         MustChangePassword: true,
-        Status: CONSTANTS.ACCOUNT_STATUS.ACTIVE,
+        Status: nextStatus,
         UpdatedAt: new Date().toISOString(),
         UpdatedBy: superAdminContext.userId
       });
 
-      // Immediately revoke all existing sessions for target user
+      // Password reset never serves as a PASSIVE-account activation path.
+      // It also invalidates sessions and any outstanding MFA challenge.
       SessionService.revokeAllUserSessions(targetUserId);
+      this._deleteMfaChallenge(targetUserId);
 
       MasterRepository.logGlobalAudit({
         ActorUserID: superAdminContext.userId,
