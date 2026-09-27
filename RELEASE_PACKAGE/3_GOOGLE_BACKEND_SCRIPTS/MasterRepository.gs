@@ -99,6 +99,16 @@ const MasterRepository = {
     return entity;
   },
 
+  deleteRow(tabName, rowIndex) {
+    const ss = this.getMasterSpreadsheet();
+    const sheet = ss.getSheetByName(tabName);
+    if (!sheet) {
+      throw new AppError(ERROR_CODES.NOT_FOUND, `Master tab '${tabName}' does not exist.`);
+    }
+    sheet.deleteRow(rowIndex);
+    this._invalidateTable(tabName);
+  },
+
   /**
    * Updates specific columns for a row index in a master tab
    */
@@ -154,9 +164,61 @@ const MasterRepository = {
   },
 
   createAccount(accountData, credentialData) {
-    this.appendRow(CONSTANTS.MASTER_TABS.ACCOUNTS, accountData);
-    this.appendRow(CONSTANTS.MASTER_TABS.CREDENTIALS, credentialData);
-    return accountData;
+    if (!accountData || !accountData.UserID || !credentialData || credentialData.UserID !== accountData.UserID) {
+      throw new AppError(
+        ERROR_CODES.VALIDATION_ERROR,
+        'Account and credential records with the same UserID are required.',
+        400
+      );
+    }
+
+    let accountCreated = false;
+    try {
+      this.appendRow(CONSTANTS.MASTER_TABS.ACCOUNTS, accountData);
+      accountCreated = true;
+      this.appendRow(CONSTANTS.MASTER_TABS.CREDENTIALS, credentialData);
+      return accountData;
+    } catch (err) {
+      if (accountCreated) {
+        try {
+          const { rows } = this.getTableData(CONSTANTS.MASTER_TABS.ACCOUNTS);
+          const created = rows.find(row => row.UserID === accountData.UserID);
+          if (created) this.deleteRow(CONSTANTS.MASTER_TABS.ACCOUNTS, created._rowIndex);
+        } catch (rollbackErr) {
+          console.error(
+            `Account creation rollback failed for ${accountData.UserID}: ${rollbackErr.message}`
+          );
+        }
+      }
+      throw err;
+    }
+  },
+
+  /**
+   * Hard rollback helper for a user that failed during initial provisioning.
+   * This is intentionally for creation rollback only, not normal user deletion.
+   */
+  rollbackUserCreation(userId) {
+    const deleteMatches = (tabName, predicate) => {
+      const { rows } = this.getTableData(tabName);
+      rows
+        .filter(predicate)
+        .sort((a, b) => b._rowIndex - a._rowIndex)
+        .forEach(row => this.deleteRow(tabName, row._rowIndex));
+    };
+
+    deleteMatches(
+      CONSTANTS.MASTER_TABS.WORKSPACE_ACCESS,
+      row => row.UserID === userId
+    );
+    deleteMatches(
+      CONSTANTS.MASTER_TABS.CREDENTIALS,
+      row => row.UserID === userId
+    );
+    deleteMatches(
+      CONSTANTS.MASTER_TABS.ACCOUNTS,
+      row => row.UserID === userId
+    );
   },
 
   updateAccount(userId, updates) {
