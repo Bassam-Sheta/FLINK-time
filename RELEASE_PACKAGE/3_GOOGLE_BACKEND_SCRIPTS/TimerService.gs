@@ -5,6 +5,46 @@
  */
 
 const TimerService = {
+  _findActiveTimerAcrossWorkspaces(authContext) {
+    let workspaceIds = [];
+
+    if (authContext.role === CONSTANTS.ROLES.SUPER_ADMIN) {
+      workspaceIds = MasterRepository.listWorkspaces()
+        .filter(ws => ws.Status === CONSTANTS.WORKSPACE_STATUS.ACTIVE)
+        .map(ws => ws.WorkspaceID);
+    } else {
+      workspaceIds = MasterRepository.getWorkspaceAccessForUser(authContext.userId)
+        .map(access => access.WorkspaceID);
+    }
+
+    for (const wsId of [...new Set(workspaceIds)]) {
+      try {
+        const active = SheetRepository.getActiveTimer(wsId, authContext.userId);
+        if (active) {
+          return {
+            workspaceId: wsId,
+            timer: active
+          };
+        }
+      } catch (e) {
+        // A single damaged/inaccessible workspace must not hide timers in other workspaces.
+        console.warn('Active timer scan notice for ' + wsId + ': ' + e.message);
+      }
+    }
+    return null;
+  },
+
+  _formatWorkspaceLocalTime(workspaceId, date) {
+    const ws = MasterRepository.getWorkspace(workspaceId);
+    const timezone = ws && ws.Timezone ? ws.Timezone : 'UTC';
+    if (typeof Utilities !== 'undefined' && Utilities.formatDate) {
+      try {
+        return Utilities.formatDate(date, timezone, 'yyyy-MM-dd HH:mm:ss') + ' ' + timezone;
+      } catch (e) {}
+    }
+    return date.toISOString();
+  },
+
   /**
    * Starts a new timer for the authenticated user
    */
@@ -24,22 +64,34 @@ const TimerService = {
     }
 
     try {
-      // Global Check: Verify no existing active timer after acquiring lock
-      const existingTimer = this.getActiveTimer(authContext, workspaceId);
-      if (existingTimer) {
+      // Enforce one active timer for the user across every accessible workspace.
+      const activeAnywhere = this._findActiveTimerAcrossWorkspaces(authContext);
+      if (activeAnywhere) {
+        const active = activeAnywhere.timer;
         throw new AppError(
           ERROR_CODES.ACTIVE_TIMER_EXISTS,
-          'An active timer is already running. Please stop the current timer before starting a new one.',
+          `An active timer is already running in workspace ${activeAnywhere.workspaceId}. Stop it before starting another timer.`,
           409,
-          { activeTimer: existingTimer }
+          {
+            activeWorkspaceId: activeAnywhere.workspaceId,
+            activeTimerId: active.TimerID,
+            startedAtUTC: active.StartedAtUTC
+          }
         );
       }
 
-      const projectId = timerPayload.projectId || '';
-      const taskId = timerPayload.taskId || '';
-      const description = timerPayload.description ? Validation.sanitizeCellValue(timerPayload.description.trim()) : '';
-      const tagIds = timerPayload.tagIds ? (Array.isArray(timerPayload.tagIds) ? timerPayload.tagIds.join(',') : timerPayload.tagIds) : '';
-      const billable = timerPayload.billable !== undefined ? timerPayload.billable : true;
+      const tracking = TrackingPolicyService.validateTrackingContext(
+        authContext,
+        workspaceId,
+        timerPayload,
+        { manual: false, enforceRequired: true }
+      );
+
+      const projectId = tracking.projectId;
+      const taskId = tracking.taskId;
+      const description = tracking.description;
+      const tagIds = tracking.tagIdsCsv;
+      const billable = tracking.billable;
       const source = timerPayload.source || CONSTANTS.ENTRY_SOURCE.WEB;
 
       const timerId = Validation.generateId('TMR');
@@ -54,7 +106,7 @@ const TimerService = {
         Description: description,
         TagIDs: tagIds,
         StartedAtUTC: startedAtUTC,
-        StartedAtLocal: now.toLocaleString(),
+        StartedAtLocal: this._formatWorkspaceLocalTime(workspaceId, now),
         Billable: billable ? true : false,
         Source: source,
         LastHeartbeat: startedAtUTC
@@ -127,25 +179,31 @@ const TimerService = {
         durationSeconds = maxSeconds; // Clamp to max permitted single entry duration
       }
 
-      // Resolve snapshot rates from project
+      const mergedTrackingPayload = {
+        projectId: stopPayload.projectId !== undefined ? stopPayload.projectId : activeTimer.ProjectID,
+        taskId: stopPayload.taskId !== undefined ? stopPayload.taskId : activeTimer.TaskID,
+        description: stopPayload.description !== undefined ? stopPayload.description : activeTimer.Description,
+        tags: stopPayload.tags !== undefined ? stopPayload.tags : activeTimer.TagIDs,
+        billable: stopPayload.billable !== undefined ? stopPayload.billable : activeTimer.Billable
+      };
+      const tracking = TrackingPolicyService.validateTrackingContext(
+        authContext,
+        workspaceId,
+        mergedTrackingPayload,
+        { manual: false, enforceRequired: false }
+      );
+
+      const projectId = tracking.projectId;
+      const taskId = tracking.taskId;
+      const description = tracking.description;
+      const tags = tracking.tagIdsCsv;
+      const billable = tracking.billable;
+
       let hourlyRateSnapshot = 0;
       let costRateSnapshot = 0;
-      const projectId = stopPayload.projectId || activeTimer.ProjectID;
-      const taskId = stopPayload.taskId || activeTimer.TaskID;
-      const description = stopPayload.description !== undefined
-        ? Validation.sanitizeCellValue(stopPayload.description.trim())
-        : activeTimer.Description;
-      const tags = stopPayload.tags !== undefined ? stopPayload.tags : activeTimer.TagIDs;
-      const billable = stopPayload.billable !== undefined ? stopPayload.billable : activeTimer.Billable;
-
-      if (projectId) {
-        try {
-          const proj = SheetRepository.getProject(workspaceId, projectId);
-          if (proj) {
-            hourlyRateSnapshot = parseFloat(proj.HourlyRate) || 0;
-            costRateSnapshot = parseFloat(proj.CostRate) || 0;
-          }
-        } catch (e) {}
+      if (tracking.project) {
+        hourlyRateSnapshot = parseFloat(tracking.project.HourlyRate) || 0;
+        costRateSnapshot = parseFloat(tracking.project.CostRate) || 0;
       }
 
       const entryId = Validation.generateId('ENT');
