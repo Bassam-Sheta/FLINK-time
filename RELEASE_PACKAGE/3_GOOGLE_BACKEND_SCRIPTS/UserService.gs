@@ -341,12 +341,27 @@ const UserService = {
     const { rows } = MasterRepository.getTableData(CONSTANTS.MASTER_TABS.ACCOUNTS);
 
     if (authContext.role === CONSTANTS.ROLES.SUPER_ADMIN) {
+      const { rows: allAccessRows } = MasterRepository.getTableData(CONSTANTS.MASTER_TABS.WORKSPACE_ACCESS);
+      const activeAccessRows = allAccessRows.filter(a =>
+        a.Active === true || a.Active === 'TRUE' || a.Active === 1
+      );
+
+      let visibleRows = rows;
       if (workspaceId) {
-        const accesses = MasterRepository.getWorkspaceAccessForWorkspace(workspaceId);
-        const userIds = new Set(accesses.map(a => a.UserID));
-        return rows.filter(u => userIds.has(u.UserID) || u.PrimaryWorkspaceID === workspaceId);
+        const userIds = new Set(
+          activeAccessRows
+            .filter(a => a.WorkspaceID === workspaceId)
+            .map(a => a.UserID)
+        );
+        visibleRows = rows.filter(u => userIds.has(u.UserID));
       }
-      return rows;
+
+      return visibleRows.map(user => ({
+        ...user,
+        AssignedWorkspaceIDs: activeAccessRows
+          .filter(a => a.UserID === user.UserID)
+          .map(a => a.WorkspaceID)
+      }));
     }
 
     if (authContext.role === CONSTANTS.ROLES.ADMIN) {
@@ -354,16 +369,16 @@ const UserService = {
       const adminWorkspaceIds = adminAccesses.map(a => a.WorkspaceID);
       const targetWorkspace = workspaceId || adminWorkspaceIds[0];
 
-      if (!adminWorkspaceIds.includes(targetWorkspace)) {
+      if (!targetWorkspace || !adminWorkspaceIds.includes(targetWorkspace)) {
         throw new AppError(ERROR_CODES.WORKSPACE_DENIED, 'Access denied to requested workspace users.', 403);
       }
 
       const teamAccesses = MasterRepository.getWorkspaceAccessForWorkspace(targetWorkspace);
       const teamUserIds = new Set(teamAccesses.map(a => a.UserID));
-      return rows.filter(u => teamUserIds.has(u.UserID) || u.PrimaryWorkspaceID === targetWorkspace);
+      return rows.filter(u => teamUserIds.has(u.UserID));
     }
 
-    // Regular users can only see their own profile
+    // Regular users can only see their own profile.
     return rows.filter(u => u.UserID === authContext.userId);
   }
 };
