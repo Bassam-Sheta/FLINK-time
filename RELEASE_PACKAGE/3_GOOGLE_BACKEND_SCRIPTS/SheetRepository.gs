@@ -5,30 +5,54 @@
  */
 
 const SheetRepository = {
+  _requestCache: {},
+
+  beginRequest() {
+    this._requestCache = {};
+  },
+
+  _cacheKey(workspaceId, tabName) {
+    return String(workspaceId) + '::' + String(tabName);
+  },
+
+  _invalidateTable(workspaceId, tabName) {
+    delete this._requestCache[this._cacheKey(workspaceId, tabName)];
+  },
   /**
    * Helper to retrieve tab data from a specific workspace sheet
    */
   getTableData(workspaceId, tabName) {
+    const cacheKey = this._cacheKey(workspaceId, tabName);
+    if (this._requestCache[cacheKey]) {
+      return this._requestCache[cacheKey];
+    }
+
     const ss = WorkspaceRouter.resolveSpreadsheet(workspaceId);
     const sheet = ss.getSheetByName(tabName);
     if (!sheet) {
-      throw new AppError(ERROR_CODES.NOT_FOUND, `Tab '${tabName}' not found in workspace '${workspaceId}'.`, 404);
+      throw new AppError(ERROR_CODES.NOT_FOUND, `Workspace tab '${tabName}' does not exist.`);
     }
 
-    const range = sheet.getDataRange();
-    const values = range.getValues();
-    if (values.length <= 1) return { headers: values[0] || [], rows: [], sheet };
+    const values = sheet.getDataRange().getValues();
+    if (values.length <= 1) {
+      const empty = { headers: values[0] || [], rows: [], sheet };
+      this._requestCache[cacheKey] = empty;
+      return empty;
+    }
 
     const headers = values[0].map(h => String(h).trim());
     const rows = [];
     for (let r = 1; r < values.length; r++) {
-      const rowObj = { _rowIndex: r + 1 };
-      for (let c = 0; c < headers.length; c++) {
-        rowObj[headers[c]] = values[r][c];
+      const obj = { _rowIndex: r + 1 };
+      for (let col = 0; col < headers.length; col++) {
+        obj[headers[col]] = values[r][col];
       }
-      rows.push(rowObj);
+      rows.push(obj);
     }
-    return { headers, rows, sheet };
+
+    const result = { headers, rows, sheet };
+    this._requestCache[cacheKey] = result;
+    return result;
   },
 
   /**
@@ -52,6 +76,7 @@ const SheetRepository = {
     });
 
     sheet.appendRow(rowData);
+    this._invalidateTable(workspaceId, tabName);
     return entity;
   },
 
@@ -90,6 +115,8 @@ const SheetRepository = {
         .setValues([group.map(change => change.value)]);
       i = j;
     }
+
+    this._invalidateTable(workspaceId, tabName);
   },
 
   /**
@@ -99,6 +126,7 @@ const SheetRepository = {
     const ss = WorkspaceRouter.resolveSpreadsheet(workspaceId);
     const sheet = ss.getSheetByName(tabName);
     sheet.deleteRow(rowIndex);
+    this._invalidateTable(workspaceId, tabName);
   },
 
   /* ------------------- MEMBERS ------------------- */
