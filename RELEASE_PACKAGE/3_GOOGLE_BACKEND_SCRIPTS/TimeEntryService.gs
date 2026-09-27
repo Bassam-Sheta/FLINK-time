@@ -10,73 +10,86 @@ const TimeEntryService = {
    */
   createManualEntry(authContext, workspaceId, payload) {
     AuthorizationService.assertWorkspaceAccess(authContext, workspaceId);
-    Validation.assertRequired(payload, ['projectId', 'startUtc', 'endUtc']);
+    Validation.assertRequired(payload, ['startUtc', 'endUtc']);
 
-    const durationSeconds = Validation.validateDateRange(payload.startUtc, payload.endUtc);
-    const description = payload.description ? Validation.sanitizeCellValue(payload.description.trim()) : '';
-    const billable = payload.billable !== undefined ? payload.billable : true;
-    const now = new Date().toISOString();
-
-    let hourlyRateSnapshot = 0;
-    let costRateSnapshot = 0;
-    try {
-      const proj = SheetRepository.getProject(workspaceId, payload.projectId);
-      if (proj) {
-        hourlyRateSnapshot = parseFloat(proj.HourlyRate) || 0;
-        costRateSnapshot = parseFloat(proj.CostRate) || 0;
+    let scriptLock = null;
+    if (typeof LockService !== 'undefined' && LockService.getScriptLock) {
+      scriptLock = LockService.getScriptLock();
+      if (!scriptLock.tryLock(10000)) {
+        throw new AppError(ERROR_CODES.SERVER_BUSY, 'Could not acquire lock to create manual entry. Please retry.', 409);
       }
-    } catch (e) {}
-
-    const entryId = Validation.generateId('ENT');
-    const timeEntry = {
-      EntryID: entryId,
-      UserID: authContext.userId,
-      ProjectID: payload.projectId,
-      TaskID: payload.taskId || '',
-      Description: description,
-      Tags: payload.tags || '',
-      StartUTC: payload.startUtc,
-      EndUTC: payload.endUtc,
-      DurationSeconds: durationSeconds,
-      Billable: billable ? true : false,
-      HourlyRateSnapshot: hourlyRateSnapshot,
-      CostRateSnapshot: costRateSnapshot,
-      EntrySource: CONSTANTS.ENTRY_SOURCE.MANUAL,
-      ManualEntry: true,
-      Status: 'ACTIVE',
-      ApprovalStatus: CONSTANTS.TIMESHEET_STATUS.OPEN,
-      TimesheetID: '',
-      Locked: false,
-      CreatedAt: now,
-      CreatedBy: authContext.userId,
-      UpdatedAt: now,
-      UpdatedBy: authContext.userId,
-      DeletedAt: '',
-      DeletedBy: '',
-      Version: 1
-    };
-
-    SheetRepository.createTimeEntry(workspaceId, timeEntry);
+    }
 
     try {
+      const tracking = TrackingPolicyService.validateTrackingContext(
+        authContext,
+        workspaceId,
+        payload,
+        { manual: true, enforceRequired: true }
+      );
+      const durationSeconds = Validation.validateDateRange(payload.startUtc, payload.endUtc);
+      const now = new Date().toISOString();
+
+      const hourlyRateSnapshot = tracking.project ? (parseFloat(tracking.project.HourlyRate) || 0) : 0;
+      const costRateSnapshot = tracking.project ? (parseFloat(tracking.project.CostRate) || 0) : 0;
+
+      const entryId = Validation.generateId('ENT');
+      const timeEntry = {
+        EntryID: entryId,
+        UserID: authContext.userId,
+        ProjectID: tracking.projectId,
+        TaskID: tracking.taskId,
+        Description: tracking.description,
+        Tags: tracking.tagIdsCsv,
+        StartUTC: payload.startUtc,
+        EndUTC: payload.endUtc,
+        DurationSeconds: durationSeconds,
+        Billable: tracking.billable,
+        HourlyRateSnapshot: hourlyRateSnapshot,
+        CostRateSnapshot: costRateSnapshot,
+        EntrySource: CONSTANTS.ENTRY_SOURCE.MANUAL,
+        ManualEntry: true,
+        Status: 'ACTIVE',
+        ApprovalStatus: CONSTANTS.TIMESHEET_STATUS.OPEN,
+        TimesheetID: '',
+        Locked: false,
+        CreatedAt: now,
+        CreatedBy: authContext.userId,
+        UpdatedAt: now,
+        UpdatedBy: authContext.userId,
+        DeletedAt: '',
+        DeletedBy: '',
+        Version: 1
+      };
+
+      SheetRepository.createTimeEntry(workspaceId, timeEntry);
+
+      if (typeof SpreadsheetApp !== 'undefined' && SpreadsheetApp.flush) {
+        SpreadsheetApp.flush();
+      }
+
       if (typeof RollupService !== 'undefined' && RollupService.recordTimeEntry) {
         RollupService.recordTimeEntry(workspaceId, timeEntry);
       }
-    } catch (e) {}
 
-    SheetRepository.logWorkspaceAudit(workspaceId, {
-      ActorUserID: authContext.userId,
-      ActorRole: authContext.role,
-      EntityType: 'TIME_ENTRY',
-      EntityID: entryId,
-      Action: CONSTANTS.AUDIT_EVENTS.ENTRY_CREATED,
-      AfterJSON: timeEntry,
-      ClientType: 'WEB'
-    });
+      SheetRepository.logWorkspaceAudit(workspaceId, {
+        ActorUserID: authContext.userId,
+        ActorRole: authContext.role,
+        EntityType: 'TIME_ENTRY',
+        EntityID: entryId,
+        Action: CONSTANTS.AUDIT_EVENTS.ENTRY_CREATED,
+        AfterJSON: timeEntry,
+        ClientType: 'WEB'
+      });
 
-    timeEntry.entryId = timeEntry.EntryID;
-    timeEntry.version = timeEntry.Version;
-    return timeEntry;
+      timeEntry.entryId = timeEntry.EntryID;
+      timeEntry.version = timeEntry.Version;
+      return timeEntry;
+    } finally {
+      if (scriptLock) {
+        try { scriptLock.releaseLock(); } catch (e) {}
+      }
+    }
   },
 
   /**
@@ -101,6 +114,9 @@ const TimeEntryService = {
       if (!entry) throw new AppError(ERROR_CODES.NOT_FOUND, `Time entry ${entryId} not found.`);
 
       AuthorizationService.assertRecordOwnership(authContext, entry.UserID);
+      if (authContext.role === CONSTANTS.ROLES.USER) {
+        TrackingPolicyService.assertEntryEditableByAge(workspaceId, entry);
+      }
 
       // Locking check
       if (entry.Locked === true || entry.Locked === 'TRUE' || 
@@ -122,17 +138,37 @@ const TimeEntryService = {
         }
       }
 
-      const allowed = {};
-      if (updates.projectId) allowed.ProjectID = updates.projectId;
-      if (updates.taskId !== undefined) allowed.TaskID = updates.taskId;
-      if (updates.description !== undefined) allowed.Description = Validation.sanitizeCellValue(updates.description.trim());
-      if (updates.tags !== undefined) allowed.Tags = updates.tags;
-      if (updates.billable !== undefined) allowed.Billable = updates.billable ? true : false;
+      const mergedTrackingPayload = {
+        projectId: updates.projectId !== undefined ? updates.projectId : entry.ProjectID,
+        taskId: updates.taskId !== undefined ? updates.taskId : entry.TaskID,
+        description: updates.description !== undefined ? updates.description : entry.Description,
+        tags: updates.tags !== undefined ? updates.tags : entry.Tags,
+        billable: updates.billable !== undefined ? updates.billable : entry.Billable
+      };
+      const tracking = TrackingPolicyService.validateTrackingContext(
+        authContext,
+        workspaceId,
+        mergedTrackingPayload,
+        { manual: false, enforceRequired: true }
+      );
 
-      if (updates.startUtc && updates.endUtc) {
-        allowed.StartUTC = updates.startUtc;
-        allowed.EndUTC = updates.endUtc;
-        allowed.DurationSeconds = Validation.validateDateRange(updates.startUtc, updates.endUtc);
+      const allowed = {};
+      if (updates.projectId !== undefined) {
+        allowed.ProjectID = tracking.projectId;
+        allowed.HourlyRateSnapshot = tracking.project ? (parseFloat(tracking.project.HourlyRate) || 0) : 0;
+        allowed.CostRateSnapshot = tracking.project ? (parseFloat(tracking.project.CostRate) || 0) : 0;
+      }
+      if (updates.taskId !== undefined) allowed.TaskID = tracking.taskId;
+      if (updates.description !== undefined) allowed.Description = tracking.description;
+      if (updates.tags !== undefined) allowed.Tags = tracking.tagIdsCsv;
+      if (updates.billable !== undefined) allowed.Billable = tracking.billable;
+
+      if (updates.startUtc !== undefined || updates.endUtc !== undefined) {
+        const nextStart = updates.startUtc !== undefined ? updates.startUtc : entry.StartUTC;
+        const nextEnd = updates.endUtc !== undefined ? updates.endUtc : entry.EndUTC;
+        allowed.StartUTC = nextStart;
+        allowed.EndUTC = nextEnd;
+        allowed.DurationSeconds = Validation.validateDateRange(nextStart, nextEnd);
       }
 
       allowed.UpdatedAt = new Date().toISOString();
@@ -146,7 +182,9 @@ const TimeEntryService = {
         allowed.Billable !== undefined ||
         allowed.StartUTC !== undefined ||
         allowed.EndUTC !== undefined ||
-        allowed.DurationSeconds !== undefined;
+        allowed.DurationSeconds !== undefined ||
+        allowed.HourlyRateSnapshot !== undefined ||
+        allowed.CostRateSnapshot !== undefined;
 
       // Explicit flush in Google Apps Script to guarantee write persistence before reconciliation.
       if (typeof SpreadsheetApp !== 'undefined' && SpreadsheetApp.flush) {
@@ -236,6 +274,9 @@ const TimeEntryService = {
       if (!entry) throw new AppError(ERROR_CODES.NOT_FOUND, `Time entry ${entryId} not found.`);
 
       AuthorizationService.assertRecordOwnership(authContext, entry.UserID);
+      if (authContext.role === CONSTANTS.ROLES.USER) {
+        TrackingPolicyService.assertEntryEditableByAge(workspaceId, entry);
+      }
 
       if (entry.Locked === true || entry.Locked === 'TRUE' || 
           entry.ApprovalStatus === CONSTANTS.TIMESHEET_STATUS.APPROVED ||
@@ -338,6 +379,12 @@ const TimeEntryService = {
         if (!entry) throw new AppError(ERROR_CODES.NOT_FOUND, `Time entry ${id} not found.`, 404);
 
         AuthorizationService.assertRecordOwnership(authContext, entry.UserID);
+        if (
+          authContext.role === CONSTANTS.ROLES.USER &&
+          (normalizedAction === 'DELETE' || normalizedAction === 'CHANGE_PROJECT')
+        ) {
+          TrackingPolicyService.assertEntryEditableByAge(workspaceId, entry);
+        }
 
         const isLocked = entry.Locked === true || entry.Locked === 'TRUE' || entry.Locked === 1;
         const isSubmitted = entry.ApprovalStatus === CONSTANTS.TIMESHEET_STATUS.SUBMITTED;
