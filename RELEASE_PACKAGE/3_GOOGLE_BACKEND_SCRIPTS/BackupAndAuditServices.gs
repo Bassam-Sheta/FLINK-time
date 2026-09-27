@@ -252,6 +252,29 @@ const BackupService = {
     return this.createBackup(superAdminContext, workspaceId);
   },
 
+  listBackups(superAdminContext, workspaceId = null) {
+    AuthorizationService.assertRole(superAdminContext, [CONSTANTS.ROLES.SUPER_ADMIN]);
+    const { rows } = MasterRepository.getTableData(CONSTANTS.MASTER_TABS.BACKUP_REGISTRY);
+    return rows
+      .filter(row => {
+        if (workspaceId) {
+          return row.Scope === 'WORKSPACE' && String(row.WorkspaceID) === String(workspaceId);
+        }
+        return true;
+      })
+      .sort((a, b) => new Date(b.CreatedAt).getTime() - new Date(a.CreatedAt).getTime())
+      .map(row => ({
+        backupId: row.BackupID,
+        scope: row.Scope,
+        workspaceId: row.WorkspaceID,
+        createdAt: row.CreatedAt,
+        status: row.Status,
+        verified: row.Verified === true || row.Verified === 'TRUE' || row.Verified === 1,
+        sourceFileId: row.SourceFileID,
+        backupFileId: row.BackupFileID
+      }));
+  },
+
   /**
    * Reopens and fully verifies a registered backup. Arbitrary Drive file IDs are rejected.
    */
