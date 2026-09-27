@@ -5,27 +5,19 @@
  */
 
 const TimesheetService = {
-  _resolveWeek(dateStr) {
-    const requested = new Date(dateStr);
-    if (isNaN(requested.getTime())) {
+  _resolveWeek(workspaceId, dateStr) {
+    if (!dateStr) {
       throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'Invalid week date.');
     }
-
-    requested.setUTCHours(0, 0, 0, 0);
-    const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-    const configured = String(MasterRepository.getGlobalSetting('WEEK_STARTS', 'Sunday') || 'Sunday');
-    const startDayIndex = Math.max(0, dayNames.findIndex(d => d.toLowerCase() === configured.toLowerCase()));
-    const currentDayIndex = requested.getUTCDay();
-    const delta = (currentDayIndex - startDayIndex + 7) % 7;
-
-    const startDate = new Date(requested.getTime() - delta * 24 * 3600 * 1000);
-    const endDate = new Date(startDate.getTime() + 7 * 24 * 3600 * 1000 - 1);
-    const dayLabels = [];
-    for (let i = 0; i < 7; i++) {
-      dayLabels.push(dayNames[(startDayIndex + i) % 7]);
-    }
-
-    return { startDate, endDate, dayLabels };
+    const bounds = TimezoneService.getWeekBounds(workspaceId, dateStr);
+    return {
+      startDate: bounds.startUtc,
+      endDate: bounds.endUtc,
+      startLocalDate: bounds.startLocalDate,
+      endLocalDate: bounds.endLocalDate,
+      dayLabels: bounds.dayLabels,
+      timezone: bounds.timezone
+    };
   },
 
   /**
@@ -38,7 +30,8 @@ const TimesheetService = {
 
     // Treat the supplied date as "a date in the requested week"; the server
     // resolves the actual configured week boundary.
-    const { startDate, endDate, dayLabels } = this._resolveWeek(weekStartDateStr);
+    const { startDate, endDate, startLocalDate, endLocalDate, dayLabels, timezone } =
+      this._resolveWeek(workspaceId, weekStartDateStr);
 
     const startIso = startDate.toISOString();
     const endIso = endDate.toISOString();
@@ -75,8 +68,8 @@ const TimesheetService = {
         };
       }
 
-      const entryStart = new Date(entry.StartUTC);
-      const dayDiff = Math.floor((entryStart.getTime() - startDate.getTime()) / (24 * 3600 * 1000));
+      const entryLocalDate = TimezoneService.formatDateKey(workspaceId, entry.StartUTC);
+      const dayDiff = TimezoneService.diffLocalDateDays(startLocalDate, entryLocalDate);
       const dayIdx = Math.max(0, Math.min(6, dayDiff));
       const secs = parseInt(entry.DurationSeconds, 10) || 0;
 
@@ -104,6 +97,9 @@ const TimesheetService = {
       workspaceId,
       periodStart: startIso,
       periodEnd: endIso,
+      periodStartLocal: startLocalDate,
+      periodEndLocal: endLocalDate,
+      timezone,
       dayLabels,
       totalSeconds,
       totalHours: +(totalSeconds / 3600).toFixed(2),
