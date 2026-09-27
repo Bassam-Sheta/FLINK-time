@@ -150,6 +150,7 @@ const ACTION_PERMISSIONS = {
 
   // Backups & Restores
   'backups.create': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN], isWrite: true },
+  'backups.list': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN], isWrite: false },
   'backups.restoreValidate': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN], isWrite: false },
   'backups.restoreApply': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN], isWrite: true },
   'rollups.rebuild': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN, CONSTANTS.ROLES.ADMIN], requiresWorkspace: true, isWrite: true },
@@ -512,11 +513,19 @@ function dispatchAction(action, data, authContextOverride = null) {
     case 'backups.create':
       return BackupService.createBackup(authContext, wsId);
 
+    case 'backups.list':
+      return BackupService.listBackups(authContext, payload.workspaceId || wsId || null);
+
     case 'backups.restoreValidate':
       return BackupService.validateBackup(authContext, payload.workspaceId || wsId, payload.backupId);
 
     case 'backups.restoreApply':
-      return BackupService.restoreBackup(authContext, payload.workspaceId || wsId, payload.backupId || payload.backupFileId);
+      return BackupService.restoreBackup(
+        authContext,
+        payload.workspaceId || wsId,
+        payload.backupId,
+        payload.adminPassword
+      );
 
     case 'rollups.rebuild':
       return RollupService.rebuildRollups(wsId);
