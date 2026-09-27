@@ -556,6 +556,10 @@
           <select id="timerTaskSelect"></select>
         </div>
         <div>
+          <label>Tags</label>
+          <select id="timerTagsSelect" multiple title="Hold Ctrl/Cmd to select multiple tags"></select>
+        </div>
+        <div>
           <label>What are you working on?</label>
           <input type="text" id="timerDescriptionInput" placeholder="Describe current activity...">
         </div>
@@ -771,6 +775,7 @@
       workspaces: [],
       projects: [],
       tasks: [],
+      tags: [],
       users: [],
       activeTimer: null,
       timerInterval: null,
@@ -982,11 +987,23 @@
     async function loadWorkspaceData() {
       if (!state.currentWorkspace) return;
       try {
-        state.projects = await apiCall('projects.list');
+        const [projects, tags] = await Promise.all([
+          apiCall('projects.list'),
+          apiCall('tags.list')
+        ]);
+        state.projects = Array.isArray(projects) ? projects : [];
+        state.tags = Array.isArray(tags) ? tags : [];
+
         const projSelect = document.getElementById('timerProjectSelect');
         projSelect.replaceChildren(new Option('Select Project', ''));
         state.projects.forEach(p => {
           projSelect.add(new Option(String(p.ProjectName || ''), String(p.ProjectID || '')));
+        });
+
+        const tagSelect = document.getElementById('timerTagsSelect');
+        tagSelect.replaceChildren();
+        state.tags.forEach(tag => {
+          tagSelect.add(new Option(String(tag.TagName || ''), String(tag.TagID || '')));
         });
       } catch (e) {}
     }
@@ -1055,8 +1072,9 @@
         const projectId = document.getElementById('timerProjectSelect').value;
         const taskId = document.getElementById('timerTaskSelect').value;
         const description = document.getElementById('timerDescriptionInput').value;
+        const tagIds = Array.from(document.getElementById('timerTagsSelect').selectedOptions).map(option => option.value);
         try {
-          const res = await apiCall('timer.start', { projectId, taskId, description });
+          const res = await apiCall('timer.start', { projectId, taskId, description, tagIds });
           state.activeTimer = res;
           startLocalClock(res.startedAtUTC);
           btn.innerText = 'STOP';
@@ -1129,6 +1147,8 @@
         <select id="manualTask"></select>
         <label style="margin-top:0.75rem;">Description</label>
         <input type="text" id="manualDescription">
+        <label style="margin-top:0.75rem;">Tags</label>
+        <select id="manualTags" multiple title="Hold Ctrl/Cmd to select multiple tags"></select>
         <div class="grid-2" style="margin-top:0.75rem;">
           <div><label>Start</label><input type="datetime-local" id="manualStart"></div>
           <div><label>End</label><input type="datetime-local" id="manualEnd"></div>
@@ -1146,6 +1166,13 @@
       project.onchange = populateManualTasks;
 
       box.querySelector('#manualTask').replaceChildren(new Option('Select Task (Optional)', ''));
+
+      const tagSelect = box.querySelector('#manualTags');
+      tagSelect.replaceChildren();
+      (state.tags || []).forEach(tag => tagSelect.add(
+        new Option(String(tag.TagName || ''), String(tag.TagID || ''))
+      ));
+
       box.querySelector('#manualCancelBtn').onclick = closeModal;
       box.querySelector('#manualSaveBtn').onclick = submitManualEntry;
 
@@ -1171,6 +1198,7 @@
       const projectId = document.getElementById('manualProject')?.value || '';
       const taskId = document.getElementById('manualTask')?.value || '';
       const description = document.getElementById('manualDescription')?.value || '';
+      const tags = Array.from(document.getElementById('manualTags')?.selectedOptions || []).map(option => option.value);
       const startRaw = document.getElementById('manualStart')?.value || '';
       const endRaw = document.getElementById('manualEnd')?.value || '';
       const billable = !!document.getElementById('manualBillable')?.checked;
@@ -1185,6 +1213,7 @@
           projectId,
           taskId,
           description,
+          tags,
           startUtc: start.toISOString(),
           endUtc: end.toISOString(),
           billable
