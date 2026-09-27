@@ -28,8 +28,22 @@ const UserService = {
       }
 
       const userId = Validation.generateId('USR');
-      const temporaryPassword = userPayload.password || ('Flk-' + SecurityService.generateRandomHex(4) + '!9');
+      const temporaryPassword = userPayload.temporaryPassword || userPayload.password || ('Flk-' + SecurityService.generateRandomHex(8) + '!9');
       Validation.validatePassword(temporaryPassword);
+
+      if (primaryWorkspaceId) {
+        const primaryWorkspace = MasterRepository.getWorkspace(primaryWorkspaceId);
+        if (!primaryWorkspace) {
+          throw new AppError(ERROR_CODES.WORKSPACE_NOT_FOUND, `Workspace '${primaryWorkspaceId}' does not exist.`, 404);
+        }
+        if (primaryWorkspace.Status !== CONSTANTS.WORKSPACE_STATUS.ACTIVE) {
+          throw new AppError(
+            ERROR_CODES.WORKSPACE_DENIED,
+            `Workspace '${primaryWorkspaceId}' is not active (${primaryWorkspace.Status}).`,
+            403
+          );
+        }
+      }
 
       const passwordHash = SecurityService.hashPassword(temporaryPassword);
       const now = new Date().toISOString();
@@ -135,7 +149,21 @@ const UserService = {
       if (updates.displayName) allowedUpdates.DisplayName = Validation.sanitizeCellValue(updates.displayName.trim());
       if (updates.email !== undefined) allowedUpdates.Email = Validation.sanitizeCellValue(updates.email.trim());
       if (updates.role) allowedUpdates.Role = Validation.validateRole(updates.role);
-      if (updates.primaryWorkspaceId) allowedUpdates.PrimaryWorkspaceID = updates.primaryWorkspaceId;
+      if (updates.primaryWorkspaceId !== undefined) {
+        const requestedPrimary = updates.primaryWorkspaceId || '';
+        if (requestedPrimary) {
+          const activeAccesses = MasterRepository.getWorkspaceAccessForUser(targetUserId);
+          const hasAccess = activeAccesses.some(a => a.WorkspaceID === requestedPrimary);
+          if (!hasAccess) {
+            throw new AppError(
+              ERROR_CODES.WORKSPACE_DENIED,
+              'Primary workspace can only be set to a workspace the user is actively assigned to.',
+              403
+            );
+          }
+        }
+        allowedUpdates.PrimaryWorkspaceID = requestedPrimary;
+      }
 
       allowedUpdates.UpdatedAt = new Date().toISOString();
       allowedUpdates.UpdatedBy = superAdminContext.userId;
