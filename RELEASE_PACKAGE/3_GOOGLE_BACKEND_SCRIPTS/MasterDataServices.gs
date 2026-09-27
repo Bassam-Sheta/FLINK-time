@@ -42,12 +42,41 @@ const ClientService = {
 const ProjectService = {
   listProjects(authContext, workspaceId) {
     AuthorizationService.assertWorkspaceAccess(authContext, workspaceId);
-    return SheetRepository.listProjects(workspaceId);
+    const projects = SheetRepository.listProjects(workspaceId);
+    if (authContext.role !== CONSTANTS.ROLES.USER) return projects;
+
+    // USER-facing DTO deliberately excludes rates, costs, budgets, and internal notes.
+    return projects.map(p => ({
+      ProjectID: p.ProjectID,
+      ClientID: p.ClientID,
+      ProjectName: p.ProjectName,
+      Code: p.Code,
+      Status: p.Status,
+      BillableDefault: p.BillableDefault,
+      EstimateHours: p.EstimateHours,
+      StartDate: p.StartDate,
+      EndDate: p.EndDate,
+      ColorKey: p.ColorKey
+    }));
   },
 
   getProject(authContext, workspaceId, projectId) {
     AuthorizationService.assertWorkspaceAccess(authContext, workspaceId);
-    return SheetRepository.getProject(workspaceId, projectId);
+    const project = SheetRepository.getProject(workspaceId, projectId);
+    if (!project || authContext.role !== CONSTANTS.ROLES.USER) return project;
+
+    return {
+      ProjectID: project.ProjectID,
+      ClientID: project.ClientID,
+      ProjectName: project.ProjectName,
+      Code: project.Code,
+      Status: project.Status,
+      BillableDefault: project.BillableDefault,
+      EstimateHours: project.EstimateHours,
+      StartDate: project.StartDate,
+      EndDate: project.EndDate,
+      ColorKey: project.ColorKey
+    };
   },
 
   createProject(authContext, workspaceId, payload) {
