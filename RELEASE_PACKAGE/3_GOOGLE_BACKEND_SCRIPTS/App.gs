@@ -169,6 +169,19 @@ const ACTION_PERMISSIONS = {
  * Universal API Request Handler
  */
 function executeApiRequest(action, requestData, httpMethod = 'POST') {
+  // Explicit request boundary for repository caches. Apps Script V8 isolates may
+  // be reused between executions, so never allow cached Sheet rows to survive
+  // from one API request into another.
+  if (typeof MasterRepository !== 'undefined' && MasterRepository.beginRequest) {
+    MasterRepository.beginRequest();
+  }
+  if (typeof SheetRepository !== 'undefined' && SheetRepository.beginRequest) {
+    SheetRepository.beginRequest();
+  }
+  if (typeof WorkspaceRouter !== 'undefined' && WorkspaceRouter.clearCache) {
+    WorkspaceRouter.clearCache();
+  }
+
   const perm = ACTION_PERMISSIONS[action];
 
   if (!perm) {
