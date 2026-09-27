@@ -110,6 +110,15 @@ const SetupService = {
   _step1_SystemOwner(payload) {
     Validation.assertRequired(payload, ['setupKey', 'fullName', 'username', 'password', 'confirmPassword']);
 
+    let setupLock = null;
+    if (typeof LockService !== 'undefined' && LockService.getScriptLock) {
+      setupLock = LockService.getScriptLock();
+      if (!setupLock.tryLock(15000)) {
+        throw new AppError(ERROR_CODES.CONFLICT, 'Setup is already being completed by another request. Please retry.', 409);
+      }
+    }
+
+    try {
     // Ensure schema/pepper exist before reading master tables.
     MigrationService.bootstrapMasterSheet();
 
@@ -200,6 +209,9 @@ const SetupService = {
       },
       sessionToken: session.sessionToken
     };
+    } finally {
+      if (setupLock) setupLock.releaseLock();
+    }
   },
 
   _step2_CompanySettings(payload, authContext) {
