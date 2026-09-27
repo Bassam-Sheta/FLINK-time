@@ -25,8 +25,13 @@ const WorkspaceRouter = {
       throw new AppError(ERROR_CODES.WORKSPACE_NOT_FOUND, `Workspace '${workspaceId}' does not exist in registry.`, 404);
     }
 
-    if (wsRecord.Status === CONSTANTS.WORKSPACE_STATUS.ARCHIVED) {
-      throw new AppError(ERROR_CODES.WORKSPACE_NOT_FOUND, `Workspace '${workspaceId}' has been archived.`, 410);
+    if (wsRecord.Status !== CONSTANTS.WORKSPACE_STATUS.ACTIVE) {
+      const statusCode = wsRecord.Status === CONSTANTS.WORKSPACE_STATUS.ARCHIVED ? 410 : 403;
+      throw new AppError(
+        wsRecord.Status === CONSTANTS.WORKSPACE_STATUS.ARCHIVED ? ERROR_CODES.WORKSPACE_NOT_FOUND : ERROR_CODES.WORKSPACE_DENIED,
+        `Workspace '${workspaceId}' is not active (${wsRecord.Status}).`,
+        statusCode
+      );
     }
 
     if (!wsRecord.SpreadsheetID) {
