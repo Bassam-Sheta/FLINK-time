@@ -345,7 +345,8 @@ const UserService = {
       for (const acc of accesses) {
         try {
           SheetRepository.updateMember(acc.WorkspaceID, targetUserId, {
-            Status: CONSTANTS.ACCOUNT_STATUS.ACTIVE
+            Status: CONSTANTS.ACCOUNT_STATUS.ACTIVE,
+            LeftAt: ''
           });
         } catch (e) {}
       }
