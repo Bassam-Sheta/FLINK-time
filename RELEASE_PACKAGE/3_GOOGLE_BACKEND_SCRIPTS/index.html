@@ -2061,56 +2061,175 @@
       `;
     }
 
+    async function resolveReportRange(period) {
+      const now = new Date();
+      const today = now.toISOString().substring(0, 10);
+
+      if (period === 'TODAY') {
+        return {
+          startDate: today + 'T00:00:00.000Z',
+          endDate: now.toISOString()
+        };
+      }
+
+      if (period === 'THIS_MONTH') {
+        const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+        return { startDate: start.toISOString(), endDate: now.toISOString() };
+      }
+
+      if (period === 'THIS_WEEK' || period === 'LAST_WEEK') {
+        const anchor = new Date(now.getTime() - (period === 'LAST_WEEK' ? 7 * 86400000 : 0));
+        const week = await apiCall('timesheet.getWeekly', {
+          weekStartDate: anchor.toISOString().substring(0, 10)
+        });
+        return { startDate: week.periodStart, endDate: week.periodEnd };
+      }
+
+      return {
+        startDate: new Date(now.getTime() - 7 * 86400000).toISOString(),
+        endDate: now.toISOString()
+      };
+    }
+
+    function appendReportTable(output, headers, rows) {
+      const wrapper = document.createElement('div');
+      wrapper.className = 'table-responsive';
+      const table = document.createElement('table');
+      const thead = document.createElement('thead');
+      const headerRow = document.createElement('tr');
+
+      headers.forEach(header => {
+        const th = document.createElement('th');
+        th.textContent = header;
+        headerRow.appendChild(th);
+      });
+      thead.appendChild(headerRow);
+      table.appendChild(thead);
+
+      const tbody = document.createElement('tbody');
+      rows.forEach(row => {
+        const tr = document.createElement('tr');
+        row.forEach(value => {
+          const td = document.createElement('td');
+          td.textContent = String(value === null || value === undefined ? '' : value);
+          tr.appendChild(td);
+        });
+        tbody.appendChild(tr);
+      });
+      table.appendChild(tbody);
+      wrapper.appendChild(table);
+      output.appendChild(wrapper);
+    }
+
     async function runCustomReport() {
       const repType = document.getElementById('rbReportType').value;
-      const group1 = document.getElementById('rbGroup1').value;
+      const group1 = document.getElementById('rbGroup1').value.toLowerCase();
+      const period = document.getElementById('rbPeriod').value;
       const output = document.getElementById('reportBuilderOutput');
-      output.innerHTML = '<div style="text-align: center; padding: 2rem;">Generating report...</div>';
+
+      output.replaceChildren();
+      const loading = document.createElement('div');
+      loading.style.textAlign = 'center';
+      loading.style.padding = '2rem';
+      loading.textContent = 'Generating report...';
+      output.appendChild(loading);
 
       try {
-        const data = await apiCall('reports.summary', {
-          groupBy: [group1],
-          startDate: new Date(Date.now() - 7*86400000).toISOString().substring(0,10),
-          endDate: new Date().toISOString().substring(0,10)
-        });
+        const range = await resolveReportRange(period);
+        const filters = { startDate: range.startDate, endDate: range.endDate };
 
-        output.innerHTML = `
-          <div style="display: flex; justify-content: space-between; margin-bottom: 1rem;">
-            <strong>Total Tracked: ${(data.totalSeconds / 3600).toFixed(2)} hours</strong>
-            <button class="btn btn-secondary btn-sm" onclick="exportReportCsv()">Download Sanitized CSV</button>
-          </div>
-          <div class="table-responsive">
-            <table>
-              <thead><tr><th>Group</th><th>Duration</th><th>Billable Ratio</th></tr></thead>
-              <tbody>
-                ${(data.groups || []).map(g => `
-                  <tr>
-                    <td><strong>${g.groupKey}</strong></td>
-                    <td style="font-family: var(--font-mono);">${formatSecs(g.durationSeconds)}</td>
-                    <td>100%</td>
-                  </tr>
-                `).join('')}
-              </tbody>
-            </table>
-          </div>
-        `;
+        let action = 'reports.summary';
+        if (repType === 'DETAILED') action = 'reports.detailed';
+        else if (repType === 'ATTENDANCE') action = 'reports.attendance';
+        else if (repType === 'EXCEPTIONS') action = 'reports.exceptions';
+
+        const payload = repType === 'SUMMARY'
+          ? { groupings: [group1], filters }
+          : { filters };
+
+        const data = await apiCall(action, payload);
+        output.replaceChildren();
+
+        const header = document.createElement('div');
+        header.style.display = 'flex';
+        header.style.justifyContent = 'space-between';
+        header.style.marginBottom = '1rem';
+
+        const title = document.createElement('strong');
+        const totalSeconds = Number(
+          data.overall?.totalSeconds ??
+          data.entries?.reduce((sum, row) => sum + Number(row.durationSeconds || 0), 0) ??
+          0
+        );
+        title.textContent = repType === 'SUMMARY'
+          ? 'Total Tracked: ' + (totalSeconds / 3600).toFixed(2) + ' hours'
+          : repType + ' report';
+
+        const exportBtn = document.createElement('button');
+        exportBtn.className = 'btn btn-secondary btn-sm';
+        exportBtn.textContent = 'Download Sanitized CSV';
+        exportBtn.onclick = () => exportReportCsv(filters);
+
+        header.append(title, exportBtn);
+        output.appendChild(header);
+
+        if (repType === 'SUMMARY') {
+          const rows = (data.tree || []).map(group => {
+            const seconds = Number(group.totalSeconds || 0);
+            const billable = Number(group.billableSeconds || 0);
+            const ratio = seconds > 0 ? ((billable / seconds) * 100).toFixed(1) + '%' : '0.0%';
+            return [group.key || 'Other', formatSecs(seconds), ratio];
+          });
+          appendReportTable(output, ['Group', 'Duration', 'Billable Ratio'], rows);
+        } else if (repType === 'DETAILED') {
+          const rows = (data.entries || []).map(row => [
+            row.userName || row.userId || '',
+            row.projectName || '',
+            row.taskName || '',
+            row.description || '',
+            row.durationFormatted || formatSecs(Number(row.durationSeconds || 0)),
+            row.approvalStatus || ''
+          ]);
+          appendReportTable(output, ['User', 'Project', 'Task', 'Description', 'Duration', 'Status'], rows);
+        } else if (repType === 'ATTENDANCE') {
+          const rows = (data.attendance || []).map(row => [
+            row.userName || row.userId || '',
+            row.date || '',
+            Number(row.trackedHours || 0).toFixed(2),
+            Number(row.targetHours || 0).toFixed(2),
+            Number(row.overtimeHours || 0).toFixed(2),
+            Number(row.missingHours || 0).toFixed(2)
+          ]);
+          appendReportTable(output, ['User', 'Date', 'Tracked', 'Target', 'Overtime', 'Missing'], rows);
+        } else {
+          const rows = (data.anomalies || []).map(row => [
+            row.severity || '',
+            row.type || '',
+            row.userName || row.userId || '',
+            row.entryId || '',
+            row.message || ''
+          ]);
+          appendReportTable(output, ['Severity', 'Type', 'User', 'Entry', 'Message'], rows);
+        }
       } catch (e) {
-        output.innerHTML = '<div style="color: #F87171;">' + e.message + '</div>';
+        renderError(output, '', e);
       }
     }
 
-    async function exportReportCsv() {
+    async function exportReportCsv(filters = null) {
       try {
-        const res = await apiCall('reports.exportCsv', {
-          startDate: new Date(Date.now() - 30*86400000).toISOString().substring(0,10),
-          endDate: new Date().toISOString().substring(0,10)
-        });
+        const effectiveFilters = filters || {
+          startDate: new Date(Date.now() - 30 * 86400000).toISOString(),
+          endDate: new Date().toISOString()
+        };
+        const res = await apiCall('reports.exportCsv', { filters: effectiveFilters });
         const blob = new Blob([res.csvContent], { type: 'text/csv;charset=utf-8;' });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = res.filename;
+        a.download = String(res.filename || 'FLINK_Time_Export.csv').replace(/[\\/:*?"<>|]/g, '_');
         a.click();
+        URL.revokeObjectURL(url);
       } catch (e) {
         alert(e.message || 'CSV export failed.');
       }
