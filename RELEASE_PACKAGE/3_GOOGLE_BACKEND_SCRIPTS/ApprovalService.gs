@@ -6,6 +6,61 @@
 
 const ApprovalService = {
   /**
+   * Resolve the exact entry membership captured at submission time.
+   * Legacy submitted sheets without a snapshot fall back only to entries already
+   * carrying the same TimesheetID; never to unassigned entries in the date range.
+   */
+  _resolveSubmissionEntries(workspaceId, timesheet) {
+    let snapshot = [];
+    if (timesheet.EntrySnapshotJSON) {
+      try {
+        const parsed = JSON.parse(timesheet.EntrySnapshotJSON);
+        if (Array.isArray(parsed)) snapshot = parsed;
+      } catch (e) {
+        throw new AppError(ERROR_CODES.CONFLICT, 'Timesheet submission snapshot is malformed.', 409);
+      }
+    }
+
+    if (snapshot.length > 0) {
+      const entries = [];
+      for (const item of snapshot) {
+        const entry = SheetRepository.getEntry(workspaceId, item.entryId);
+        if (!entry) {
+          throw new AppError(ERROR_CODES.CONFLICT, `Submitted entry ${item.entryId} no longer exists.`, 409);
+        }
+        if (entry.TimesheetID !== timesheet.TimesheetID) {
+          throw new AppError(ERROR_CODES.CONFLICT, `Submitted entry ${item.entryId} is no longer bound to this timesheet.`, 409);
+        }
+        const currentVersion = parseInt(entry.Version, 10) || 1;
+        const currentDuration = parseInt(entry.DurationSeconds, 10) || 0;
+        if (
+          currentVersion !== (parseInt(item.version, 10) || 1) ||
+          currentDuration !== (parseInt(item.durationSeconds, 10) || 0)
+        ) {
+          throw new AppError(
+            ERROR_CODES.CONFLICT,
+            `Submitted entry ${item.entryId} changed after submission. Reopen/resubmit before review.`,
+            409
+          );
+        }
+        entries.push(entry);
+      }
+      return entries;
+    }
+
+    const legacyEntries = SheetRepository.listTimeEntries(workspaceId, {
+      userId: timesheet.UserID,
+      startDate: timesheet.PeriodStart,
+      endDate: timesheet.PeriodEnd
+    }).filter(entry => entry.TimesheetID === timesheet.TimesheetID);
+
+    if (legacyEntries.length === 0) {
+      throw new AppError(ERROR_CODES.CONFLICT, 'Timesheet has no verifiable submitted entries.', 409);
+    }
+    return legacyEntries;
+  },
+
+  /**
    * Admin or Super Admin approves a submitted timesheet
    */
   /**
@@ -28,8 +83,12 @@ const ApprovalService = {
       const timesheet = SheetRepository.getTimesheet(workspaceId, timesheetId);
       if (!timesheet) throw new AppError(ERROR_CODES.NOT_FOUND, `Timesheet ${timesheetId} not found.`);
 
-      if (timesheet.Status === CONSTANTS.TIMESHEET_STATUS.APPROVED) {
-        throw new AppError(ERROR_CODES.CONFLICT, 'Timesheet is already approved.', 409);
+      if (timesheet.Status !== CONSTANTS.TIMESHEET_STATUS.SUBMITTED) {
+        throw new AppError(
+          ERROR_CODES.CONFLICT,
+          `Only SUBMITTED timesheets can be approved. Current status: ${timesheet.Status}.`,
+          409
+        );
       }
 
       const now = new Date().toISOString();
@@ -44,21 +103,22 @@ const ApprovalService = {
         LockedAt: now
       });
 
-      // Lock all related time entries atomically
-      const entries = SheetRepository.listTimeEntries(workspaceId, {
-        userId: timesheet.UserID,
-        startDate: timesheet.PeriodStart,
-        endDate: timesheet.PeriodEnd
-      });
+      // Approve only the immutable submission membership.
+      const entries = this._resolveSubmissionEntries(workspaceId, timesheet);
 
       for (const entry of entries) {
-        if (entry.TimesheetID === timesheetId || !entry.TimesheetID) {
-          SheetRepository.updateTimeEntry(workspaceId, entry.EntryID, {
-            TimesheetID: timesheetId,
-            ApprovalStatus: CONSTANTS.TIMESHEET_STATUS.APPROVED,
-            Locked: true
-          });
+        if (entry.ApprovalStatus !== CONSTANTS.TIMESHEET_STATUS.SUBMITTED) {
+          throw new AppError(
+            ERROR_CODES.CONFLICT,
+            `Entry ${entry.EntryID} is not in SUBMITTED state.`,
+            409
+          );
         }
+        SheetRepository.updateTimeEntry(workspaceId, entry.EntryID, {
+          TimesheetID: timesheetId,
+          ApprovalStatus: CONSTANTS.TIMESHEET_STATUS.APPROVED,
+          Locked: true
+        });
       }
 
       if (typeof SpreadsheetApp !== 'undefined' && SpreadsheetApp.flush) {
@@ -118,6 +178,13 @@ const ApprovalService = {
     try {
       const timesheet = SheetRepository.getTimesheet(workspaceId, timesheetId);
       if (!timesheet) throw new AppError(ERROR_CODES.NOT_FOUND, `Timesheet ${timesheetId} not found.`);
+      if (timesheet.Status !== CONSTANTS.TIMESHEET_STATUS.SUBMITTED) {
+        throw new AppError(
+          ERROR_CODES.CONFLICT,
+          `Only SUBMITTED timesheets can be rejected. Current status: ${timesheet.Status}.`,
+          409
+        );
+      }
 
       const now = new Date().toISOString();
       const cleanComment = Validation.sanitizeCellValue(reasonComment.trim());
@@ -130,12 +197,8 @@ const ApprovalService = {
         ReviewComment: cleanComment
       });
 
-      // Unlock entries and mark REJECTED so user can edit and resubmit
-      const entries = SheetRepository.listTimeEntries(workspaceId, {
-        userId: timesheet.UserID,
-        startDate: timesheet.PeriodStart,
-        endDate: timesheet.PeriodEnd
-      });
+      // Unlock only the entries that were part of this submission.
+      const entries = this._resolveSubmissionEntries(workspaceId, timesheet);
 
       for (const entry of entries) {
         SheetRepository.updateTimeEntry(workspaceId, entry.EntryID, {
@@ -197,6 +260,13 @@ const ApprovalService = {
     try {
       const timesheet = SheetRepository.getTimesheet(workspaceId, timesheetId);
       if (!timesheet) throw new AppError(ERROR_CODES.NOT_FOUND, `Timesheet ${timesheetId} not found.`);
+      if (timesheet.Status !== CONSTANTS.TIMESHEET_STATUS.APPROVED) {
+        throw new AppError(
+          ERROR_CODES.CONFLICT,
+          `Only APPROVED timesheets can be reopened. Current status: ${timesheet.Status}.`,
+          409
+        );
+      }
 
       const now = new Date().toISOString();
       const cleanReason = reason ? Validation.sanitizeCellValue(reason) : 'Reopened by Super Admin';
@@ -206,12 +276,8 @@ const ApprovalService = {
         LockedAt: ''
       });
 
-      // Unlock entries
-      const entries = SheetRepository.listTimeEntries(workspaceId, {
-        userId: timesheet.UserID,
-        startDate: timesheet.PeriodStart,
-        endDate: timesheet.PeriodEnd
-      });
+      // Unlock only the exact entries that were approved with this timesheet.
+      const entries = this._resolveSubmissionEntries(workspaceId, timesheet);
 
       for (const entry of entries) {
         SheetRepository.updateTimeEntry(workspaceId, entry.EntryID, {
