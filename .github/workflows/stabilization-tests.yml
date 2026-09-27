@@ -1,0 +1,26 @@
+name: Stabilization Tests
+
+on:
+  pull_request:
+  push:
+    branches:
+      - release/v0.1-stabilization
+
+permissions:
+  contents: read
+
+jobs:
+  node-regression-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Use Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Run regression tests
+        run: npm test
