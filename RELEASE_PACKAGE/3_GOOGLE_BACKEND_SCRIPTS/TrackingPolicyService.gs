@@ -63,6 +63,7 @@ const TrackingPolicyService = {
 
     const policy = this.getPolicy(workspaceId);
     const isManual = options.manual === true;
+    const enforceRequired = options.enforceRequired !== false;
 
     if (isManual && !policy.allowManual) {
       throw new AppError(
@@ -81,16 +82,16 @@ const TrackingPolicyService = {
       payload.tagIds !== undefined ? payload.tagIds : payload.tags
     );
 
-    if (policy.projectRequired && !projectId) {
+    if (enforceRequired && policy.projectRequired && !projectId) {
       throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'A project is required by the tracking policy.', 400);
     }
-    if (policy.taskRequired && !taskId) {
+    if (enforceRequired && policy.taskRequired && !taskId) {
       throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'A task is required by the tracking policy.', 400);
     }
-    if (policy.descriptionRequired && !description) {
+    if (enforceRequired && policy.descriptionRequired && !description) {
       throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'A description is required by the tracking policy.', 400);
     }
-    if (policy.tagsRequired && tagIds.length === 0) {
+    if (enforceRequired && policy.tagsRequired && tagIds.length === 0) {
       throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'At least one tag is required by the tracking policy.', 400);
     }
 
