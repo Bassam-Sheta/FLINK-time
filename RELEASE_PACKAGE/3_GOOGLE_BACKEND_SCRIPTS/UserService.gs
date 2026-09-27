@@ -17,6 +17,13 @@ const UserService = {
     try {
       const username = Validation.validateUsername(userPayload.username);
       const role = Validation.validateRole(userPayload.role);
+      if (role === CONSTANTS.ROLES.SUPER_ADMIN) {
+        throw new AppError(
+          ERROR_CODES.PERMISSION_DENIED,
+          'SUPER_ADMIN accounts cannot be created through generic user CRUD.',
+          403
+        );
+      }
       const displayName = Validation.sanitizeCellValue(userPayload.displayName.trim());
       const email = userPayload.email ? Validation.sanitizeCellValue(userPayload.email.trim()) : '';
       const primaryWorkspaceId = userPayload.primaryWorkspaceId || '';
