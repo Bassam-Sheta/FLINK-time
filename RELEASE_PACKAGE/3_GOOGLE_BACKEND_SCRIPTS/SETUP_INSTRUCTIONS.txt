@@ -1,91 +1,110 @@
 ================================================================================
-FLINK TIME & WORKFORCE PLATFORM — COMPLETE SETUP & DEPLOYMENT GUIDE
+FLINK TIME & WORKFORCE PLATFORM — STABILIZED CORE SETUP GUIDE
 ================================================================================
 
-STEP 1: CREATE GOOGLE SPREADSHEET (MASTER CONTROL VAULT)
+IMPORTANT
+--------------------------------------------------------------------------------
+This stabilization branch intentionally removes the legacy Code.gs backend and
+bundled legacy admin_ui.html from the deployable Apps Script project.
+
+Deploy ONLY the modern App.gs API and service files in this folder.
+
+STEP 1: CREATE GOOGLE SPREADSHEET (MASTER CONTROL)
 --------------------------------------------------------------------------------
 1. Open Google Sheets at https://sheets.new and title it:
    "FLINK_Time_Master_Control"
 2. Go to Extensions > Apps Script.
 
-STEP 2: UPLOAD BACKEND SCRIPTS & HTML FILES
+STEP 2: UPLOAD BACKEND SCRIPTS & HTML
 --------------------------------------------------------------------------------
-In the Apps Script editor:
-1. Create/paste all .gs script files from this folder:
-   - Constants.gs
-   - Errors.gs
-   - Validation.gs
-   - SecurityService.gs
-   - AuthService.gs
-   - SessionService.gs
-   - MasterRepository.gs
-   - SheetRepository.gs
-   - WorkspaceRouter.gs
-   - WorkspaceService.gs
-   - UserService.gs
-   - TimerService.gs
-   - TimeEntryService.gs
-   - TimesheetService.gs
-   - ApprovalService.gs
-   - MasterDataServices.gs
-   - AdminRequestService.gs
-   - AuthorizationService.gs
-   - ReportService.gs
-   - RollupService.gs
-   - JobService.gs
-   - DashboardService.gs
-   - BackupAndAuditServices.gs
-   - ExportAndMigrationServices.gs
-   - IntegrityService.gs
-   - SetupService.gs
-   - SpreadsheetSchema.gs
-   - Code.gs
-   - App.gs
+In the Apps Script editor, create/paste the .gs files from this folder,
+including App.gs and all modern service/repository/schema files.
 
-2. Create TWO HTML files in the Apps Script project:
-   - File > New > HTML: name it "index" (paste contents of index.html)
-   - File > New > HTML: name it "admin_ui" (paste contents of admin_ui.html)
+Do NOT add the legacy Code.gs file from older releases.
+Do NOT add the legacy admin_ui.html controller to this Apps Script project.
 
-3. Update project manifest:
-   - In Apps Script Settings (gear icon), check "Show 'appsscript.json' manifest file in editor"
-   - In appsscript.json, paste the contents of appsscript.json from this folder.
+Create one HTML file named "index" and paste the contents of index.html.
 
-STEP 3: INITIALIZE DATABASE SCHEMA
+Enable the appsscript.json manifest in Apps Script Project Settings and paste
+the manifest from this folder.
+
+STEP 3: INITIALIZE THE INSTALLATION SECURELY
 --------------------------------------------------------------------------------
-1. In the Apps Script editor toolbar, select the function "setupDatabase" or
-   "MigrationService.bootstrapMasterSheet" from the function dropdown.
-2. Click "Run" and grant the required permissions when prompted.
-3. Your Google Sheet will automatically be populated with all relational tabs,
-   frozen headers, validations, and initial admin records.
+1. In the Apps Script editor, select the function:
+      initializeInstallation
+2. Click Run.
+3. Grant the requested Google permissions.
+4. The function will:
+   - Create/repair the Master Control schema.
+   - Generate and store a random server-side cryptographic pepper in
+     Script Properties.
+   - Generate a one-time installation key.
+5. Copy the one-time setup key from the execution result/log.
+
+IMPORTANT:
+- No default Super Admin is created.
+- No default password is created.
+- The one-time setup key is invalidated immediately after successful
+  Super Admin creation.
 
 STEP 4: DEPLOY WEB APP
 --------------------------------------------------------------------------------
-1. In the top right, click Deploy > New deployment.
-2. Select type: "Web app" (gear icon > Web app).
-3. Configure settings:
+1. Click Deploy > New deployment.
+2. Select Web app.
+3. Configure:
    - Description: "FLINK Time Platform Production"
-   - Execute as: "Me" (your Google account)
-   - Who has access: "Anyone"
-4. Click "Deploy".
-5. COPY THE WEB APP URL (ends in /exec).
-   Format: https://script.google.com/macros/s/AKfycb.../exec
+   - Execute as: Me
+   - Who has access: Anyone
+4. Deploy and copy the /exec URL.
 
-STEP 5: CONNECT CLIENTS
+The API now rejects mutating operations over GET. Mutating actions must use POST.
+
+STEP 5: CREATE THE ROOT SUPER ADMIN
 --------------------------------------------------------------------------------
-A. Employee Portable App (1_EMPLOYEE_PORTABLE_APP):
-   1. Open workspace.json in 1_EMPLOYEE_PORTABLE_APP.
-   2. Set "backend_url" to your copied Web App URL.
-   3. Distribute the folder (UltraAccount.exe + workspace.json) to employees.
-   4. Employees double-click UltraAccount.exe or Launch_Portable_Tracker.bat.
+1. Open the deployed Web App URL.
+2. In Setup Step 1 enter:
+   - The one-time installation key from Step 3.
+   - Super Admin full name.
+   - Username.
+   - A strong password entered manually.
+3. Complete Step 1.
 
-B. Super Admin Controller (2_SUPER_ADMIN_CONTROLLER):
-   1. Double-click Launch_Admin_Controller.bat (or open admin_ui.html in browser).
-   2. When prompted for Backend URL (or in Settings), paste your Web App URL.
-   3. You can also access the Admin Controller directly in any browser at:
-      <YOUR_WEB_APP_URL>?view=admin
+There are intentionally no pre-filled production passwords.
 
-C. FLINK Web Platform (Google Sites / Direct Web):
-   - Access directly in browser: <YOUR_WEB_APP_URL>
-   - Or embed inside Google Sites: Insert > Embed > By URL > paste Web App URL.
+STEP 6: COMPLETE THE SETUP WIZARD
+--------------------------------------------------------------------------------
+Continue through:
+- Company settings
+- First workspace
+- Optional Admin account
+- Optional employee account
+- Initial client/project/tasks
+- Time rules
+- Reporting/alert settings
+- System check
+
+Every account password must be supplied explicitly.
+
+STEP 7: GOOGLE SITES / DIRECT WEB ACCESS
+--------------------------------------------------------------------------------
+- Direct browser access: <YOUR_WEB_APP_URL>
+- Google Sites: Insert > Embed > By URL > paste the Web App URL.
+
+LEGACY CLIENTS / ADMIN CONTROLLER
+--------------------------------------------------------------------------------
+The Windows portable tracker and the old standalone Super Admin Controller are
+NOT part of this stabilized modern API release yet.
+
+Do not point the legacy controller at this deployment.
+Do not rely on legacy actions such as:
+- auth_handshake
+- sync_batch
+- entity_crud
+- restore_database
+- create_backup
+- set_policy
+
+They were intentionally removed from the deployable Apps Script API surface and
+must be migrated to the modern authenticated API before production use.
 
 ================================================================================
