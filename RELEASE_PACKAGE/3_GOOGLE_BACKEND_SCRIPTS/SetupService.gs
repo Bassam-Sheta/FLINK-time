@@ -108,7 +108,27 @@ const SetupService = {
   /* ---------------- WIZARD STEP IMPLEMENTATIONS ---------------- */
 
   _step1_SystemOwner(payload) {
-    Validation.assertRequired(payload, ['fullName', 'username', 'password', 'confirmPassword']);
+    Validation.assertRequired(payload, ['setupKey', 'fullName', 'username', 'password', 'confirmPassword']);
+
+    // Ensure schema/pepper exist before reading master tables.
+    MigrationService.bootstrapMasterSheet();
+
+    if (typeof PropertiesService === 'undefined' || !PropertiesService.getScriptProperties) {
+      throw new AppError(ERROR_CODES.INTERNAL_ERROR, 'Script Properties are unavailable.');
+    }
+    const props = PropertiesService.getScriptProperties();
+    const expectedSetupKeyHash = props.getProperty('FLINK_SETUP_KEY_HASH');
+    if (!expectedSetupKeyHash) {
+      throw new AppError(
+        ERROR_CODES.AUTH_REQUIRED,
+        'Installation is not initialized. Run initializeInstallation() from the Apps Script editor first.',
+        401
+      );
+    }
+    const suppliedSetupKeyHash = SecurityService.hashToken(String(payload.setupKey).trim());
+    if (!SecurityService.constantTimeEquals(suppliedSetupKeyHash, expectedSetupKeyHash)) {
+      throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'Invalid one-time installation key.', 401);
+    }
     if (payload.password !== payload.confirmPassword) {
       throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'Passwords do not match.');
     }
@@ -161,6 +181,10 @@ const SetupService = {
       AfterJSON: { username: cleanUsername, role: CONSTANTS.ROLES.SUPER_ADMIN },
       Reason: 'Root Super Admin created via Setup Wizard Step 1'
     });
+
+    // One-time installation key is invalid after successful root-account creation.
+    props.deleteProperty('FLINK_SETUP_KEY_HASH');
+    props.deleteProperty('FLINK_SETUP_KEY_CREATED_AT');
 
     // Automatically issue session for immediate progression
     const session = SessionService.createSession(adminUserId, 'SETUP_WIZARD');
