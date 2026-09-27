@@ -113,19 +113,20 @@ const UserService = {
 
       MasterRepository.createAccount(accountRecord, credentialRecord);
 
-      // If primary workspace is provided, assign access and register as member
-      if (primaryWorkspaceId) {
-        MasterRepository.assignWorkspaceAccess({
-          AccessID: Validation.generateId('ACC'),
-          UserID: userId,
-          WorkspaceID: primaryWorkspaceId,
-          Role: role,
-          Active: true,
-          AssignedAt: now,
-          AssignedBy: superAdminContext.userId
-        });
+      try {
+        // If primary workspace is provided, assignment and membership are part of
+        // the same provisioning unit. A failure rolls the new account back.
+        if (primaryWorkspaceId) {
+          MasterRepository.assignWorkspaceAccess({
+            AccessID: Validation.generateId('ACC'),
+            UserID: userId,
+            WorkspaceID: primaryWorkspaceId,
+            Role: role,
+            Active: true,
+            AssignedAt: now,
+            AssignedBy: superAdminContext.userId
+          });
 
-        try {
           SheetRepository.addMember(primaryWorkspaceId, {
             UserID: userId,
             DisplayName: displayName,
@@ -137,9 +138,35 @@ const UserService = {
             JobTitle: userPayload.jobTitle || 'Team Member',
             EmployeeCode: userPayload.employeeCode || ''
           });
-        } catch (e) {
-          console.warn(`Could not add member to workspace ${primaryWorkspaceId}: ` + e.message);
         }
+      } catch (provisionErr) {
+        // Remove a member row if the workspace append completed before a later
+        // provisioning error surfaced.
+        if (primaryWorkspaceId) {
+          try {
+            const member = SheetRepository.getMember(primaryWorkspaceId, userId);
+            if (member && member._rowIndex) {
+              SheetRepository.deleteRow(
+                primaryWorkspaceId,
+                CONSTANTS.WORKSPACE_TABS.MEMBERS,
+                member._rowIndex
+              );
+            }
+          } catch (memberRollbackErr) {
+            console.error(
+              `Workspace member rollback failed for ${userId}: ${memberRollbackErr.message}`
+            );
+          }
+        }
+
+        try {
+          MasterRepository.rollbackUserCreation(userId);
+        } catch (masterRollbackErr) {
+          console.error(
+            `Master user rollback failed for ${userId}: ${masterRollbackErr.message}`
+          );
+        }
+        throw provisionErr;
       }
 
       MasterRepository.logGlobalAudit({
