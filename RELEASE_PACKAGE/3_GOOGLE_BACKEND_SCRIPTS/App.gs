@@ -167,46 +167,56 @@ const ACTION_PERMISSIONS = {
 /**
  * Universal API Request Handler
  */
-function handleApiRequest(action, requestData, httpMethod = 'POST') {
-  // Only actions declared in the modern RBAC matrix are reachable.
+function executeApiRequest(action, requestData, httpMethod = 'POST') {
   const perm = ACTION_PERMISSIONS[action];
-  if (perm) {
-    if (httpMethod === 'GET' && perm.isWrite) {
-      return buildJsonResponse({
-        ok: false,
-        error: {
-          code: ERROR_CODES.VALIDATION_ERROR,
-          message: `Action ${action} requires POST.`,
-          status: 405
-        }
-      });
-    }
-    // Transactional locking is owned by the service performing the mutation.
-    // Do not take a dispatcher-wide ScriptLock here: many services already lock
-    // internally and nested/global locking serializes unrelated workspace writes.
-    try {
-      const result = dispatchAction(action, requestData);
-      return buildJsonResponse({ ok: true, data: result });
-    } catch (err) {
-      if (err instanceof AppError) {
-        return buildJsonResponse(err.toJSON());
-      }
-      return buildJsonResponse({
-        ok: false,
-        error: {
-          code: ERROR_CODES.INTERNAL_ERROR,
-          message: err.message || 'An unexpected internal error occurred.'
-        }
-      });
-    }
+
+  if (!perm) {
+    return {
+      ok: false,
+      error: { code: ERROR_CODES.NOT_FOUND, message: `Unknown or forbidden API action: ${action}`, statusCode: 404 }
+    };
   }
 
+  if (httpMethod === 'GET' && perm.isWrite) {
+    return {
+      ok: false,
+      error: {
+        code: ERROR_CODES.VALIDATION_ERROR,
+        message: `Action ${action} requires POST.`,
+        statusCode: 405
+      }
+    };
+  }
 
-  // Default-deny: legacy desktop/controller actions are intentionally not bridged here.
-  return buildJsonResponse({
-    ok: false,
-    error: { code: ERROR_CODES.NOT_FOUND, message: `Unknown or forbidden API action: ${action}` }
-  });
+  // Transactional locking is owned by the service performing the mutation.
+  try {
+    const result = dispatchAction(action, requestData);
+    return { ok: true, data: result };
+  } catch (err) {
+    if (err instanceof AppError) {
+      return err.toJSON();
+    }
+    return {
+      ok: false,
+      error: {
+        code: ERROR_CODES.INTERNAL_ERROR,
+        message: err && err.message ? err.message : 'An unexpected internal error occurred.',
+        statusCode: 500
+      }
+    };
+  }
+}
+
+function handleApiRequest(action, requestData, httpMethod = 'POST') {
+  return buildJsonResponse(executeApiRequest(action, requestData, httpMethod));
+}
+
+/**
+ * In-process bridge for HtmlService/google.script.run.
+ * Returns a plain serializable object rather than ContentService.TextOutput.
+ */
+function handleClientRequest(action, requestData) {
+  return executeApiRequest(action, requestData, 'POST');
 }
 
 /**
@@ -550,6 +560,8 @@ const App = {
   doGet,
   doPost,
   handleApiRequest,
+  handleClientRequest,
+  executeApiRequest,
   dispatchAction,
   buildJsonResponse
 };
@@ -561,6 +573,8 @@ if (typeof module !== 'undefined' && module.exports) {
     doGet,
     doPost,
     handleApiRequest,
+    handleClientRequest,
+    executeApiRequest,
     dispatchAction,
     buildJsonResponse
   };
