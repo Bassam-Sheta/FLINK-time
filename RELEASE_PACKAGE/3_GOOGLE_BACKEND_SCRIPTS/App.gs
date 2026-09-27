@@ -258,6 +258,25 @@ function dispatchAction(action, data, authContextOverride = null) {
   // All other actions require authenticated session
   const authContext = authContextOverride || SessionService.validateSession(token);
 
+  // Forced password change is a server-side security state, not a UI hint.
+  // Temporary/reset-password sessions may only validate, change password, or logout.
+  const mustChangePassword = authContext.user &&
+    (authContext.user.MustChangePassword === true || authContext.user.MustChangePassword === 'TRUE');
+  if (mustChangePassword) {
+    const allowedDuringForcedChange = new Set([
+      'auth.validateSession',
+      'auth.changePassword',
+      'auth.logout'
+    ]);
+    if (!allowedDuringForcedChange.has(action)) {
+      throw new AppError(
+        ERROR_CODES.PASSWORD_CHANGE_REQUIRED,
+        'Password change is required before using the application.',
+        403
+      );
+    }
+  }
+
   // Centralized RBAC Enforcement (Default-Deny)
   if (perm.roles && !perm.roles.includes(authContext.role)) {
     throw new AppError(
