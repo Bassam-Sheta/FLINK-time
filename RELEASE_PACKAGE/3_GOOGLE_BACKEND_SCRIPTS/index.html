@@ -1587,19 +1587,30 @@
               <label><input type="checkbox" id="wzRuleProject" checked> Project selection required</label>
             </div>
             <div>
+              <label><input type="checkbox" id="wzRuleTask"> Task selection required</label>
+            </div>
+            <div>
               <label><input type="checkbox" id="wzRuleDesc" checked> Description required</label>
             </div>
-          </div>
-          <div class="grid-2" style="margin-bottom: 1.5rem;">
             <div>
-              <label>Timer Warning Threshold</label>
-              <input type="number" id="wzTimerWarning" value="10">
-              <div class="field-hint">Alerts when running longer than X hours.</div>
+              <label><input type="checkbox" id="wzRuleTags"> At least one tag required</label>
+            </div>
+          </div>
+          <div class="grid-3" style="margin-bottom: 1.5rem;">
+            <div>
+              <label>Timer Warning Threshold (Hours)</label>
+              <input type="number" id="wzTimerWarning" min="1" value="10">
+              <div class="field-hint">Flags timers running longer than this threshold.</div>
+            </div>
+            <div>
+              <label>Auto-Stop Threshold (Hours)</label>
+              <input type="number" id="wzAutoStopHours" min="1" value="14">
+              <div class="field-hint">Housekeeping may stop timers exceeding this limit.</div>
             </div>
             <div>
               <label>Past Entry Edit Window (Days)</label>
-              <input type="number" id="wzPastEditDays" value="7">
-              <div class="field-hint">Blocks edits on entries older than X days.</div>
+              <input type="number" id="wzPastEditDays" min="0" value="7">
+              <div class="field-hint">Blocks USER edits/deletes on older entries. 0 disables the age limit.</div>
             </div>
           </div>
           <div style="display: flex; gap: 1rem;">
@@ -1740,8 +1751,11 @@
         await apiCall('setup.completeStep', {
           step: 7,
           projectRequired: document.getElementById('wzRuleProject').checked,
+          taskRequired: document.getElementById('wzRuleTask').checked,
           descRequired: document.getElementById('wzRuleDesc').checked,
+          tagsRequired: document.getElementById('wzRuleTags').checked,
           timerWarningHours: document.getElementById('wzTimerWarning').value,
+          autoStopHours: document.getElementById('wzAutoStopHours').value,
           pastEntryEditDays: document.getElementById('wzPastEditDays').value
         });
         renderWizardStep(8);
