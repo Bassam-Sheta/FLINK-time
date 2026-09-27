@@ -627,7 +627,7 @@
             <thead>
               <tr>
                 <th>Project / Task</th>
-                <th>Mon</th><th>Tue</th><th>Wed</th><th>Thu</th><th>Fri</th><th>Sat</th><th>Sun</th>
+                <th id="timesheetDay0">Day 1</th><th id="timesheetDay1">Day 2</th><th id="timesheetDay2">Day 3</th><th id="timesheetDay3">Day 4</th><th id="timesheetDay4">Day 5</th><th id="timesheetDay5">Day 6</th><th id="timesheetDay6">Day 7</th>
                 <th>Total</th>
               </tr>
             </thead>
@@ -773,6 +773,7 @@
       tasks: [],
       activeTimer: null,
       timerInterval: null,
+      currentTimesheetPeriod: null,
       setupStatus: null
     };
 
@@ -877,7 +878,9 @@
       try {
         state.workspaces = await apiCall('workspaces.list');
         if (state.workspaces.length > 0) {
-          state.currentWorkspace = state.user.primaryWorkspaceId || state.workspaces[0].WorkspaceID;
+          const preferredWorkspaceId = state.user.primaryWorkspaceId || '';
+          const preferredExists = state.workspaces.some(w => w.WorkspaceID === preferredWorkspaceId);
+          state.currentWorkspace = preferredExists ? preferredWorkspaceId : state.workspaces[0].WorkspaceID;
           const currentWs = state.workspaces.find(w => w.WorkspaceID === state.currentWorkspace);
           document.getElementById('currentWorkspaceBadge').innerText = currentWs ? currentWs.WorkspaceName : state.currentWorkspace;
         }
@@ -1063,37 +1066,80 @@
       try {
         const todayStr = new Date().toISOString().substring(0, 10);
         const data = await apiCall('timesheet.getWeekly', { weekStartDate: todayStr });
-        document.getElementById('timesheetPeriodLabel').innerText = `Period: ${data.weekStartDate} to ${data.weekEndDate}`;
-        document.getElementById('timesheetStatusBadge').innerText = data.status || 'OPEN';
-        document.getElementById('timesheetStatusBadge').className = `badge badge-${(data.status || 'open').toLowerCase()}`;
+
+        state.currentTimesheetPeriod = {
+          periodStart: data.periodStart,
+          periodEnd: data.periodEnd
+        };
+
+        document.getElementById('timesheetPeriodLabel').innerText =
+          `Period: ${String(data.periodStart || '').substring(0, 10)} to ${String(data.periodEnd || '').substring(0, 10)}`;
+
+        const status = data.status || 'OPEN';
+        const statusBadge = document.getElementById('timesheetStatusBadge');
+        statusBadge.innerText = status;
+        statusBadge.className = `badge badge-${status.toLowerCase()}`;
+
+        const labels = Array.isArray(data.dayLabels) ? data.dayLabels : [];
+        for (let i = 0; i < 7; i++) {
+          const th = document.getElementById('timesheetDay' + i);
+          if (th) th.innerText = labels[i] || ('Day ' + (i + 1));
+        }
+
+        const submitBtn = document.getElementById('submitTimesheetBtn');
+        submitBtn.disabled = !(status === 'OPEN' || status === 'REJECTED');
 
         const tbody = document.getElementById('timesheetMatrixBody');
-        tbody.innerHTML = '';
+        tbody.replaceChildren();
 
-        (data.matrix || []).forEach(row => {
-          tbody.innerHTML += `
-            <tr>
-              <td><strong>${row.projectName}</strong></td>
-              <td>${(row.days.Monday || 0).toFixed(2)}</td>
-              <td>${(row.days.Tuesday || 0).toFixed(2)}</td>
-              <td>${(row.days.Wednesday || 0).toFixed(2)}</td>
-              <td>${(row.days.Thursday || 0).toFixed(2)}</td>
-              <td>${(row.days.Friday || 0).toFixed(2)}</td>
-              <td>${(row.days.Saturday || 0).toFixed(2)}</td>
-              <td>${(row.days.Sunday || 0).toFixed(2)}</td>
-              <td style="font-weight: 700; color: #60A5FA;">${row.totalHours.toFixed(2)} h</td>
-            </tr>
-          `;
+        const rows = Array.isArray(data.rows) ? data.rows : [];
+        rows.forEach(row => {
+          const tr = document.createElement('tr');
+
+          const nameCell = document.createElement('td');
+          const strong = document.createElement('strong');
+          strong.textContent = row.projectName || row.projectId || 'Unassigned';
+          nameCell.appendChild(strong);
+          if (row.taskName) {
+            nameCell.appendChild(document.createTextNode(' / ' + row.taskName));
+          }
+          tr.appendChild(nameCell);
+
+          const dayValues = Array.isArray(row.days) ? row.days : [];
+          for (let i = 0; i < 7; i++) {
+            const td = document.createElement('td');
+            td.textContent = (Number(dayValues[i] || 0) / 3600).toFixed(2);
+            tr.appendChild(td);
+          }
+
+          const totalCell = document.createElement('td');
+          totalCell.style.fontWeight = '700';
+          totalCell.style.color = '#60A5FA';
+          totalCell.textContent = (Number(row.totalSeconds || 0) / 3600).toFixed(2) + ' h';
+          tr.appendChild(totalCell);
+
+          tbody.appendChild(tr);
         });
-      } catch (e) {}
+      } catch (e) {
+        console.error('Failed to load timesheet', e);
+      }
     }
 
     async function submitTimesheet() {
       try {
-        const todayStr = new Date().toISOString().substring(0, 10);
-        await apiCall('timesheet.submit', { weekStartDate: todayStr });
+        if (!state.currentTimesheetPeriod) {
+          await loadTimesheet();
+        }
+        if (!state.currentTimesheetPeriod) {
+          throw new Error('Timesheet period is not available.');
+        }
+
+        await apiCall('timesheet.submit', {
+          periodStart: state.currentTimesheetPeriod.periodStart,
+          periodEnd: state.currentTimesheetPeriod.periodEnd
+        });
         alert('Timesheet submitted successfully for Admin review.');
-        loadTimesheet();
+        await loadTimesheet();
       } catch (err) {
         alert(err.message || 'Failed to submit timesheet.');
       }
