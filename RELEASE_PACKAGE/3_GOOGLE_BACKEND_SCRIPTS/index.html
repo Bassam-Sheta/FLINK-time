@@ -771,11 +771,40 @@
       workspaces: [],
       projects: [],
       tasks: [],
+      users: [],
       activeTimer: null,
       timerInterval: null,
       currentTimesheetPeriod: null,
       setupStatus: null
     };
+
+    function escapeHtml(value) {
+      return String(value === null || value === undefined ? '' : value).replace(/[&<>"']/g, ch => ({
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#39;'
+      })[ch]);
+    }
+
+    function htmlJsArg(value) {
+      return escapeHtml(JSON.stringify(String(value === null || value === undefined ? '' : value)));
+    }
+
+    function safeClassToken(value, fallback = 'open') {
+      const token = String(value || fallback).toLowerCase().replace(/[^a-z0-9_-]/g, '');
+      return token || fallback;
+    }
+
+    function renderError(container, prefix, err) {
+      container.replaceChildren();
+      const div = document.createElement('div');
+      div.style.color = '#F87171';
+      const message = err && err.message ? err.message : String(err || 'Unknown error');
+      div.textContent = String(prefix || '') + message;
+      container.appendChild(div);
+    }
 
     // Client-side API caller
     async function apiCall(action, payload = {}) {
