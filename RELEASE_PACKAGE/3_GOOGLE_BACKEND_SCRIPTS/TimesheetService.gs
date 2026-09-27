@@ -215,19 +215,44 @@ const TimesheetService = {
         EntrySnapshotJSON: JSON.stringify(entrySnapshot)
       };
 
-      if (existing) {
-        SheetRepository.updateTimesheet(workspaceId, existing.TimesheetID, tsData);
-      } else {
-        SheetRepository.createTimesheet(workspaceId, tsData);
-      }
+      // Sheets has no multi-row transaction primitive. Mutate the member entries first,
+      // remember their exact previous state, then commit the timesheet header last.
+      // If any write fails, roll entries back best-effort before surfacing the error.
+      const changedEntries = [];
+      try {
+        for (const entry of entries) {
+          const previousState = {
+            entryId: entry.EntryID,
+            TimesheetID: entry.TimesheetID || '',
+            ApprovalStatus: entry.ApprovalStatus || CONSTANTS.TIMESHEET_STATUS.OPEN,
+            Locked: entry.Locked === true || entry.Locked === 'TRUE' || entry.Locked === 1
+          };
+          SheetRepository.updateTimeEntry(workspaceId, entry.EntryID, {
+            TimesheetID: timesheetId,
+            ApprovalStatus: CONSTANTS.TIMESHEET_STATUS.SUBMITTED,
+            Locked: true
+          });
+          changedEntries.push(previousState);
+        }
 
-      // Atomically transition all entries to SUBMITTED
-      for (const entry of entries) {
-        SheetRepository.updateTimeEntry(workspaceId, entry.EntryID, {
-          TimesheetID: timesheetId,
-          ApprovalStatus: CONSTANTS.TIMESHEET_STATUS.SUBMITTED,
-          Locked: true
-        });
+        if (existing) {
+          SheetRepository.updateTimesheet(workspaceId, existing.TimesheetID, tsData);
+        } else {
+          SheetRepository.createTimesheet(workspaceId, tsData);
+        }
+      } catch (mutationErr) {
+        for (const prior of changedEntries) {
+          try {
+            SheetRepository.updateTimeEntry(workspaceId, prior.entryId, {
+              TimesheetID: prior.TimesheetID,
+              ApprovalStatus: prior.ApprovalStatus,
+              Locked: prior.Locked
+            });
+          } catch (rollbackErr) {
+            console.error(`Submission rollback failed for entry ${prior.entryId}: ${rollbackErr.message}`);
+          }
+        }
+        throw mutationErr;
       }
 
       if (typeof SpreadsheetApp !== 'undefined' && SpreadsheetApp.flush) {
