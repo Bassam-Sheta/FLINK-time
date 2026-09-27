@@ -394,141 +394,275 @@ const SetupService = {
     if (payload.pendingApprovalReminder !== undefined) MasterRepository.setGlobalSetting('ALERT_PENDING_APPROVAL', String(payload.pendingApprovalReminder), actorId);
     if (payload.dashboardRefreshSeconds) MasterRepository.setGlobalSetting('DASHBOARD_REFRESH_SECONDS', String(payload.dashboardRefreshSeconds), actorId);
 
-    return { ok: true, message: 'Reporting & alerts configured successfully.' };
+    const triggerStatus = JobService.ensureScheduledTriggers();
+    return {
+      ok: true,
+      triggers: triggerStatus,
+      message: 'Reporting, alerts, and required scheduled jobs configured successfully.'
+    };
   },
 
   _step9_SystemCheck(authContext) {
-    if (authContext) AuthorizationService.assertRole(authContext, [CONSTANTS.ROLES.SUPER_ADMIN]);
+    if (!authContext) {
+      throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'Super Admin session required for final system verification.', 401);
+    }
+    AuthorizationService.assertRole(authContext, [CONSTANTS.ROLES.SUPER_ADMIN]);
 
     const checks = [];
+    const workspaces = MasterRepository.listWorkspaces();
+    const activeWorkspaces = workspaces.filter(w => w.Status === CONSTANTS.WORKSPACE_STATUS.ACTIVE);
 
-    // 1. Master database
+    // 1. Master schema
     try {
       const ss = MasterRepository.getMasterSpreadsheet();
-      const missingTabs = [];
-      for (const tab of Object.values(CONSTANTS.MASTER_TABS)) {
-        if (!ss.getSheetByName(tab)) missingTabs.push(tab);
-      }
+      const expectedTabs = Object.values(CONSTANTS.MASTER_TABS);
+      const missingTabs = expectedTabs.filter(tab => !ss.getSheetByName(tab));
       checks.push({
         id: 'master_db',
         name: 'Master Control Database',
         passed: missingTabs.length === 0,
-        detail: missingTabs.length === 0 ? 'All 11 master tabs verified' : `Missing tabs: ${missingTabs.join(', ')}`
+        detail: missingTabs.length === 0
+          ? `All ${expectedTabs.length} required master tabs verified`
+          : `Missing tabs: ${missingTabs.join(', ')}`
       });
     } catch (e) {
       checks.push({ id: 'master_db', name: 'Master Control Database', passed: false, detail: e.message });
     }
 
-    // 2. Workspace database
+    // 2. Active workspace schema/isolation
     try {
-      const workspaces = MasterRepository.listWorkspaces();
-      let allWorkspacesOk = workspaces.length > 0;
-      let wsIssues = [];
-      for (const ws of workspaces) {
-        if (ws.Status === CONSTANTS.WORKSPACE_STATUS.ARCHIVED) continue;
-        const missingWsTabs = [];
+      const issues = [];
+      if (activeWorkspaces.length === 0) issues.push('No active workspace exists');
+      for (const ws of activeWorkspaces) {
         try {
           const wss = WorkspaceRouter.resolveSpreadsheet(ws.WorkspaceID);
-          for (const tab of Object.values(CONSTANTS.WORKSPACE_TABS)) {
-            if (!wss.getSheetByName(tab)) missingWsTabs.push(tab);
-          }
+          const missing = Object.values(CONSTANTS.WORKSPACE_TABS)
+            .filter(tab => !wss.getSheetByName(tab));
+          if (missing.length > 0) issues.push(`${ws.WorkspaceName}: missing ${missing.join(', ')}`);
         } catch (e) {
-          missingWsTabs.push('Could not open spreadsheet');
-        }
-        if (missingWsTabs.length > 0) {
-          allWorkspacesOk = false;
-          wsIssues.push(`${ws.WorkspaceName}: missing ${missingWsTabs.join(', ')}`);
+          issues.push(`${ws.WorkspaceName}: ${e.message}`);
         }
       }
       checks.push({
         id: 'workspace_db',
         name: 'Workspace Database Isolation',
-        passed: allWorkspacesOk,
-        detail: allWorkspacesOk ? `${workspaces.length} workspace(s) verified with all 18 tabs` : wsIssues.join('; ')
+        passed: issues.length === 0,
+        detail: issues.length === 0
+          ? `${activeWorkspaces.length} active workspace(s) verified`
+          : issues.join('; ')
       });
     } catch (e) {
       checks.push({ id: 'workspace_db', name: 'Workspace Database Isolation', passed: false, detail: e.message });
     }
 
-    // 3. Authentication & Root Super Admin
+    // 3. Root account + credentials + production cryptographic secret
     try {
       const { rows: accounts } = MasterRepository.getTableData(CONSTANTS.MASTER_TABS.ACCOUNTS);
-      const rootAdmin = accounts.find(a => a.Role === CONSTANTS.ROLES.SUPER_ADMIN && a.Status === CONSTANTS.ACCOUNT_STATUS.ACTIVE);
-      checks.push({
-        id: 'auth_security',
-        name: 'Authentication & Salted PBKDF2 Hashing',
-        passed: !!rootAdmin,
-        detail: rootAdmin ? `Root Super Admin '${rootAdmin.Username}' verified` : 'No active Super Admin account found'
-      });
+      const rootAdmins = accounts.filter(a =>
+        a.Role === CONSTANTS.ROLES.SUPER_ADMIN &&
+        a.Status === CONSTANTS.ACCOUNT_STATUS.ACTIVE
+      );
+      let detail = '';
+      let passed = rootAdmins.length === 1;
+      if (passed) {
+        const credentials = MasterRepository.getCredentials(rootAdmins[0].UserID);
+        passed = !!(credentials && credentials.PasswordHash);
+        SecurityService.getPepper(); // fails closed if Script Property is missing
+        detail = passed
+          ? `Root Super Admin '${rootAdmins[0].Username}' and cryptographic secret verified`
+          : 'Root Super Admin credentials record is missing';
+      } else {
+        detail = `Expected exactly one active Super Admin; found ${rootAdmins.length}`;
+      }
+      checks.push({ id: 'auth_security', name: 'Authentication & Cryptographic Configuration', passed, detail });
     } catch (e) {
-      checks.push({ id: 'auth_security', name: 'Authentication & Salted PBKDF2 Hashing', passed: false, detail: e.message });
+      checks.push({ id: 'auth_security', name: 'Authentication & Cryptographic Configuration', passed: false, detail: e.message });
     }
 
-    // 4. User Role Rules & RBAC
-    checks.push({
-      id: 'rbac',
-      name: 'User Role & Admin 3-Workspace Limit Rules',
-      passed: true,
-      detail: 'RBAC and max 3 workspace limit invariant active'
-    });
-
-    // 5. Timer Engine
-    checks.push({
-      id: 'timer_engine',
-      name: 'Timer Engine (Zero Per-Second Sheet Writes)',
-      passed: true,
-      detail: 'Authoritative server timestamps and active timer recovery ready'
-    });
-
-    // 6. Reporting Engine & Rollup Architecture
-    checks.push({
-      id: 'reporting',
-      name: 'Reporting Engine & Rollups Architecture',
-      passed: true,
-      detail: 'Pre-computed daily, weekly, monthly, and project rollups initialized'
-    });
-
-    // 7. Audit Log
+    // 4. RBAC/workspace-access invariants
     try {
-      const { rows: auditRows } = MasterRepository.getTableData(CONSTANTS.MASTER_TABS.GLOBAL_AUDIT);
+      const { rows: accounts } = MasterRepository.getTableData(CONSTANTS.MASTER_TABS.ACCOUNTS);
+      const { rows: accessRows } = MasterRepository.getTableData(CONSTANTS.MASTER_TABS.WORKSPACE_ACCESS);
+      const accountMap = new Map(accounts.map(a => [a.UserID, a]));
+      const workspaceMap = new Map(workspaces.map(w => [w.WorkspaceID, w]));
+      const violations = [];
+
+      for (const admin of accounts.filter(a => a.Role === CONSTANTS.ROLES.ADMIN)) {
+        const count = accessRows.filter(r =>
+          r.UserID === admin.UserID &&
+          (r.Active === true || r.Active === 'TRUE' || r.Active === 1)
+        ).length;
+        if (count > CONSTANTS.LIMITS.ADMIN_MAX_ACTIVE_WORKSPACES) {
+          violations.push(`${admin.Username}: ${count} active workspaces`);
+        }
+      }
+
+      for (const access of accessRows.filter(r => r.Active === true || r.Active === 'TRUE' || r.Active === 1)) {
+        if (!accountMap.has(access.UserID)) violations.push(`orphan user access ${access.UserID}`);
+        const ws = workspaceMap.get(access.WorkspaceID);
+        if (!ws) violations.push(`orphan workspace access ${access.WorkspaceID}`);
+        else if (ws.Status !== CONSTANTS.WORKSPACE_STATUS.ACTIVE) {
+          violations.push(`active ACL points to non-active workspace ${access.WorkspaceID}`);
+        }
+      }
+
+      checks.push({
+        id: 'rbac',
+        name: 'RBAC & Workspace Access Invariants',
+        passed: violations.length === 0,
+        detail: violations.length === 0
+          ? 'Admin limits and active workspace ACL references verified'
+          : violations.join('; ')
+      });
+    } catch (e) {
+      checks.push({ id: 'rbac', name: 'RBAC & Workspace Access Invariants', passed: false, detail: e.message });
+    }
+
+    // 5. Timer invariants: valid owner/workspace and globally one active timer per user
+    try {
+      const seenUsers = new Set();
+      const timerIssues = [];
+      for (const ws of activeWorkspaces) {
+        const timers = SheetRepository.listActiveTimers(ws.WorkspaceID);
+        const allowedUsers = new Set(
+          MasterRepository.getWorkspaceAccessForWorkspace(ws.WorkspaceID).map(a => a.UserID)
+        );
+        for (const timer of timers) {
+          if (!allowedUsers.has(timer.UserID)) {
+            timerIssues.push(`${timer.TimerID}: user lacks workspace access`);
+          }
+          if (seenUsers.has(timer.UserID)) {
+            timerIssues.push(`${timer.UserID}: more than one active timer globally`);
+          }
+          seenUsers.add(timer.UserID);
+          if (isNaN(new Date(timer.StartedAtUTC).getTime())) {
+            timerIssues.push(`${timer.TimerID}: invalid StartedAtUTC`);
+          }
+        }
+      }
+      checks.push({
+        id: 'timer_engine',
+        name: 'Timer Engine Invariants',
+        passed: timerIssues.length === 0,
+        detail: timerIssues.length === 0
+          ? `${seenUsers.size} active timer owner(s) verified`
+          : timerIssues.join('; ')
+      });
+    } catch (e) {
+      checks.push({ id: 'timer_engine', name: 'Timer Engine Invariants', passed: false, detail: e.message });
+    }
+
+    // 6. Raw-entry totals must reconcile to all aggregate time rollups.
+    try {
+      const rollupIssues = [];
+      for (const ws of activeWorkspaces) {
+        const rawEntries = SheetRepository.listTimeEntries(ws.WorkspaceID, {});
+        const rawSeconds = rawEntries.reduce((sum, e) => sum + (parseInt(e.DurationSeconds, 10) || 0), 0);
+
+        for (const tab of [
+          CONSTANTS.WORKSPACE_TABS.DAILY_ROLLUPS,
+          CONSTANTS.WORKSPACE_TABS.WEEKLY_ROLLUPS,
+          CONSTANTS.WORKSPACE_TABS.MONTHLY_ROLLUPS
+        ]) {
+          const { rows } = SheetRepository.getTableData(ws.WorkspaceID, tab);
+          const rollupSeconds = rows.reduce((sum, r) => sum + (parseInt(r.TotalSeconds, 10) || 0), 0);
+          if (rollupSeconds !== rawSeconds) {
+            rollupIssues.push(
+              `${ws.WorkspaceName}/${tab}: raw=${rawSeconds}s rollup=${rollupSeconds}s`
+            );
+          }
+        }
+      }
+      checks.push({
+        id: 'reporting',
+        name: 'Reporting Rollup Reconciliation',
+        passed: rollupIssues.length === 0,
+        detail: rollupIssues.length === 0
+          ? 'Daily, weekly, and monthly totals reconcile to raw entries'
+          : rollupIssues.join('; ')
+      });
+    } catch (e) {
+      checks.push({ id: 'reporting', name: 'Reporting Rollup Reconciliation', passed: false, detail: e.message });
+    }
+
+    // 7. Cryptographic audit chain
+    try {
+      const masterAudit = AuditService.verifyAuditChain();
       checks.push({
         id: 'audit_log',
-        name: 'Immutable Global Audit Trail',
-        passed: true,
-        detail: `${auditRows.length} audit records registered`
+        name: 'Master Audit Chain Integrity',
+        passed: !!(masterAudit && masterAudit.ok && masterAudit.verified),
+        detail: masterAudit && masterAudit.message ? masterAudit.message : 'Audit verification returned no result'
       });
     } catch (e) {
-      checks.push({ id: 'audit_log', name: 'Immutable Global Audit Trail', passed: false, detail: e.message });
+      checks.push({ id: 'audit_log', name: 'Master Audit Chain Integrity', passed: false, detail: e.message });
     }
 
-    // 8. Backup Folder
-    checks.push({
-      id: 'backup_folder',
-      name: 'Drive Backup & Snapshot Architecture',
-      passed: true,
-      detail: 'Automated on-demand snapshot & 5-step safe restore engine ready'
-    });
+    // 8. Perform/confirm a real verified initial Master backup.
+    try {
+      const { rows: backupRows } = MasterRepository.getTableData(CONSTANTS.MASTER_TABS.BACKUP_REGISTRY);
+      let masterBackup = backupRows.find(row =>
+        row.Scope === 'MASTER' &&
+        row.Status === 'AVAILABLE' &&
+        (row.Verified === true || row.Verified === 'TRUE' || row.Verified === 1)
+      );
+      let createdBackupId = '';
+      if (!masterBackup) {
+        const backup = BackupService.createBackup(authContext);
+        createdBackupId = backup.backupId;
+        masterBackup = { BackupID: backup.backupId };
+      }
+      checks.push({
+        id: 'backup_folder',
+        name: 'Verified Backup Subsystem',
+        passed: !!masterBackup,
+        detail: createdBackupId
+          ? `Initial verified Master backup created: ${createdBackupId}`
+          : `Verified Master backup registered: ${masterBackup.BackupID}`
+      });
+    } catch (e) {
+      checks.push({ id: 'backup_folder', name: 'Verified Backup Subsystem', passed: false, detail: e.message });
+    }
 
-    // 9. Scheduled Jobs & Automation
-    checks.push({
-      id: 'scheduled_jobs',
-      name: 'Scheduled Background Jobs',
-      passed: true,
-      detail: 'Daily rollup reconciliation and backup routines configured'
-    });
+    // 9. Required Apps Script scheduled triggers
+    try {
+      const triggerStatus = JobService.getScheduledTriggerStatus();
+      checks.push({
+        id: 'scheduled_jobs',
+        name: 'Scheduled Background Jobs',
+        passed: triggerStatus.healthy === true,
+        detail: triggerStatus.detail
+      });
+    } catch (e) {
+      checks.push({ id: 'scheduled_jobs', name: 'Scheduled Background Jobs', passed: false, detail: e.message });
+    }
 
-    // 10. Google Sites Embed Compatibility
-    checks.push({
-      id: 'sites_embed',
-      name: 'Google Sites Embed Compatibility',
-      passed: true,
-      detail: 'X-Frame-Options configured to ALLOWALL for responsive embed'
-    });
+    // 10. Verify the runtime capability used by doGet for Google Sites embedding.
+    try {
+      const embedRuntimeAvailable =
+        typeof HtmlService !== 'undefined' &&
+        HtmlService.XFrameOptionsMode &&
+        HtmlService.XFrameOptionsMode.ALLOWALL !== undefined;
+      checks.push({
+        id: 'sites_embed',
+        name: 'HTML Embed Runtime',
+        passed: embedRuntimeAvailable,
+        detail: embedRuntimeAvailable
+          ? 'HtmlService ALLOWALL embed runtime is available'
+          : 'HtmlService ALLOWALL embed runtime is unavailable'
+      });
+    } catch (e) {
+      checks.push({ id: 'sites_embed', name: 'HTML Embed Runtime', passed: false, detail: e.message });
+    }
 
-    const allPassed = checks.every(c => c.passed);
-
+    const allPassed = checks.every(check => check.passed);
     if (allPassed) {
-      MasterRepository.setGlobalSetting('SETUP_COMPLETE', 'true', authContext ? authContext.userId : 'SYSTEM', 'Setup wizard completion flag');
+      MasterRepository.setGlobalSetting(
+        'SETUP_COMPLETE',
+        'true',
+        authContext.userId,
+        'Setup wizard completion flag'
+      );
     }
 
     return {
@@ -645,6 +779,7 @@ const SetupService = {
     });
 
     const activeSessions = MasterRepository.listActiveSessions();
+    const triggerStatus = JobService.getScheduledTriggerStatus();
 
     return {
       platformVersion: CONSTANTS.VERSION,
@@ -653,7 +788,8 @@ const SetupService = {
       masterSpreadsheetUrl: masterSs.getUrl ? masterSs.getUrl() : '',
       workspaces: wsDetails,
       activeSessionsCount: activeSessions.length,
-      triggersHealthy: true,
+      triggersHealthy: triggerStatus.healthy === true,
+      triggerStatus,
       timestampUTC: new Date().toISOString()
     };
   }
