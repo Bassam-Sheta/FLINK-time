@@ -2270,12 +2270,12 @@
                 <tbody>
                   ${sessions.map(s => `
                     <tr>
-                      <td><strong>${s.displayName}</strong> (${s.username})</td>
-                      <td><span class="role-tag">${s.role}</span></td>
-                      <td>${s.clientType}</td>
-                      <td style="font-family: var(--font-mono); font-size: 0.8rem;">${(s.createdAt || '').substring(0, 19)}</td>
-                      <td style="font-family: var(--font-mono); font-size: 0.8rem;">${(s.expiresAt || '').substring(0, 19)}</td>
-                      <td><button class="btn btn-danger btn-sm" onclick="revokeSessionDirect('${s.sessionId}')">Revoke</button></td>
+                      <td><strong>${escapeHtml(s.displayName)}</strong> (${escapeHtml(s.username)})</td>
+                      <td><span class="role-tag">${escapeHtml(s.role)}</span></td>
+                      <td>${escapeHtml(s.clientType)}</td>
+                      <td style="font-family: var(--font-mono); font-size: 0.8rem;">${escapeHtml((s.createdAt || '').substring(0, 19))}</td>
+                      <td style="font-family: var(--font-mono); font-size: 0.8rem;">${escapeHtml((s.expiresAt || '').substring(0, 19))}</td>
+                      <td><button class="btn btn-danger btn-sm" onclick='revokeSessionDirect(${htmlJsArg(s.sessionId)})'>Revoke</button></td>
                     </tr>
                   `).join('')}
                 </tbody>
@@ -2346,23 +2346,39 @@
             <div class="card-header">
               <div>
                 <div class="card-title">System Architecture Diagnostics</div>
-                <div class="card-subtitle">Zero-code automated self-repair for sheet schemas and rollups</div>
+                <div class="card-subtitle">Measured checks only; unverified capabilities are not reported as healthy.</div>
               </div>
               <button class="btn btn-warning btn-sm" onclick="runSystemAutoRepair()">[ FIX AUTOMATICALLY ]</button>
             </div>
-            <div style="line-height: 2.2;">
-              ${health.checks.map(c => `
-                <div style="display: flex; justify-content: space-between; border-bottom: 1px solid var(--border); padding: 0.5rem 0;">
-                  <div>
-                    ${c.passed ? '<span style="color:#34D399; font-weight:800;">✓</span>' : '<span style="color:#EF4444; font-weight:800;">✕</span>'}
-                    <strong>${c.name}</strong>
-                  </div>
-                  <div style="color: var(--text-muted); font-size: 0.85rem;">${c.detail}</div>
-                </div>
-              `).join('')}
-            </div>
+            <div id="saHealthChecks" style="line-height: 2.2;"></div>
           </div>
         `;
+
+        const host = document.getElementById('saHealthChecks');
+        (health.checks || []).forEach(check => {
+          const row = document.createElement('div');
+          row.style.display = 'flex';
+          row.style.justifyContent = 'space-between';
+          row.style.borderBottom = '1px solid var(--border)';
+          row.style.padding = '0.5rem 0';
+
+          const left = document.createElement('div');
+          const icon = document.createElement('span');
+          icon.style.color = check.passed ? '#34D399' : '#EF4444';
+          icon.style.fontWeight = '800';
+          icon.textContent = check.passed ? '✓' : '✕';
+          const name = document.createElement('strong');
+          name.textContent = String(check.name || '');
+          left.append(icon, document.createTextNode(' '), name);
+
+          const detail = document.createElement('div');
+          detail.style.color = 'var(--text-muted)';
+          detail.style.fontSize = '0.85rem';
+          detail.textContent = String(check.detail || '');
+
+          row.append(left, detail);
+          host.appendChild(row);
+        });
       } catch (e) {
         renderError(container, '', e);
       }
@@ -2385,29 +2401,34 @@
             <div class="grid-2" style="margin-bottom: 1.5rem;">
               <div>
                 <label>Company Legal Name</label>
-                <input type="text" id="stCompanyName" value="${settings.COMPANY_NAME || 'FLINK Business Solutions'}">
+                <input type="text" id="stCompanyName">
                 <div class="field-hint">Used across headers, export manifests, and PDF titles.</div>
               </div>
               <div>
                 <label>Default Timezone</label>
-                <input type="text" id="stTimezone" value="${settings.DEFAULT_TIMEZONE || 'Africa/Cairo'}">
+                <input type="text" id="stTimezone">
                 <div class="field-hint">Timezone for weekly rollups and timesheet date cuts.</div>
               </div>
             </div>
             <div class="grid-2" style="margin-bottom: 1.5rem;">
               <div>
                 <label>Session Idle Timeout (Hours)</label>
-                <input type="number" id="stIdleTimeout" value="${settings.IDLE_TIMEOUT_HOURS || 8}">
+                <input type="number" id="stIdleTimeout">
                 <div class="field-hint">Users inactive for longer than this must sign in again.</div>
               </div>
               <div>
                 <label>Auto-Stop Long Timers (Hours)</label>
-                <input type="number" id="stAutoStop" value="${settings.AUTO_STOP_HOURS || 14}">
+                <input type="number" id="stAutoStop">
                 <div class="field-hint">Prevents runaway timers left active overnight.</div>
               </div>
             </div>
           </div>
         `;
+
+        document.getElementById('stCompanyName').value = String(settings.COMPANY_NAME || 'FLINK Business Solutions');
+        document.getElementById('stTimezone').value = String(settings.DEFAULT_TIMEZONE || 'Africa/Cairo');
+        document.getElementById('stIdleTimeout').value = String(settings.IDLE_TIMEOUT_HOURS || 8);
+        document.getElementById('stAutoStop').value = String(settings.AUTO_STOP_HOURS || 14);
       } catch (e) {
         renderError(container, '', e);
       }
@@ -2441,14 +2462,14 @@
               <div class="card-subtitle">Exposed only for rare maintenance; never needed for normal operation</div>
             </div>
             <div style="background: var(--bg-card); padding: 1.5rem; border-radius: 8px; font-family: var(--font-mono); font-size: 0.85rem; line-height: 1.8;">
-              <div>Platform Version: ${diag.platformVersion}</div>
-              <div>Schema Version: ${diag.schemaVersion}</div>
-              <div>Master Spreadsheet ID: ${diag.masterSpreadsheetId}</div>
-              <div>Active Sessions: ${diag.activeSessionsCount}</div>
+              <div>Platform Version: ${escapeHtml(diag.platformVersion)}</div>
+              <div>Schema Version: ${escapeHtml(diag.schemaVersion)}</div>
+              <div>Master Spreadsheet ID: ${escapeHtml(diag.masterSpreadsheetId)}</div>
+              <div>Active Sessions: ${Number(diag.activeSessionsCount || 0)}</div>
               <div>Triggers Health: ${diag.triggersHealthy ? 'ONLINE' : 'OFFLINE'}</div>
               <div style="margin-top: 1rem; font-weight: 700;">Connected Workspace Physical Spreadsheets:</div>
               ${diag.workspaces.map(w => `
-                <div style="margin-left: 1rem; color: var(--text-muted);">${w.name}: ID=${w.spreadsheetId} (Members: ${w.memberCount}, Entries: ${w.timeEntryCount})</div>
+                <div style="margin-left: 1rem; color: var(--text-muted);">${escapeHtml(w.name)}: ID=${escapeHtml(w.spreadsheetId)} (Members: ${Number(w.memberCount || 0)}, Entries: ${Number(w.timeEntryCount || 0)})</div>
               `).join('')}
             </div>
           </div>
