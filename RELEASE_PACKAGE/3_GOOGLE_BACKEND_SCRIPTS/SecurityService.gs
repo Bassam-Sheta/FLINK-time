@@ -10,18 +10,39 @@
 
 const SecurityService = {
   /**
-   * Retrieves server pepper from Script Properties or fallback
+   * Ensures a high-entropy server pepper exists in Script Properties.
+   * Intended to be called only during owner-controlled installation/bootstrap.
+   */
+  ensurePepper() {
+    if (typeof PropertiesService !== 'undefined' && PropertiesService.getScriptProperties) {
+      const props = PropertiesService.getScriptProperties();
+      let pepper = props.getProperty(CONSTANTS.SECURITY.PEPPER_PROPERTY_KEY);
+      if (!pepper) {
+        pepper = this.generateRandomHex(32);
+        props.setProperty(CONSTANTS.SECURITY.PEPPER_PROPERTY_KEY, pepper);
+      }
+      return pepper;
+    }
+    // Local/unit-test fallback only. Production Apps Script must use Script Properties.
+    return CONSTANTS.SECURITY.DEFAULT_PEPPER;
+  },
+
+  /**
+   * Retrieves server pepper. In Apps Script production this fails closed if the
+   * installation step has not initialized the secret.
    */
   getPepper() {
-    try {
-      if (typeof PropertiesService !== 'undefined' && PropertiesService.getScriptProperties) {
-        const props = PropertiesService.getScriptProperties();
-        const pepper = props.getProperty(CONSTANTS.SECURITY.PEPPER_PROPERTY_KEY);
-        if (pepper) return pepper;
-      }
-    } catch (e) {
-      // Fall through to default pepper in sandbox / local mock
+    if (typeof PropertiesService !== 'undefined' && PropertiesService.getScriptProperties) {
+      const props = PropertiesService.getScriptProperties();
+      const pepper = props.getProperty(CONSTANTS.SECURITY.PEPPER_PROPERTY_KEY);
+      if (pepper) return pepper;
+      throw new AppError(
+        ERROR_CODES.CRYPTO_FAILURE,
+        'Server cryptographic secret is not initialized. Run initializeInstallation() as the deployment owner.',
+        500
+      );
     }
+    // Local/unit-test fallback only.
     return CONSTANTS.SECURITY.DEFAULT_PEPPER;
   },
 
