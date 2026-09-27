@@ -6,6 +6,15 @@
 
 const MasterRepository = {
   spreadsheetId: null,
+  _requestCache: {},
+
+  beginRequest() {
+    this._requestCache = {};
+  },
+
+  _invalidateTable(tabName) {
+    delete this._requestCache[tabName];
+  },
 
   /**
    * Resolves Master Spreadsheet. If spreadsheetId is not set, tries ScriptProperties or getActiveSpreadsheet()
@@ -32,6 +41,10 @@ const MasterRepository = {
    * Helper to retrieve a tab and all rows as array of objects
    */
   getTableData(tabName) {
+    if (this._requestCache[tabName]) {
+      return this._requestCache[tabName];
+    }
+
     const ss = this.getMasterSpreadsheet();
     const sheet = ss.getSheetByName(tabName);
     if (!sheet) {
@@ -40,18 +53,25 @@ const MasterRepository = {
 
     const range = sheet.getDataRange();
     const values = range.getValues();
-    if (values.length <= 1) return { headers: values[0] || [], rows: [], sheet };
+    if (values.length <= 1) {
+      const empty = { headers: values[0] || [], rows: [], sheet };
+      this._requestCache[tabName] = empty;
+      return empty;
+    }
 
     const headers = values[0].map(h => String(h).trim());
     const rows = [];
     for (let r = 1; r < values.length; r++) {
       const rowObj = { _rowIndex: r + 1 };
-      for (let c = 0; c < headers.length; c++) {
-        rowObj[headers[c]] = values[r][c];
+      for (let col = 0; col < headers.length; col++) {
+        rowObj[headers[col]] = values[r][col];
       }
       rows.push(rowObj);
     }
-    return { headers, rows, sheet };
+
+    const result = { headers, rows, sheet };
+    this._requestCache[tabName] = result;
+    return result;
   },
 
   /**
@@ -75,6 +95,7 @@ const MasterRepository = {
     });
 
     sheet.appendRow(rowData);
+    this._invalidateTable(tabName);
     return entity;
   },
 
@@ -115,6 +136,8 @@ const MasterRepository = {
         .setValues([group.map(change => change.value)]);
       i = j;
     }
+
+    this._invalidateTable(tabName);
   },
 
   /* ------------------- ACCOUNTS & CREDENTIALS ------------------- */
