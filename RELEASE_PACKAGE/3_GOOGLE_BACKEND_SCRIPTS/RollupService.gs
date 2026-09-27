@@ -5,20 +5,11 @@
  */
 
 const RollupService = {
-  _getWeekBounds(startDate) {
-    const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-    const configured = String(MasterRepository.getGlobalSetting('WEEK_STARTS', 'Sunday') || 'Sunday');
-    const startDayIndex = Math.max(0, dayNames.findIndex(d => d.toLowerCase() === configured.toLowerCase()));
-
-    const d = new Date(startDate);
-    d.setUTCHours(0, 0, 0, 0);
-    const delta = (d.getUTCDay() - startDayIndex + 7) % 7;
-    const weekStartDate = new Date(d.getTime() - delta * 24 * 3600 * 1000);
-    const weekEndDate = new Date(weekStartDate.getTime() + 6 * 24 * 3600 * 1000);
-
+  _getWeekBounds(workspaceId, startDate) {
+    const bounds = TimezoneService.getWeekBounds(workspaceId, startDate);
     return {
-      weekStart: weekStartDate.toISOString().substring(0, 10),
-      weekEnd: weekEndDate.toISOString().substring(0, 10)
+      weekStart: bounds.startLocalDate,
+      weekEnd: bounds.endLocalDate
     };
   },
 
@@ -31,10 +22,10 @@ const RollupService = {
     const startDate = new Date(entry.StartUTC);
     if (isNaN(startDate.getTime())) return;
 
-    const rollupDate = entry.StartUTC.substring(0, 10);
-    const monthKey = entry.StartUTC.substring(0, 7);
+    const rollupDate = TimezoneService.formatDateKey(workspaceId, startDate);
+    const monthKey = TimezoneService.formatMonthKey(workspaceId, startDate);
 
-    const { weekStart, weekEnd } = this._getWeekBounds(startDate);
+    const { weekStart, weekEnd } = this._getWeekBounds(workspaceId, startDate);
 
     const seconds = parseInt(entry.DurationSeconds, 10) || 0;
     const isBillable = entry.Billable === true || entry.Billable === 'TRUE' || entry.Billable === 1;
