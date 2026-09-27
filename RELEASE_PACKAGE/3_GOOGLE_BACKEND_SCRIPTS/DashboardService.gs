@@ -29,6 +29,9 @@ const DashboardService = {
         projects.forEach(p => { projMap[p.ProjectID] = p.ProjectName; });
 
         for (const t of timers) {
+          if (authContext.role === CONSTANTS.ROLES.USER && t.UserID !== authContext.userId) {
+            continue;
+          }
           const startedAtMs = new Date(t.StartedAtUTC).getTime();
           const elapsedSecs = Math.max(0, Math.round((Date.now() - startedAtMs) / 1000));
 
@@ -80,6 +83,7 @@ const DashboardService = {
         // Read fast from DailyRollups
         const { rows: dailyRollups } = SheetRepository.getTableData(ws.WorkspaceID, CONSTANTS.WORKSPACE_TABS.DAILY_ROLLUPS);
         for (const r of dailyRollups) {
+          if (authContext.role === CONSTANTS.ROLES.USER && r.UserID !== authContext.userId) continue;
           if (r.RollupDate === todayStr) {
             totalTrackedSecondsToday += parseInt(r.TotalSeconds, 10) || 0;
           }
@@ -88,12 +92,15 @@ const DashboardService = {
         // Read fast from WeeklyRollups
         const { rows: weeklyRollups } = SheetRepository.getTableData(ws.WorkspaceID, CONSTANTS.WORKSPACE_TABS.WEEKLY_ROLLUPS);
         for (const r of weeklyRollups) {
+          if (authContext.role === CONSTANTS.ROLES.USER && r.UserID !== authContext.userId) continue;
           totalTrackedSecondsThisWeek += parseInt(r.TotalSeconds, 10) || 0;
         }
 
         // Count pending timesheets
         const timesheets = SheetRepository.listTimesheets(ws.WorkspaceID, { status: CONSTANTS.TIMESHEET_STATUS.SUBMITTED });
-        pendingApprovalsCount += timesheets.length;
+        pendingApprovalsCount += authContext.role === CONSTANTS.ROLES.USER
+          ? timesheets.filter(ts => ts.UserID === authContext.userId).length
+          : timesheets.length;
       } catch (e) {
         // Skip uninitialized workspace
       }
@@ -106,8 +113,21 @@ const DashboardService = {
       pendingRequestsCount = requests.length;
     }
 
+    let activeUsersCount = 0;
+    let passiveUsersCount = 0;
+    if (authContext.role === CONSTANTS.ROLES.SUPER_ADMIN) {
+      try {
+        const { rows: accounts } = MasterRepository.getTableData(CONSTANTS.MASTER_TABS.ACCOUNTS);
+        activeUsersCount = accounts.filter(a => a.Status === CONSTANTS.ACCOUNT_STATUS.ACTIVE).length;
+        passiveUsersCount = accounts.filter(a => a.Status === CONSTANTS.ACCOUNT_STATUS.PASSIVE).length;
+      } catch (e) {}
+    }
+
     return {
       accessibleWorkspacesCount: accessibleWorkspaces.length,
+      workspacesCount: accessibleWorkspaces.length,
+      activeUsersCount,
+      passiveUsersCount,
       activeTimersCount: liveRadar.activeCount,
       workingNow: liveRadar.workers,
       todayTrackedHours: +(totalTrackedSecondsToday / 3600).toFixed(2),
