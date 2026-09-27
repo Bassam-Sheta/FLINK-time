@@ -238,33 +238,60 @@ const UserService = {
       const account = MasterRepository.findAccountById(targetUserId);
       if (!account) throw new AppError(ERROR_CODES.NOT_FOUND, `User ${targetUserId} not found.`);
 
-      MasterRepository.updateAccount(targetUserId, {
-        Status: CONSTANTS.ACCOUNT_STATUS.PASSIVE,
-        UpdatedAt: new Date().toISOString(),
-        UpdatedBy: superAdminContext.userId
-      });
-
-      // Invalidate all sessions immediately
+      // Revoke sessions first. Any concurrent timer start is blocked by this same ScriptLock.
       SessionService.revokeAllUserSessions(targetUserId);
 
-      // Update status in assigned workspaces & cleanly close active timer
+      const ownerContext = {
+        userId: targetUserId,
+        role: account.Role,
+        user: account
+      };
+
       const accesses = MasterRepository.getWorkspaceAccessForUser(targetUserId);
+      const finalizedTimers = [];
+
       for (const acc of accesses) {
+        const ws = MasterRepository.getWorkspace(acc.WorkspaceID);
+        if (!ws || ws.Status !== CONSTANTS.WORKSPACE_STATUS.ACTIVE) {
+          continue;
+        }
+
+        // Preserve already-worked time instead of deleting an active timer.
+        const timer = SheetRepository.getActiveTimer(acc.WorkspaceID, targetUserId);
+        if (timer) {
+          const entry = TimerService._finalizeActiveTimerLocked(
+            ownerContext,
+            acc.WorkspaceID,
+            timer,
+            { reason: 'Timer finalized automatically during account deactivation' },
+            superAdminContext
+          );
+          finalizedTimers.push({
+            workspaceId: acc.WorkspaceID,
+            timerId: timer.TimerID,
+            entryId: entry.EntryID,
+            durationSeconds: entry.DurationSeconds
+          });
+        }
+
         try {
           SheetRepository.updateMember(acc.WorkspaceID, targetUserId, {
             Status: CONSTANTS.ACCOUNT_STATUS.PASSIVE,
             LeftAt: new Date().toISOString()
           });
-
-          // Clean up any active timer
-          const timer = SheetRepository.getActiveTimer(acc.WorkspaceID, targetUserId);
-          if (timer) {
-            SheetRepository.deleteActiveTimer(acc.WorkspaceID, targetUserId);
-          }
-        } catch (e) {
-          // Workspace sheet might be archived
+        } catch (memberErr) {
+          console.warn(
+            `Could not update workspace member status for ${targetUserId} in ${acc.WorkspaceID}: ${memberErr.message}`
+          );
         }
       }
+
+      // Only mark the account passive after active time has been safely finalized.
+      MasterRepository.updateAccount(targetUserId, {
+        Status: CONSTANTS.ACCOUNT_STATUS.PASSIVE,
+        UpdatedAt: new Date().toISOString(),
+        UpdatedBy: superAdminContext.userId
+      });
 
       MasterRepository.logGlobalAudit({
         ActorUserID: superAdminContext.userId,
@@ -272,13 +299,20 @@ const UserService = {
         EntityType: 'USER',
         EntityID: targetUserId,
         Action: CONSTANTS.AUDIT_EVENTS.USER_PASSIVE,
+        AfterJSON: { finalizedTimers },
         Reason: reason
       });
 
       if (typeof SpreadsheetApp !== 'undefined' && SpreadsheetApp.flush) {
         try { SpreadsheetApp.flush(); } catch (fErr) {}
       }
-      return { ok: true, userId: targetUserId, status: CONSTANTS.ACCOUNT_STATUS.PASSIVE };
+
+      return {
+        ok: true,
+        userId: targetUserId,
+        status: CONSTANTS.ACCOUNT_STATUS.PASSIVE,
+        finalizedTimers
+      };
     } finally {
       lock.releaseLock();
     }
