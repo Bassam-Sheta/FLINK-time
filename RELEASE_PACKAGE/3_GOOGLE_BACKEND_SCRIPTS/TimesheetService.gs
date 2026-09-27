@@ -5,6 +5,29 @@
  */
 
 const TimesheetService = {
+  _resolveWeek(dateStr) {
+    const requested = new Date(dateStr);
+    if (isNaN(requested.getTime())) {
+      throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'Invalid week date.');
+    }
+
+    requested.setUTCHours(0, 0, 0, 0);
+    const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+    const configured = String(MasterRepository.getGlobalSetting('WEEK_STARTS', 'Sunday') || 'Sunday');
+    const startDayIndex = Math.max(0, dayNames.findIndex(d => d.toLowerCase() === configured.toLowerCase()));
+    const currentDayIndex = requested.getUTCDay();
+    const delta = (currentDayIndex - startDayIndex + 7) % 7;
+
+    const startDate = new Date(requested.getTime() - delta * 24 * 3600 * 1000);
+    const endDate = new Date(startDate.getTime() + 7 * 24 * 3600 * 1000 - 1);
+    const dayLabels = [];
+    for (let i = 0; i < 7; i++) {
+      dayLabels.push(dayNames[(startDayIndex + i) % 7]);
+    }
+
+    return { startDate, endDate, dayLabels };
+  },
+
   /**
    * Generates weekly timesheet grid data for a user and date
    */
@@ -13,15 +36,9 @@ const TimesheetService = {
 
     const userId = (authContext.role === CONSTANTS.ROLES.USER) ? authContext.userId : (targetUserId || authContext.userId);
 
-    // Calculate 7-day range from weekStartDate
-    const startDate = new Date(weekStartDateStr);
-    if (isNaN(startDate.getTime())) {
-      throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'Invalid week start date.');
-    }
-
-    // Set to 00:00:00 UTC
-    startDate.setUTCHours(0, 0, 0, 0);
-    const endDate = new Date(startDate.getTime() + 7 * 24 * 3600 * 1000 - 1);
+    // Treat the supplied date as "a date in the requested week"; the server
+    // resolves the actual configured week boundary.
+    const { startDate, endDate, dayLabels } = this._resolveWeek(weekStartDateStr);
 
     const startIso = startDate.toISOString();
     const endIso = endDate.toISOString();
@@ -69,15 +86,29 @@ const TimesheetService = {
       totalSeconds += secs;
     }
 
+    const projects = SheetRepository.listProjects(workspaceId);
+    const tasks = SheetRepository.listTasks(workspaceId);
+    const projectMap = {};
+    const taskMap = {};
+    projects.forEach(p => { projectMap[p.ProjectID] = p.ProjectName; });
+    tasks.forEach(t => { taskMap[t.TaskID] = t.TaskName; });
+
+    const rows = Object.values(matrixMap).map(row => ({
+      ...row,
+      projectName: projectMap[row.projectId] || (row.projectId === 'unassigned' ? 'Unassigned' : row.projectId),
+      taskName: taskMap[row.taskId] || (row.taskId === 'none' ? '' : row.taskId)
+    }));
+
     return {
       userId,
       workspaceId,
       periodStart: startIso,
       periodEnd: endIso,
+      dayLabels,
       totalSeconds,
       totalHours: +(totalSeconds / 3600).toFixed(2),
       dailyTotalsSeconds,
-      rows: Object.values(matrixMap),
+      rows,
       timesheet: existingTimesheet,
       status: existingTimesheet ? existingTimesheet.Status : CONSTANTS.TIMESHEET_STATUS.OPEN
     };
