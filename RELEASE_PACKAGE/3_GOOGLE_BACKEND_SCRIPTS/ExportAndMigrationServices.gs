@@ -65,64 +65,26 @@ const ExportService = {
 
 const MigrationService = {
   /**
-   * Bootstraps Master Control Sheet tabs and creates default Super Admin account if not present
+   * Bootstraps only the Master Control Sheet schema and cryptographic secret.
+   * It deliberately does NOT create any default/admin credentials.
    */
   bootstrapMasterSheet(masterSpreadsheet = null) {
     const ss = masterSpreadsheet || MasterRepository.getMasterSpreadsheet();
 
-    // Create tabs defined in MASTER_SCHEMA
     for (const [tabName, columns] of Object.entries(MASTER_SCHEMA)) {
       let sheet = ss.getSheetByName(tabName);
-      if (!sheet) {
-        sheet = ss.insertSheet(tabName);
-      }
+      if (!sheet) sheet = ss.insertSheet(tabName);
       sheet.getRange(1, 1, 1, columns.length).setValues([columns]);
       sheet.setFrozenRows(1);
     }
 
-    // Remove original default 'Sheet1' if present
     const defaultSheet = ss.getSheetByName('Sheet1');
     if (defaultSheet && !MASTER_SCHEMA[defaultSheet.getName()]) {
       try { ss.deleteSheet(defaultSheet); } catch (e) {}
     }
 
-    // Check if default Super Admin exists
-    const { rows: accounts } = MasterRepository.getTableData(CONSTANTS.MASTER_TABS.ACCOUNTS);
-    let defaultAdmin = accounts.find(a => a.Role === CONSTANTS.ROLES.SUPER_ADMIN);
-
-    if (!defaultAdmin) {
-      const adminUserId = 'USR-ADMIN-ROOT';
-      const tempPassword = 'AdminPassword123!';
-      const hash = SecurityService.hashPassword(tempPassword);
-      const now = new Date().toISOString();
-
-      MasterRepository.appendRow(CONSTANTS.MASTER_TABS.ACCOUNTS, {
-        UserID: adminUserId,
-        Username: 'admin',
-        DisplayName: 'Master Administrator',
-        Role: CONSTANTS.ROLES.SUPER_ADMIN,
-        Status: CONSTANTS.ACCOUNT_STATUS.ACTIVE,
-        PrimaryWorkspaceID: '',
-        Email: 'admin@flink.local',
-        CreatedAt: now,
-        CreatedBy: 'SYSTEM',
-        UpdatedAt: now,
-        UpdatedBy: 'SYSTEM',
-        LastLoginAt: '',
-        MustChangePassword: true
-      });
-
-      MasterRepository.appendRow(CONSTANTS.MASTER_TABS.CREDENTIALS, {
-        UserID: adminUserId,
-        PasswordHash: hash,
-        PasswordVersion: 1,
-        PasswordChangedAt: now,
-        FailedLoginCount: 0,
-        LockUntil: ''
-      });
-    }
-
-    return { ok: true, message: 'Master Control Sheet bootstrapped successfully.' };
+    SecurityService.ensurePepper();
+    return { ok: true, message: 'Master Control Sheet schema and cryptographic secret initialized.' };
   },
 
   /**
@@ -156,9 +118,34 @@ const MigrationService = {
   }
 };
 
+/**
+ * Owner-only installation helper.
+ * Run this function once from the Apps Script editor before opening the public web app.
+ * The one-time setup key is written to the execution log and must be entered in Setup Step 1.
+ */
+function initializeInstallation() {
+  MigrationService.bootstrapMasterSheet();
+  if (typeof PropertiesService === 'undefined' || !PropertiesService.getScriptProperties) {
+    throw new AppError(ERROR_CODES.INTERNAL_ERROR, 'Script Properties are unavailable in this runtime.');
+  }
+
+  const props = PropertiesService.getScriptProperties();
+  const setupKey = SecurityService.generateRandomHex(24);
+  props.setProperty('FLINK_SETUP_KEY_HASH', SecurityService.hashToken(setupKey));
+  props.setProperty('FLINK_SETUP_KEY_CREATED_AT', new Date().toISOString());
+
+  console.log('FLINK one-time setup key: ' + setupKey);
+  return {
+    ok: true,
+    setupKey,
+    message: 'Installation initialized. Use this one-time key in Setup Step 1; it is invalidated after Super Admin creation.'
+  };
+}
+
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     ExportService,
-    MigrationService
+    MigrationService,
+    initializeInstallation
   };
 }
