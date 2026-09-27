@@ -1,239 +1,476 @@
 /**
  * FLINK Time & Workforce Platform — Data Integrity & Automated Audit Engine
- * Executes the 16-point nightly architectural and data integrity verification,
- * logs results to SystemHealthHistory, and provides self-healing repair routines.
+ * Runs measured integrity checks and records the result in SystemHealthHistory.
  */
 
 const IntegrityService = {
-  /**
-   * Runs the complete 16-point data integrity audit
-   */
   runNightlyAudit() {
     const checks = [];
     const timestamp = new Date().toISOString();
+    let activeTimerCount = 0;
 
-    // 1. Unique usernames across Accounts
+    const addCheck = (id, name, passed, detail) => {
+      checks.push({ id, name, passed: passed === true, detail: String(detail || '') });
+    };
+
+    let accounts = [];
+    let accessRows = [];
+    let workspaces = [];
     try {
-      const { rows: accounts } = MasterRepository.getTableData(CONSTANTS.MASTER_TABS.ACCOUNTS);
-      const usernames = accounts.map(a => String(a.Username || '').toLowerCase());
-      const duplicates = usernames.filter((u, idx) => usernames.indexOf(u) !== idx && u !== '');
-      checks.push({
-        id: 'unique_usernames',
-        name: 'Unique Usernames Invariant',
-        passed: duplicates.length === 0,
-        detail: duplicates.length === 0 ? 'All account usernames are unique' : `Duplicates found: ${duplicates.join(', ')}`
-      });
+      accounts = MasterRepository.getTableData(CONSTANTS.MASTER_TABS.ACCOUNTS).rows || [];
+      accessRows = MasterRepository.getTableData(CONSTANTS.MASTER_TABS.WORKSPACE_ACCESS).rows || [];
+      workspaces = MasterRepository.listWorkspaces() || [];
     } catch (e) {
-      checks.push({ id: 'unique_usernames', name: 'Unique Usernames Invariant', passed: false, detail: e.message });
+      addCheck('master_reference_load', 'Master Reference Data Load', false, e.message);
     }
 
-    // 2. Admin max 3 active workspaces invariant
-    try {
-      const { rows: accessRows } = MasterRepository.getTableData(CONSTANTS.MASTER_TABS.WORKSPACE_ACCESS);
-      const { rows: accountRows } = MasterRepository.getTableData(CONSTANTS.MASTER_TABS.ACCOUNTS);
-      const adminAccounts = accountRows.filter(a => a.Role === CONSTANTS.ROLES.ADMIN);
-      let violation = null;
+    const accountMap = new Map(accounts.map(a => [a.UserID, a]));
+    const workspaceMap = new Map(workspaces.map(w => [w.WorkspaceID, w]));
+    const activeWorkspaces = workspaces.filter(w => w.Status === CONSTANTS.WORKSPACE_STATUS.ACTIVE);
 
-      for (const admin of adminAccounts) {
-        const activeCount = accessRows.filter(r => r.UserID === admin.UserID && (r.Active === true || r.Active === 'TRUE')).length;
+    // 1. Unique usernames
+    try {
+      const seen = new Set();
+      const duplicates = new Set();
+      for (const account of accounts) {
+        const username = String(account.Username || '').trim().toLowerCase();
+        if (!username) continue;
+        if (seen.has(username)) duplicates.add(username);
+        seen.add(username);
+      }
+      addCheck(
+        'unique_usernames',
+        'Unique Usernames Invariant',
+        duplicates.size === 0,
+        duplicates.size === 0 ? 'All usernames are unique' : `Duplicates: ${[...duplicates].join(', ')}`
+      );
+    } catch (e) {
+      addCheck('unique_usernames', 'Unique Usernames Invariant', false, e.message);
+    }
+
+    // 2. Admin max-workspace rule
+    try {
+      const violations = [];
+      for (const admin of accounts.filter(a => a.Role === CONSTANTS.ROLES.ADMIN)) {
+        const activeCount = accessRows.filter(r =>
+          r.UserID === admin.UserID &&
+          (r.Active === true || r.Active === 'TRUE' || r.Active === 1)
+        ).length;
         if (activeCount > CONSTANTS.LIMITS.ADMIN_MAX_ACTIVE_WORKSPACES) {
-          violation = `${admin.Username} has ${activeCount} workspaces (max 3 allowed)`;
-          break;
+          violations.push(`${admin.Username}: ${activeCount}`);
         }
       }
-
-      checks.push({
-        id: 'admin_workspace_limit',
-        name: 'Admin 3-Workspace Limit Invariant',
-        passed: !violation,
-        detail: !violation ? 'All Admin workspace assignments <= 3' : violation
-      });
+      addCheck(
+        'admin_workspace_limit',
+        'Admin Workspace Limit Invariant',
+        violations.length === 0,
+        violations.length === 0 ? 'All Admin assignments are within configured limit' : violations.join('; ')
+      );
     } catch (e) {
-      checks.push({ id: 'admin_workspace_limit', name: 'Admin 3-Workspace Limit Invariant', passed: false, detail: e.message });
+      addCheck('admin_workspace_limit', 'Admin Workspace Limit Invariant', false, e.message);
     }
 
-    // 3. Master database complete 18 tabs exist
+    // 3. Master schema tabs
     try {
       const masterSs = MasterRepository.getMasterSpreadsheet();
-      const missing = [];
-      for (const tabName of Object.values(CONSTANTS.MASTER_TABS)) {
-        if (!masterSs.getSheetByName(tabName)) missing.push(tabName);
-      }
-      checks.push({
-        id: 'master_18_tabs',
-        name: 'Master Control Sheet (18 Tabs)',
-        passed: missing.length === 0,
-        detail: missing.length === 0 ? 'All 18 master tabs verified' : `Missing tabs: ${missing.join(', ')}`
-      });
+      const expectedTabs = Object.values(CONSTANTS.MASTER_TABS);
+      const missing = expectedTabs.filter(tab => !masterSs.getSheetByName(tab));
+      addCheck(
+        'master_tabs',
+        'Master Control Schema',
+        missing.length === 0,
+        missing.length === 0 ? `All ${expectedTabs.length} master tabs exist` : `Missing: ${missing.join(', ')}`
+      );
     } catch (e) {
-      checks.push({ id: 'master_18_tabs', name: 'Master Control Sheet (18 Tabs)', passed: false, detail: e.message });
+      addCheck('master_tabs', 'Master Control Schema', false, e.message);
     }
 
-    // 4. All active workspaces exist with all 20 tabs
-    const workspaces = MasterRepository.listWorkspaces();
-    let wsMissingTabs = [];
-    for (const ws of workspaces) {
-      if (ws.Status === CONSTANTS.WORKSPACE_STATUS.ARCHIVED) continue;
-      try {
-        const wss = WorkspaceRouter.resolveSpreadsheet(ws.WorkspaceID);
-        for (const tab of Object.values(CONSTANTS.WORKSPACE_TABS)) {
-          if (!wss.getSheetByName(tab)) wsMissingTabs.push(`${ws.WorkspaceName}: ${tab}`);
+    // 4. Workspace tabs
+    try {
+      const issues = [];
+      for (const ws of activeWorkspaces) {
+        const ss = WorkspaceRouter.resolveSpreadsheet(ws.WorkspaceID);
+        const missing = Object.values(CONSTANTS.WORKSPACE_TABS).filter(tab => !ss.getSheetByName(tab));
+        if (missing.length) issues.push(`${ws.WorkspaceName}: ${missing.join(', ')}`);
+      }
+      addCheck(
+        'workspace_tabs',
+        'Workspace Schema Tabs',
+        issues.length === 0,
+        issues.length === 0 ? `${activeWorkspaces.length} active workspace(s) have all required tabs` : issues.join('; ')
+      );
+    } catch (e) {
+      addCheck('workspace_tabs', 'Workspace Schema Tabs', false, e.message);
+    }
+
+    // 5. WorkspaceInfo/schema-version consistency
+    try {
+      const issues = [];
+      for (const ws of activeWorkspaces) {
+        const rows = SheetRepository.getTableData(
+          ws.WorkspaceID,
+          CONSTANTS.WORKSPACE_TABS.WORKSPACE_INFO
+        ).rows || [];
+        if (rows.length !== 1) {
+          issues.push(`${ws.WorkspaceName}: expected one WorkspaceInfo row, found ${rows.length}`);
+          continue;
         }
-      } catch (err) {
-        wsMissingTabs.push(`${ws.WorkspaceName}: spreadsheet inaccessible`);
+        const info = rows[0];
+        if (String(info.WorkspaceID) !== String(ws.WorkspaceID)) {
+          issues.push(`${ws.WorkspaceName}: WorkspaceID mismatch`);
+        }
+        if (String(info.SchemaVersion) !== String(CONSTANTS.SCHEMA_VERSION)) {
+          issues.push(`${ws.WorkspaceName}: schema v${info.SchemaVersion}, expected v${CONSTANTS.SCHEMA_VERSION}`);
+        }
+        if (String(ws.SchemaVersion || CONSTANTS.SCHEMA_VERSION) !== String(CONSTANTS.SCHEMA_VERSION)) {
+          issues.push(`${ws.WorkspaceName}: registry schema v${ws.SchemaVersion}`);
+        }
       }
-    }
-    checks.push({
-      id: 'workspace_20_tabs',
-      name: 'Workspace Databases (20 Tabs per Workspace)',
-      passed: wsMissingTabs.length === 0,
-      detail: wsMissingTabs.length === 0 ? `${workspaces.length} workspaces verified with 20 tabs each` : `Issues: ${wsMissingTabs.join('; ')}`
-    });
-
-    // 5. Schema version consistency
-    checks.push({
-      id: 'schema_version',
-      name: 'Schema Version Consistency',
-      passed: true,
-      detail: `Target schema version v${CONSTANTS.SCHEMA_VERSION} verified`
-    });
-
-    // 6. ActiveTimers valid user reference
-    try {
-      let orphanTimers = 0;
-      const { rows: accounts } = MasterRepository.getTableData(CONSTANTS.MASTER_TABS.ACCOUNTS);
-      const activeUserIds = new Set(accounts.filter(a => a.Status === CONSTANTS.ACCOUNT_STATUS.ACTIVE).map(a => a.UserID));
-
-      for (const ws of workspaces) {
-        if (ws.Status === CONSTANTS.WORKSPACE_STATUS.ARCHIVED) continue;
-        const timers = SheetRepository.listActiveTimers(ws.WorkspaceID);
-        timers.forEach(t => {
-          if (!activeUserIds.has(t.UserID)) orphanTimers++;
-        });
-      }
-      checks.push({
-        id: 'active_timer_user_ref',
-        name: 'Active Timer Valid User References',
-        passed: orphanTimers === 0,
-        detail: orphanTimers === 0 ? 'All active timers belong to active accounts' : `${orphanTimers} orphan timer(s) detected`
-      });
+      addCheck(
+        'schema_version',
+        'Schema Version Consistency',
+        issues.length === 0,
+        issues.length === 0 ? `All active workspaces are on schema v${CONSTANTS.SCHEMA_VERSION}` : issues.join('; ')
+      );
     } catch (e) {
-      checks.push({ id: 'active_timer_user_ref', name: 'Active Timer Valid User References', passed: false, detail: e.message });
+      addCheck('schema_version', 'Schema Version Consistency', false, e.message);
     }
 
-    // 7. Max 1 active timer globally per user
+    // 6. Active timer owner/access validity
+    const allTimers = [];
     try {
-      const activeTimerMap = new Map();
-      let multipleTimersFound = false;
-      for (const ws of workspaces) {
-        if (ws.Status === CONSTANTS.WORKSPACE_STATUS.ARCHIVED) continue;
-        const timers = SheetRepository.listActiveTimers(ws.WorkspaceID);
-        timers.forEach(t => {
-          if (activeTimerMap.has(t.UserID)) multipleTimersFound = true;
-          activeTimerMap.set(t.UserID, true);
-        });
+      const issues = [];
+      for (const ws of activeWorkspaces) {
+        const allowedUsers = new Set(
+          accessRows
+            .filter(r =>
+              r.WorkspaceID === ws.WorkspaceID &&
+              (r.Active === true || r.Active === 'TRUE' || r.Active === 1)
+            )
+            .map(r => r.UserID)
+        );
+        const timers = SheetRepository.listActiveTimers(ws.WorkspaceID) || [];
+        activeTimerCount += timers.length;
+        for (const timer of timers) {
+          allTimers.push({ ...timer, _workspaceId: ws.WorkspaceID });
+          const account = accountMap.get(timer.UserID);
+          if (!account || account.Status !== CONSTANTS.ACCOUNT_STATUS.ACTIVE) {
+            issues.push(`${timer.TimerID}: inactive/missing user ${timer.UserID}`);
+          }
+          if (!allowedUsers.has(timer.UserID)) {
+            issues.push(`${timer.TimerID}: user lacks active workspace access`);
+          }
+          if (isNaN(new Date(timer.StartedAtUTC).getTime())) {
+            issues.push(`${timer.TimerID}: invalid StartedAtUTC`);
+          }
+        }
       }
-      checks.push({
-        id: 'single_active_timer_invariant',
-        name: 'Single Active Timer Invariant (Global)',
-        passed: !multipleTimersFound,
-        detail: !multipleTimersFound ? 'All active workers have exactly 1 running timer' : 'Violation: user running concurrent timers'
-      });
+      addCheck(
+        'active_timer_user_ref',
+        'Active Timer Owner/Workspace Integrity',
+        issues.length === 0,
+        issues.length === 0 ? `${activeTimerCount} active timer(s) have valid owners/access` : issues.join('; ')
+      );
     } catch (e) {
-      checks.push({ id: 'single_active_timer_invariant', name: 'Single Active Timer Invariant (Global)', passed: false, detail: e.message });
+      addCheck('active_timer_user_ref', 'Active Timer Owner/Workspace Integrity', false, e.message);
     }
 
-    // 8. Start <= End on all TimeEntries
-    checks.push({
-      id: 'entry_timestamps_order',
-      name: 'Time Entry Start <= End Timestamps',
-      passed: true,
-      detail: 'Timestamp chronological ordering validated'
-    });
+    // 7. One active timer globally per user
+    try {
+      const counts = new Map();
+      for (const timer of allTimers) {
+        counts.set(timer.UserID, (counts.get(timer.UserID) || 0) + 1);
+      }
+      const duplicates = [...counts.entries()].filter(([, count]) => count > 1);
+      addCheck(
+        'single_active_timer_invariant',
+        'Single Active Timer Invariant',
+        duplicates.length === 0,
+        duplicates.length === 0
+          ? 'No user has more than one active timer globally'
+          : duplicates.map(([userId, count]) => `${userId}: ${count} timers`).join('; ')
+      );
+    } catch (e) {
+      addCheck('single_active_timer_invariant', 'Single Active Timer Invariant', false, e.message);
+    }
 
-    // 9. Duration seconds match difference
-    checks.push({
-      id: 'duration_calculation_accuracy',
-      name: 'Duration Mathematical Accuracy',
-      passed: true,
-      detail: 'Elapsed seconds match timestamp delta'
-    });
+    // Cache workspace operational data for checks 8-15.
+    const workspaceData = new Map();
+    try {
+      for (const ws of activeWorkspaces) {
+        const entries = SheetRepository.getTableData(ws.WorkspaceID, CONSTANTS.WORKSPACE_TABS.TIME_ENTRIES).rows || [];
+        const projects = SheetRepository.listProjects(ws.WorkspaceID) || [];
+        const tasks = SheetRepository.listTasks(ws.WorkspaceID) || [];
+        const clients = SheetRepository.listClients(ws.WorkspaceID) || [];
+        const tags = SheetRepository.listTags(ws.WorkspaceID) || [];
+        const timesheets = SheetRepository.listTimesheets(ws.WorkspaceID, {}) || [];
+        workspaceData.set(ws.WorkspaceID, { entries, projects, tasks, clients, tags, timesheets });
+      }
+    } catch (e) {
+      addCheck('workspace_data_load', 'Workspace Integrity Data Load', false, e.message);
+    }
 
-    // 10. Task belongs to valid Project
-    checks.push({
-      id: 'task_project_integrity',
-      name: 'Task to Project Foreign Key Integrity',
-      passed: true,
-      detail: 'All tasks belong to existing project parents'
-    });
+    // 8. Start <= End
+    try {
+      const issues = [];
+      for (const [workspaceId, data] of workspaceData.entries()) {
+        for (const entry of data.entries.filter(e => e.Status !== 'DELETED')) {
+          const start = new Date(entry.StartUTC).getTime();
+          const end = new Date(entry.EndUTC).getTime();
+          if (isNaN(start) || isNaN(end) || end < start) {
+            issues.push(`${workspaceId}/${entry.EntryID}`);
+          }
+        }
+      }
+      addCheck(
+        'entry_timestamps_order',
+        'Time Entry Timestamp Ordering',
+        issues.length === 0,
+        issues.length === 0 ? 'All active entries have valid StartUTC <= EndUTC' : `Invalid entries: ${issues.join(', ')}`
+      );
+    } catch (e) {
+      addCheck('entry_timestamps_order', 'Time Entry Timestamp Ordering', false, e.message);
+    }
 
-    // 11. Projects exist for time entries
-    checks.push({
-      id: 'entry_project_reference',
-      name: 'Time Entry Project Reference Integrity',
-      passed: true,
-      detail: 'All time entries reference registered project entities'
-    });
+    // 9. Duration mathematical accuracy
+    try {
+      const issues = [];
+      for (const [workspaceId, data] of workspaceData.entries()) {
+        for (const entry of data.entries.filter(e => e.Status !== 'DELETED')) {
+          const start = new Date(entry.StartUTC).getTime();
+          const end = new Date(entry.EndUTC).getTime();
+          if (isNaN(start) || isNaN(end)) continue;
+          const expected = Math.max(0, Math.round((end - start) / 1000));
+          const stored = parseInt(entry.DurationSeconds, 10) || 0;
+          if (Math.abs(expected - stored) > 1) {
+            issues.push(`${workspaceId}/${entry.EntryID}: stored=${stored}, expected=${expected}`);
+          }
+        }
+      }
+      addCheck(
+        'duration_calculation_accuracy',
+        'Duration Mathematical Accuracy',
+        issues.length === 0,
+        issues.length === 0 ? 'All active entry durations match timestamp deltas' : issues.join('; ')
+      );
+    } catch (e) {
+      addCheck('duration_calculation_accuracy', 'Duration Mathematical Accuracy', false, e.message);
+    }
 
-    // 12. Locked status on approved entries
-    checks.push({
-      id: 'approved_entry_locking',
-      name: 'Approved Timesheet Entry Locking',
-      passed: true,
-      detail: 'All approved timesheet entries locked against client modification'
-    });
+    // 10. Task -> Project integrity
+    try {
+      const issues = [];
+      for (const [workspaceId, data] of workspaceData.entries()) {
+        const projectIds = new Set(data.projects.map(p => p.ProjectID));
+        for (const task of data.tasks) {
+          if (!projectIds.has(task.ProjectID)) {
+            issues.push(`${workspaceId}/${task.TaskID}: missing project ${task.ProjectID}`);
+          }
+        }
+      }
+      addCheck(
+        'task_project_integrity',
+        'Task to Project Referential Integrity',
+        issues.length === 0,
+        issues.length === 0 ? 'All tasks reference existing projects' : issues.join('; ')
+      );
+    } catch (e) {
+      addCheck('task_project_integrity', 'Task to Project Referential Integrity', false, e.message);
+    }
 
-    // 13. Rollups match source entries
-    checks.push({
-      id: 'rollups_reconciliation',
-      name: 'Rollup to Raw Entry 100% Reconciliation',
-      passed: true,
-      detail: 'Daily, weekly, and monthly rollups reconcile with source time entries'
-    });
+    // 11. TimeEntry project/task references
+    try {
+      const issues = [];
+      for (const [workspaceId, data] of workspaceData.entries()) {
+        const projectIds = new Set(data.projects.map(p => p.ProjectID));
+        const taskMap = new Map(data.tasks.map(t => [t.TaskID, t]));
+        for (const entry of data.entries.filter(e => e.Status !== 'DELETED')) {
+          if (entry.ProjectID && !projectIds.has(entry.ProjectID)) {
+            issues.push(`${workspaceId}/${entry.EntryID}: missing project ${entry.ProjectID}`);
+          }
+          if (entry.TaskID) {
+            const task = taskMap.get(entry.TaskID);
+            if (!task) issues.push(`${workspaceId}/${entry.EntryID}: missing task ${entry.TaskID}`);
+            else if (entry.ProjectID && task.ProjectID !== entry.ProjectID) {
+              issues.push(`${workspaceId}/${entry.EntryID}: task/project mismatch`);
+            }
+          }
+        }
+      }
+      addCheck(
+        'entry_project_reference',
+        'Time Entry Project/Task Referential Integrity',
+        issues.length === 0,
+        issues.length === 0 ? 'All active entries reference valid project/task entities' : issues.join('; ')
+      );
+    } catch (e) {
+      addCheck('entry_project_reference', 'Time Entry Project/Task Referential Integrity', false, e.message);
+    }
 
-    // 14. No orphaned workspace access
-    checks.push({
-      id: 'access_orphans',
-      name: 'Workspace Access Referential Integrity',
-      passed: true,
-      detail: 'All workspace access records map to existing users and workspaces'
-    });
+    // 12. Submitted/approved entries must be locked and tied to matching timesheet state.
+    try {
+      const issues = [];
+      for (const [workspaceId, data] of workspaceData.entries()) {
+        const timesheetMap = new Map(data.timesheets.map(ts => [ts.TimesheetID, ts]));
+        for (const entry of data.entries.filter(e => e.Status !== 'DELETED')) {
+          const approval = String(entry.ApprovalStatus || '');
+          if (![CONSTANTS.TIMESHEET_STATUS.SUBMITTED, CONSTANTS.TIMESHEET_STATUS.APPROVED].includes(approval)) {
+            continue;
+          }
+          const locked = entry.Locked === true || entry.Locked === 'TRUE' || entry.Locked === 1;
+          if (!locked) issues.push(`${workspaceId}/${entry.EntryID}: ${approval} but unlocked`);
+          const ts = timesheetMap.get(entry.TimesheetID);
+          if (!ts) issues.push(`${workspaceId}/${entry.EntryID}: missing timesheet ${entry.TimesheetID}`);
+          else if (String(ts.Status) !== approval) {
+            issues.push(`${workspaceId}/${entry.EntryID}: entry=${approval}, timesheet=${ts.Status}`);
+          }
+        }
+      }
+      addCheck(
+        'approved_entry_locking',
+        'Timesheet Entry Lock/State Integrity',
+        issues.length === 0,
+        issues.length === 0 ? 'Submitted/approved entries are locked and match timesheet state' : issues.join('; ')
+      );
+    } catch (e) {
+      addCheck('approved_entry_locking', 'Timesheet Entry Lock/State Integrity', false, e.message);
+    }
 
-    // 15. No duplicate entity IDs
-    checks.push({
-      id: 'unique_entity_ids',
-      name: 'Entity ID Uniqueness',
-      passed: true,
-      detail: 'All entity identifiers (USR, WSP, ENT, PRJ, TSK) are globally unique'
-    });
+    // 13. Aggregate rollups reconcile to active raw time.
+    try {
+      const issues = [];
+      for (const [workspaceId, data] of workspaceData.entries()) {
+        const rawSeconds = data.entries
+          .filter(e => e.Status !== 'DELETED')
+          .reduce((sum, e) => sum + (parseInt(e.DurationSeconds, 10) || 0), 0);
+        for (const tab of [
+          CONSTANTS.WORKSPACE_TABS.DAILY_ROLLUPS,
+          CONSTANTS.WORKSPACE_TABS.WEEKLY_ROLLUPS,
+          CONSTANTS.WORKSPACE_TABS.MONTHLY_ROLLUPS
+        ]) {
+          const rows = SheetRepository.getTableData(workspaceId, tab).rows || [];
+          const aggregate = rows.reduce((sum, r) => sum + (parseInt(r.TotalSeconds, 10) || 0), 0);
+          if (aggregate !== rawSeconds) {
+            issues.push(`${workspaceId}/${tab}: raw=${rawSeconds}, rollup=${aggregate}`);
+          }
+        }
+      }
+      addCheck(
+        'rollups_reconciliation',
+        'Rollup to Raw Entry Reconciliation',
+        issues.length === 0,
+        issues.length === 0 ? 'Daily, weekly, and monthly totals match active raw time' : issues.join('; ')
+      );
+    } catch (e) {
+      addCheck('rollups_reconciliation', 'Rollup to Raw Entry Reconciliation', false, e.message);
+    }
 
-    // 16. Cell capacity check
-    const cap = JobService.getCapacityMetrics();
-    checks.push({
-      id: 'cell_capacity_limit',
-      name: 'Google Sheets 10M Cell Capacity Monitoring',
-      passed: cap.alertStatus !== 'CRITICAL',
-      detail: `Master cell usage: ${cap.totalCells} cells (${cap.utilizationPct}%). Status: ${cap.alertStatus}`
-    });
+    // 14. WorkspaceAccess referential/role integrity
+    try {
+      const issues = [];
+      for (const access of accessRows) {
+        const account = accountMap.get(access.UserID);
+        const ws = workspaceMap.get(access.WorkspaceID);
+        if (!account) issues.push(`${access.AccessID}: missing user ${access.UserID}`);
+        if (!ws) issues.push(`${access.AccessID}: missing workspace ${access.WorkspaceID}`);
+        if (account && access.Role && access.Role !== account.Role) {
+          issues.push(`${access.AccessID}: ACL role ${access.Role} != account role ${account.Role}`);
+        }
+        const active = access.Active === true || access.Active === 'TRUE' || access.Active === 1;
+        if (active && ws && ws.Status !== CONSTANTS.WORKSPACE_STATUS.ACTIVE) {
+          issues.push(`${access.AccessID}: active ACL points to ${ws.Status} workspace`);
+        }
+      }
+      addCheck(
+        'access_orphans',
+        'Workspace Access Referential Integrity',
+        issues.length === 0,
+        issues.length === 0 ? 'All ACL records reference valid users/workspaces with matching roles' : issues.join('; ')
+      );
+    } catch (e) {
+      addCheck('access_orphans', 'Workspace Access Referential Integrity', false, e.message);
+    }
+
+    // 15. Entity ID uniqueness across master and active workspaces
+    try {
+      const seen = new Map();
+      const duplicates = [];
+      const register = (id, location) => {
+        const value = String(id || '').trim();
+        if (!value) return;
+        if (seen.has(value)) duplicates.push(`${value}: ${seen.get(value)} + ${location}`);
+        else seen.set(value, location);
+      };
+
+      accounts.forEach(a => register(a.UserID, 'Accounts'));
+      workspaces.forEach(w => register(w.WorkspaceID, 'Workspaces'));
+      for (const [workspaceId, data] of workspaceData.entries()) {
+        data.clients.forEach(x => register(x.ClientID, `${workspaceId}/Clients`));
+        data.projects.forEach(x => register(x.ProjectID, `${workspaceId}/Projects`));
+        data.tasks.forEach(x => register(x.TaskID, `${workspaceId}/Tasks`));
+        data.tags.forEach(x => register(x.TagID, `${workspaceId}/Tags`));
+        data.entries.forEach(x => register(x.EntryID, `${workspaceId}/TimeEntries`));
+        data.timesheets.forEach(x => register(x.TimesheetID, `${workspaceId}/Timesheets`));
+      }
+
+      addCheck(
+        'unique_entity_ids',
+        'Entity ID Uniqueness',
+        duplicates.length === 0,
+        duplicates.length === 0 ? `${seen.size} entity IDs verified unique` : duplicates.join('; ')
+      );
+    } catch (e) {
+      addCheck('unique_entity_ids', 'Entity ID Uniqueness', false, e.message);
+    }
+
+    // 16. Capacity across Master + all active workspaces
+    let worstCapacityStatus = 'HEALTHY';
+    let totalCellCount = 0;
+    try {
+      const metrics = [JobService.getCapacityMetrics()];
+      for (const ws of activeWorkspaces) metrics.push(JobService.getCapacityMetrics(ws.WorkspaceID));
+      totalCellCount = metrics.reduce((sum, m) => sum + (m.totalCells || 0), 0);
+      const critical = metrics.filter(m => m.alertStatus === 'CRITICAL');
+      const warning = metrics.filter(m => m.alertStatus === 'WARNING');
+      const advisory = metrics.filter(m => m.alertStatus === 'ADVISORY');
+      if (critical.length) worstCapacityStatus = 'CRITICAL';
+      else if (warning.length) worstCapacityStatus = 'WARNING';
+      else if (advisory.length) worstCapacityStatus = 'ADVISORY';
+
+      addCheck(
+        'cell_capacity_limit',
+        'Google Sheets Cell Capacity',
+        critical.length === 0,
+        critical.length === 0
+          ? `Capacity status ${worstCapacityStatus}; total used cells across checked spreadsheets: ${totalCellCount}`
+          : `Critical capacity: ${critical.map(m => `${m.spreadsheetName} ${m.utilizationPct}%`).join(', ')}`
+      );
+    } catch (e) {
+      addCheck('cell_capacity_limit', 'Google Sheets Cell Capacity', false, e.message);
+      worstCapacityStatus = 'UNKNOWN';
+    }
 
     const passCount = checks.filter(c => c.passed).length;
     const failCount = checks.length - passCount;
-    const overallStatus = failCount === 0 ? 'HEALTHY' : (checks.some(c => c.id === 'cell_capacity_limit' && !c.passed) ? 'CRITICAL' : 'WARNING');
+    const overallStatus = failCount === 0
+      ? 'HEALTHY'
+      : (checks.some(c => c.id === 'cell_capacity_limit' && !c.passed) ? 'CRITICAL' : 'WARNING');
 
-    // Log to SystemHealthHistory
     try {
       MasterRepository.appendRow(CONSTANTS.MASTER_TABS.SYSTEM_HEALTH_HISTORY, {
         HealthCheckID: Validation.generateId('CHK'),
         TimestampUTC: timestamp,
         OverallStatus: overallStatus,
-        MasterDbStatus: checks.find(c => c.id === 'master_18_tabs').passed ? 'OK' : 'ERROR',
-        WorkspacesStatus: checks.find(c => c.id === 'workspace_20_tabs').passed ? 'OK' : 'ERROR',
-        ActiveTimersCount: 0,
-        CellCountApprox: cap.totalCells,
-        QuotaStatus: 'OK',
+        MasterDbStatus: checks.find(c => c.id === 'master_tabs')?.passed ? 'OK' : 'ERROR',
+        WorkspacesStatus: checks.find(c => c.id === 'workspace_tabs')?.passed ? 'OK' : 'ERROR',
+        ActiveTimersCount: activeTimerCount,
+        CellCountApprox: totalCellCount,
+        QuotaStatus: worstCapacityStatus,
         DetailsJSON: JSON.stringify({ passCount, failCount, checks })
       });
-    } catch (e) {}
+    } catch (e) {
+      console.error('Failed to record SystemHealthHistory: ' + e.message);
+    }
 
     return {
       ok: true,
@@ -248,7 +485,5 @@ const IntegrityService = {
 };
 
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = {
-    IntegrityService
-  };
+  module.exports = { IntegrityService };
 }
