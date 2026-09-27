@@ -143,6 +143,11 @@ const SheetRepository = {
     return rows;
   },
 
+  getTask(workspaceId, taskId) {
+    const { rows } = this.getTableData(workspaceId, CONSTANTS.WORKSPACE_TABS.TASKS);
+    return rows.find(t => t.TaskID === taskId) || null;
+  },
+
   createTask(workspaceId, taskData) {
     return this.appendRow(workspaceId, CONSTANTS.WORKSPACE_TABS.TASKS, taskData);
   },
@@ -150,6 +155,16 @@ const SheetRepository = {
   listTags(workspaceId) {
     const { rows } = this.getTableData(workspaceId, CONSTANTS.WORKSPACE_TABS.TAGS);
     return rows;
+  },
+
+  getTag(workspaceId, tagId) {
+    const { rows } = this.getTableData(workspaceId, CONSTANTS.WORKSPACE_TABS.TAGS);
+    return rows.find(t => t.TagID === tagId) || null;
+  },
+
+  listUserProjectAccess(workspaceId, userId) {
+    const { rows } = this.getTableData(workspaceId, CONSTANTS.WORKSPACE_TABS.USER_PROJECT_ACCESS);
+    return rows.filter(row => row.UserID === userId);
   },
 
   createTag(workspaceId, tagData) {
