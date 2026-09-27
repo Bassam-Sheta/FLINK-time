@@ -2496,11 +2496,11 @@
               <tbody>
                 ${(state.projects || []).map(p => `
                   <tr>
-                    <td><strong>${p.ProjectName}</strong></td>
-                    <td>${p.ProjectCode || '-'}</td>
-                    <td>${p.Billable ? 'YES' : 'NO'}</td>
-                    <td>$${p.HourlyRate || '0.00'}</td>
-                    <td><span class="badge badge-active">${p.Status}</span></td>
+                    <td><strong>${escapeHtml(p.ProjectName)}</strong></td>
+                    <td>${escapeHtml(p.Code || '-')}</td>
+                    <td>${(p.BillableDefault === true || p.BillableDefault === 'TRUE') ? 'YES' : 'NO'}</td>
+                    <td>${Number(p.HourlyRate || 0).toFixed(2)}</td>
+                    <td><span class="badge badge-${safeClassToken(p.Status, 'active')}">${escapeHtml(p.Status)}</span></td>
                   </tr>
                 `).join('')}
               </tbody>
@@ -2581,13 +2581,12 @@
                 <select id="newUserRole">
                   <option value="USER" selected>USER</option>
                   <option value="ADMIN">ADMIN</option>
-                  <option value="SUPER_ADMIN">SUPER_ADMIN</option>
                 </select>
               </div>
             </div>
             <div style="margin-bottom: 1.5rem;">
               <label>Temporary Password</label>
-              <input type="password" id="newUserPass" value="UserPass2026!" required>
+              <input type="password" id="newUserPass" autocomplete="new-password" required>
             </div>
             <div style="display: flex; gap: 0.75rem; justify-content: flex-end;">
               <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
@@ -2619,35 +2618,116 @@
       }
     }
 
-    function openPasswordResetWizard(userId, username) {
-      const tempPass = 'FlinkReset_' + Math.random().toString(36).substring(2, 10) + '!';
-      const modal = document.getElementById('modalContainer');
-      modal.innerHTML = `
-        <div class="modal-backdrop">
-          <div class="modal">
-            <h3 style="margin-bottom: 0.5rem;">Password Reset Wizard</h3>
-            <p style="color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 1.25rem;">Resetting credentials for <strong>${username}</strong>. Original password is never displayed.</p>
-            <div style="margin-bottom: 1rem;">
-              <label>Generated Temporary Password</label>
-              <input type="text" id="resetTempPass" value="${tempPass}" readonly style="font-family: var(--font-mono);">
-            </div>
-            <div style="margin-bottom: 1.5rem; font-size: 0.85rem; color: var(--text-secondary);">
-              <div><input type="checkbox" checked disabled> Force password update on next sign-in</div>
-              <div><input type="checkbox" checked disabled> Immediately revoke all active sessions</div>
-            </div>
-            <div style="display: flex; gap: 0.75rem; justify-content: flex-end;">
-              <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
-              <button class="btn btn-warning" onclick="submitPasswordReset('${userId}', '${tempPass}')">Confirm Reset & Copy</button>
-            </div>
-          </div>
-        </div>
-      `;
+    function generateTemporaryPassword() {
+      if (!window.crypto || !window.crypto.getRandomValues) {
+        throw new Error('Secure random password generation is unavailable in this browser.');
+      }
+      const upper = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
+      const lower = 'abcdefghijkmnopqrstuvwxyz';
+      const digits = '23456789';
+      const special = '!@#$%*_-';
+      const all = upper + lower + digits + special;
+      const bytes = new Uint32Array(18);
+      window.crypto.getRandomValues(bytes);
+
+      const required = [
+        upper[bytes[0] % upper.length],
+        lower[bytes[1] % lower.length],
+        digits[bytes[2] % digits.length],
+        special[bytes[3] % special.length]
+      ];
+      for (let i = 4; i < bytes.length; i++) {
+        required.push(all[bytes[i] % all.length]);
+      }
+      return required.join('');
     }
 
-    async function submitPasswordReset(userId, tempPassword) {
+    function openPasswordResetWizard(userId) {
+      const user = (state.users || []).find(item => item.UserID === userId);
+      if (!user) return alert('User record is not available. Refresh the Users view and try again.');
+
+      let tempPass;
+      try {
+        tempPass = generateTemporaryPassword();
+      } catch (e) {
+        return alert(e.message);
+      }
+
+      const modal = document.getElementById('modalContainer');
+      modal.replaceChildren();
+      modal.dataset.targetUserId = String(userId);
+
+      const backdrop = document.createElement('div');
+      backdrop.className = 'modal-backdrop';
+      const box = document.createElement('div');
+      box.className = 'modal';
+
+      const title = document.createElement('h3');
+      title.style.marginBottom = '0.5rem';
+      title.textContent = 'Password Reset Wizard';
+
+      const intro = document.createElement('p');
+      intro.style.color = 'var(--text-secondary)';
+      intro.style.fontSize = '0.85rem';
+      intro.style.marginBottom = '1.25rem';
+      intro.append(
+        document.createTextNode('Resetting credentials for '),
+        (() => {
+          const strong = document.createElement('strong');
+          strong.textContent = String(user.Username || user.DisplayName || userId);
+          return strong;
+        })(),
+        document.createTextNode('. Original password is never displayed.')
+      );
+
+      const field = document.createElement('div');
+      field.style.marginBottom = '1rem';
+      const label = document.createElement('label');
+      label.textContent = 'Generated Temporary Password';
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.id = 'resetTempPass';
+      input.readOnly = true;
+      input.style.fontFamily = 'var(--font-mono)';
+      input.value = tempPass;
+      field.append(label, input);
+
+      const note = document.createElement('div');
+      note.style.marginBottom = '1.5rem';
+      note.style.fontSize = '0.85rem';
+      note.style.color = 'var(--text-secondary)';
+      note.textContent = 'Password change will be forced on next sign-in and all active sessions will be revoked.';
+
+      const actions = document.createElement('div');
+      actions.style.display = 'flex';
+      actions.style.gap = '0.75rem';
+      actions.style.justifyContent = 'flex-end';
+
+      const cancel = document.createElement('button');
+      cancel.className = 'btn btn-secondary';
+      cancel.textContent = 'Cancel';
+      cancel.onclick = closeModal;
+
+      const confirm = document.createElement('button');
+      confirm.className = 'btn btn-warning';
+      confirm.textContent = 'Confirm Reset & Copy';
+      confirm.onclick = submitPasswordReset;
+
+      actions.append(cancel, confirm);
+      box.append(title, intro, field, note, actions);
+      backdrop.appendChild(box);
+      modal.appendChild(backdrop);
+    }
+
+    async function submitPasswordReset() {
+      const modal = document.getElementById('modalContainer');
+      const userId = modal.dataset.targetUserId || '';
+      const tempPassword = document.getElementById('resetTempPass')?.value || '';
+      if (!userId || !tempPassword) return alert('Password reset context is missing. Close the dialog and try again.');
+
       try {
         await apiCall('users.resetPassword', { targetUserId: userId, temporaryPassword: tempPassword });
-        navigator.clipboard.writeText(tempPassword);
+        await navigator.clipboard.writeText(tempPassword);
         alert('Password reset successfully. Temporary password copied to clipboard.');
         closeModal();
       } catch (e) {
@@ -2655,36 +2735,87 @@
       }
     }
 
-    function openDeleteWorkspaceModal(wsId, wsName) {
+    function openDeleteWorkspaceModal(wsId) {
+      const workspace = (state.workspaces || []).find(item => item.WorkspaceID === wsId);
+      if (!workspace) return alert('Workspace record is not available. Refresh and try again.');
+
       const modal = document.getElementById('modalContainer');
-      modal.innerHTML = `
-        <div class="modal-backdrop">
-          <div class="modal">
-            <h3 style="margin-bottom: 0.5rem; color: #F87171;">Dangerous Action Confirmation</h3>
-            <p style="color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 1.25rem;">
-              Archiving workspace <strong>${wsName}</strong>. Type the exact workspace name to confirm.
-            </p>
-            <div style="margin-bottom: 1rem;">
-              <label>Type "${wsName}" to confirm:</label>
-              <input type="text" id="confirmWsNameInput">
-            </div>
-            <div style="margin-bottom: 1.5rem;">
-              <label>Super Admin Password</label>
-              <input type="password" id="confirmAdminPassInput" required>
-            </div>
-            <div style="display: flex; gap: 0.75rem; justify-content: flex-end;">
-              <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
-              <button class="btn btn-danger" onclick="submitDeleteWorkspace('${wsId}', '${wsName}')">Permanently Archive</button>
-            </div>
-          </div>
-        </div>
-      `;
+      modal.replaceChildren();
+      modal.dataset.workspaceId = String(wsId);
+      modal.dataset.workspaceName = String(workspace.WorkspaceName || '');
+
+      const backdrop = document.createElement('div');
+      backdrop.className = 'modal-backdrop';
+      const box = document.createElement('div');
+      box.className = 'modal';
+
+      const title = document.createElement('h3');
+      title.style.marginBottom = '0.5rem';
+      title.style.color = '#F87171';
+      title.textContent = 'Dangerous Action Confirmation';
+
+      const intro = document.createElement('p');
+      intro.style.color = 'var(--text-secondary)';
+      intro.style.fontSize = '0.85rem';
+      intro.style.marginBottom = '1.25rem';
+      intro.append(
+        document.createTextNode('Archiving workspace '),
+        (() => {
+          const strong = document.createElement('strong');
+          strong.textContent = String(workspace.WorkspaceName || '');
+          return strong;
+        })(),
+        document.createTextNode('. Type the exact workspace name to confirm.')
+      );
+
+      const nameField = document.createElement('div');
+      nameField.style.marginBottom = '1rem';
+      const nameLabel = document.createElement('label');
+      nameLabel.textContent = 'Type "' + String(workspace.WorkspaceName || '') + '" to confirm:';
+      const nameInput = document.createElement('input');
+      nameInput.type = 'text';
+      nameInput.id = 'confirmWsNameInput';
+      nameField.append(nameLabel, nameInput);
+
+      const passField = document.createElement('div');
+      passField.style.marginBottom = '1.5rem';
+      const passLabel = document.createElement('label');
+      passLabel.textContent = 'Super Admin Password';
+      const passInput = document.createElement('input');
+      passInput.type = 'password';
+      passInput.id = 'confirmAdminPassInput';
+      passInput.autocomplete = 'current-password';
+      passField.append(passLabel, passInput);
+
+      const actions = document.createElement('div');
+      actions.style.display = 'flex';
+      actions.style.gap = '0.75rem';
+      actions.style.justifyContent = 'flex-end';
+
+      const cancel = document.createElement('button');
+      cancel.className = 'btn btn-secondary';
+      cancel.textContent = 'Cancel';
+      cancel.onclick = closeModal;
+
+      const confirm = document.createElement('button');
+      confirm.className = 'btn btn-danger';
+      confirm.textContent = 'Permanently Archive';
+      confirm.onclick = submitDeleteWorkspace;
+
+      actions.append(cancel, confirm);
+      box.append(title, intro, nameField, passField, actions);
+      backdrop.appendChild(box);
+      modal.appendChild(backdrop);
     }
 
-    async function submitDeleteWorkspace(wsId, expectedName) {
-      const inputName = document.getElementById('confirmWsNameInput').value.trim();
-      const adminPassword = document.getElementById('confirmAdminPassInput').value;
-      if (inputName !== expectedName) {
+    async function submitDeleteWorkspace() {
+      const modal = document.getElementById('modalContainer');
+      const wsId = modal.dataset.workspaceId || '';
+      const expectedName = modal.dataset.workspaceName || '';
+      const inputName = document.getElementById('confirmWsNameInput')?.value.trim() || '';
+      const adminPassword = document.getElementById('confirmAdminPassInput')?.value || '';
+
+      if (!wsId || inputName !== expectedName) {
         return alert('Workspace name does not match.');
       }
       try {
@@ -2703,7 +2834,7 @@
     }
 
     function closeModal() {
-      document.getElementById('modalContainer').innerHTML = '';
+      document.getElementById('modalContainer').replaceChildren();
     }
 
     function formatSecs(s) {
