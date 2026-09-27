@@ -765,7 +765,7 @@
   <script>
     // State Container
     const state = {
-      token: localStorage.getItem('flink_session_token') || '',
+      token: sessionStorage.getItem('flink_session_token') || '',
       user: null,
       currentWorkspace: '',
       workspaces: [],
@@ -828,7 +828,7 @@
           state.user = res.user;
           initApp();
         } catch (e) {
-          localStorage.removeItem('flink_session_token');
+          sessionStorage.removeItem('flink_session_token');
           state.token = '';
           showLogin();
         }
@@ -854,7 +854,7 @@
         const res = await apiCall('auth.login', { username, password, clientType: 'WEB' });
         state.token = res.sessionToken;
         state.user = res.user;
-        localStorage.setItem('flink_session_token', res.sessionToken);
+        sessionStorage.setItem('flink_session_token', res.sessionToken);
 
         if (res.user.mustChangePassword) {
           openPasswordChangeModal();
@@ -945,7 +945,7 @@
 
     function logout() {
       apiCall('auth.logout').catch(() => {});
-      localStorage.removeItem('flink_session_token');
+      sessionStorage.removeItem('flink_session_token');
       location.reload();
     }
 
@@ -955,9 +955,9 @@
       try {
         state.projects = await apiCall('projects.list');
         const projSelect = document.getElementById('timerProjectSelect');
-        projSelect.innerHTML = '<option value="">Select Project</option>';
+        projSelect.replaceChildren(new Option('Select Project', ''));
         state.projects.forEach(p => {
-          projSelect.innerHTML += `<option value="${p.ProjectID}">${p.ProjectName}</option>`;
+          projSelect.add(new Option(String(p.ProjectName || ''), String(p.ProjectID || '')));
         });
       } catch (e) {}
     }
@@ -965,12 +965,12 @@
     async function onTimerProjectChange() {
       const projId = document.getElementById('timerProjectSelect').value;
       const taskSelect = document.getElementById('timerTaskSelect');
-      taskSelect.innerHTML = '<option value="">Select Task (Optional)</option>';
+      taskSelect.replaceChildren(new Option('Select Task (Optional)', ''));
       if (!projId) return;
       try {
         const tasks = await apiCall('tasks.list', { projectId: projId });
         tasks.forEach(t => {
-          taskSelect.innerHTML += `<option value="${t.TaskID}">${t.TaskName}</option>`;
+          taskSelect.add(new Option(String(t.TaskName || ''), String(t.TaskID || '')));
         });
       } catch (e) {}
     }
@@ -1043,21 +1043,45 @@
       try {
         const entries = await apiCall('entries.list');
         const tbody = document.getElementById('userRecentEntriesBody');
-        tbody.innerHTML = '';
-        entries.slice(-10).reverse().forEach(e => {
-          tbody.innerHTML += `
-            <tr>
-              <td><strong>${e.ProjectID || 'General'}</strong></td>
-              <td>${e.TaskID || '-'}</td>
-              <td>${e.Description || '-'}</td>
-              <td style="font-family: var(--font-mono);">${(e.StartUTC || '').substring(11, 19)}</td>
-              <td style="font-family: var(--font-mono);">${(e.EndUTC || '').substring(11, 19)}</td>
-              <td style="font-family: var(--font-mono);">${formatSecs(e.DurationSeconds)}</td>
-              <td><span class="badge badge-${(e.ApprovalStatus || 'open').toLowerCase()}">${e.ApprovalStatus}</span></td>
-            </tr>
-          `;
+        tbody.replaceChildren();
+
+        entries.slice(-10).reverse().forEach(entry => {
+          const tr = document.createElement('tr');
+          const values = [
+            entry.ProjectID || entry.projectId || 'General',
+            entry.TaskID || entry.taskId || '-',
+            entry.Description || entry.description || '-',
+            String(entry.StartUTC || entry.startUtc || '').substring(11, 19),
+            String(entry.EndUTC || entry.endUtc || '').substring(11, 19),
+            formatSecs(Number(entry.DurationSeconds || entry.durationSeconds || 0))
+          ];
+
+          values.forEach((value, index) => {
+            const td = document.createElement('td');
+            if (index === 0) {
+              const strong = document.createElement('strong');
+              strong.textContent = String(value);
+              td.appendChild(strong);
+            } else {
+              td.textContent = String(value);
+            }
+            if (index >= 3) td.style.fontFamily = 'var(--font-mono)';
+            tr.appendChild(td);
+          });
+
+          const status = String(entry.ApprovalStatus || entry.approvalStatus || 'OPEN');
+          const statusCell = document.createElement('td');
+          const badge = document.createElement('span');
+          badge.className = 'badge badge-' + status.toLowerCase().replace(/[^a-z0-9_-]/g, '');
+          badge.textContent = status;
+          statusCell.appendChild(badge);
+          tr.appendChild(statusCell);
+
+          tbody.appendChild(tr);
         });
-      } catch (e) {}
+      } catch (e) {
+        console.error('Failed to load recent entries', e);
+      }
     }
 
     /* ------------------- WEEKLY TIMESHEET ------------------- */
@@ -1156,20 +1180,38 @@
         document.getElementById('adminPendingRequestsCount').innerText = overview.pendingRequestsCount;
 
         const radarBody = document.getElementById('adminLiveRadarBody');
-        radarBody.innerHTML = '';
-        (overview.workingNow || []).forEach(w => {
-          radarBody.innerHTML += `
-            <tr>
-              <td><strong>${w.userName}</strong></td>
-              <td>${w.workspaceName}</td>
-              <td>${w.projectName}</td>
-              <td style="font-family: var(--font-mono);">${(w.startedAtUTC || '').substring(11, 19)}</td>
-              <td style="font-family: var(--font-mono); color: #34D399;">${formatSecs(w.elapsedSeconds)}</td>
-              <td>${w.description || '-'}</td>
-            </tr>
-          `;
+        radarBody.replaceChildren();
+
+        (overview.workingNow || []).forEach(item => {
+          const tr = document.createElement('tr');
+          const values = [
+            item.userName || '',
+            item.workspaceName || '',
+            item.projectName || '',
+            String(item.startedAtUTC || '').substring(11, 19),
+            formatSecs(Number(item.elapsedSeconds || 0)),
+            item.description || '-'
+          ];
+
+          values.forEach((value, index) => {
+            const td = document.createElement('td');
+            if (index === 0) {
+              const strong = document.createElement('strong');
+              strong.textContent = String(value);
+              td.appendChild(strong);
+            } else {
+              td.textContent = String(value);
+            }
+            if (index === 3 || index === 4) td.style.fontFamily = 'var(--font-mono)';
+            if (index === 4) td.style.color = '#34D399';
+            tr.appendChild(td);
+          });
+
+          radarBody.appendChild(tr);
         });
-      } catch (e) {}
+      } catch (e) {
+        console.error('Failed to load admin dashboard', e);
+      }
     }
 
     /* ------------------- 9-STEP SETUP WIZARD ------------------- */
@@ -1464,7 +1506,7 @@
         const res = await apiCall('setup.completeStep', { step: 1, setupKey, fullName, username, password, confirmPassword });
         state.token = res.sessionToken;
         state.user = res.user;
-        localStorage.setItem('flink_session_token', res.sessionToken);
+        sessionStorage.setItem('flink_session_token', res.sessionToken);
         renderWizardStep(2);
       } catch (e) {
         alert(e.message || 'Failed to initialize Super Admin.');
