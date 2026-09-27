@@ -7,7 +7,15 @@
 const ClientService = {
   listClients(authContext, workspaceId) {
     AuthorizationService.assertWorkspaceAccess(authContext, workspaceId);
-    return SheetRepository.listClients(workspaceId);
+    const clients = SheetRepository.listClients(workspaceId);
+    if (authContext.role !== CONSTANTS.ROLES.USER) return clients;
+    return clients
+      .filter(client => String(client.Status || '').toUpperCase() === 'ACTIVE')
+      .map(client => ({
+        ClientID: client.ClientID,
+        ClientName: client.ClientName,
+        Status: client.Status
+      }));
   },
 
   createClient(authContext, workspaceId, clientPayload) {
@@ -42,8 +50,19 @@ const ClientService = {
 const ProjectService = {
   listProjects(authContext, workspaceId) {
     AuthorizationService.assertWorkspaceAccess(authContext, workspaceId);
-    const projects = SheetRepository.listProjects(workspaceId);
+    let projects = SheetRepository.listProjects(workspaceId);
     if (authContext.role !== CONSTANTS.ROLES.USER) return projects;
+
+    const assignments = SheetRepository.listUserProjectAccess(workspaceId, authContext.userId);
+    if (assignments.length > 0) {
+      const allowedIds = new Set(
+        assignments
+          .filter(row => TrackingPolicyService._toBoolean(row.CanTrack, false))
+          .map(row => row.ProjectID)
+      );
+      projects = projects.filter(project => allowedIds.has(project.ProjectID));
+    }
+    projects = projects.filter(project => String(project.Status || '').toUpperCase() === 'ACTIVE');
 
     // USER-facing DTO deliberately excludes rates, costs, budgets, and internal notes.
     return projects.map(p => ({
@@ -65,6 +84,11 @@ const ProjectService = {
     const project = SheetRepository.getProject(workspaceId, projectId);
     if (!project || authContext.role !== CONSTANTS.ROLES.USER) return project;
 
+    if (String(project.Status || '').toUpperCase() !== 'ACTIVE') {
+      throw new AppError(ERROR_CODES.NOT_FOUND, 'Project is not active.', 404);
+    }
+    TrackingPolicyService.assertProjectAccess(authContext, workspaceId, projectId);
+
     return {
       ProjectID: project.ProjectID,
       ClientID: project.ClientID,
@@ -84,10 +108,19 @@ const ProjectService = {
     AuthorizationService.assertRole(authContext, [CONSTANTS.ROLES.SUPER_ADMIN, CONSTANTS.ROLES.ADMIN]);
     Validation.assertRequired(payload, ['projectName']);
 
+    const clientId = payload.clientId ? String(payload.clientId).trim() : '';
+    if (clientId) {
+      const client = SheetRepository.getClient(workspaceId, clientId);
+      if (!client) throw new AppError(ERROR_CODES.NOT_FOUND, `Client ${clientId} not found.`, 404);
+      if (String(client.Status || '').toUpperCase() !== 'ACTIVE') {
+        throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'Selected client is not active.', 400);
+      }
+    }
+
     const projectId = Validation.generateId('PRJ');
     const projectRecord = {
       ProjectID: projectId,
-      ClientID: payload.clientId || 'cli_internal',
+      ClientID: clientId,
       ProjectName: Validation.sanitizeCellValue(payload.projectName.trim()),
       Code: payload.code ? Validation.sanitizeCellValue(payload.code.trim()) : '',
       Status: 'ACTIVE',
@@ -148,13 +181,43 @@ const ProjectService = {
 const TaskService = {
   listTasks(authContext, workspaceId, projectId = null) {
     AuthorizationService.assertWorkspaceAccess(authContext, workspaceId);
-    return SheetRepository.listTasks(workspaceId, projectId);
+
+    if (authContext.role !== CONSTANTS.ROLES.USER) {
+      return SheetRepository.listTasks(workspaceId, projectId);
+    }
+
+    let allowedProjectIds = null;
+    const assignments = SheetRepository.listUserProjectAccess(workspaceId, authContext.userId);
+    if (assignments.length > 0) {
+      allowedProjectIds = new Set(
+        assignments
+          .filter(row => TrackingPolicyService._toBoolean(row.CanTrack, false))
+          .map(row => row.ProjectID)
+      );
+    }
+
+    if (projectId) {
+      const project = SheetRepository.getProject(workspaceId, projectId);
+      if (!project || String(project.Status || '').toUpperCase() !== 'ACTIVE') return [];
+      TrackingPolicyService.assertProjectAccess(authContext, workspaceId, projectId);
+    }
+
+    return SheetRepository.listTasks(workspaceId, projectId).filter(task => {
+      if (allowedProjectIds && !allowedProjectIds.has(task.ProjectID)) return false;
+      return ['OPEN', 'ACTIVE'].includes(String(task.Status || '').toUpperCase());
+    });
   },
 
   createTask(authContext, workspaceId, payload) {
     AuthorizationService.assertWorkspaceAccess(authContext, workspaceId);
     AuthorizationService.assertRole(authContext, [CONSTANTS.ROLES.SUPER_ADMIN, CONSTANTS.ROLES.ADMIN]);
     Validation.assertRequired(payload, ['projectId', 'taskName']);
+
+    const project = SheetRepository.getProject(workspaceId, payload.projectId);
+    if (!project) throw new AppError(ERROR_CODES.NOT_FOUND, `Project ${payload.projectId} not found.`, 404);
+    if (String(project.Status || '').toUpperCase() !== 'ACTIVE') {
+      throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'Tasks can only be added to active projects.', 400);
+    }
 
     const taskId = Validation.generateId('TSK');
     const taskRecord = {
@@ -185,7 +248,9 @@ const TaskService = {
 const TagService = {
   listTags(authContext, workspaceId) {
     AuthorizationService.assertWorkspaceAccess(authContext, workspaceId);
-    return SheetRepository.listTags(workspaceId);
+    const tags = SheetRepository.listTags(workspaceId);
+    if (authContext.role !== CONSTANTS.ROLES.USER) return tags;
+    return tags.filter(tag => String(tag.Status || '').toUpperCase() === 'ACTIVE');
   },
 
   createTag(authContext, workspaceId, payload) {
