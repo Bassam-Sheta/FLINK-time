@@ -32,18 +32,29 @@ const AuthorizationService = {
       throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'Workspace ID is required.');
     }
 
-    // Super Admin has global access to all workspaces
+    const workspace = MasterRepository.getWorkspace(requestedWorkspaceId);
+    if (!workspace) {
+      throw new AppError(ERROR_CODES.WORKSPACE_NOT_FOUND, `Workspace '${requestedWorkspaceId}' does not exist.`, 404);
+    }
+    if (workspace.Status !== CONSTANTS.WORKSPACE_STATUS.ACTIVE) {
+      throw new AppError(
+        ERROR_CODES.WORKSPACE_DENIED,
+        `Workspace '${requestedWorkspaceId}' is not active (${workspace.Status}).`,
+        403
+      );
+    }
+
+    // Super Admin has global access to active workspaces.
     if (authContext.role === CONSTANTS.ROLES.SUPER_ADMIN) {
       return true;
     }
 
+    // Authorization is based only on active WorkspaceAccess mappings.
+    // PrimaryWorkspaceID is profile/default-selection metadata, not an ACL.
     const accesses = MasterRepository.getWorkspaceAccessForUser(authContext.userId);
     const hasAccess = accesses.some(a => a.WorkspaceID === requestedWorkspaceId);
 
-    // Also check PrimaryWorkspaceID for regular users
-    const isPrimary = authContext.user && authContext.user.PrimaryWorkspaceID === requestedWorkspaceId;
-
-    if (!hasAccess && !isPrimary) {
+    if (!hasAccess) {
       throw new AppError(
         ERROR_CODES.WORKSPACE_DENIED,
         `Access to workspace '${requestedWorkspaceId}' is denied for user '${authContext.user.Username}'.`,
