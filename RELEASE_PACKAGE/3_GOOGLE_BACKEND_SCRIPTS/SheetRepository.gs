@@ -111,6 +111,11 @@ const SheetRepository = {
     return rows;
   },
 
+  getClient(workspaceId, clientId) {
+    const { rows } = this.getTableData(workspaceId, CONSTANTS.WORKSPACE_TABS.CLIENTS);
+    return rows.find(client => client.ClientID === clientId) || null;
+  },
+
   createClient(workspaceId, clientData) {
     return this.appendRow(workspaceId, CONSTANTS.WORKSPACE_TABS.CLIENTS, clientData);
   },
