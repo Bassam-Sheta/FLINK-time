@@ -5,6 +5,37 @@
  */
 
 const UserService = {
+  _toUserDTO(user, assignedWorkspaceIds = [], detailLevel = 'SELF') {
+    if (!user) return null;
+
+    const dto = {
+      UserID: user.UserID,
+      Username: user.Username,
+      DisplayName: user.DisplayName,
+      Role: user.Role,
+      Status: user.Status,
+      PrimaryWorkspaceID: user.PrimaryWorkspaceID || '',
+      Email: user.Email || '',
+      EmployeeCode: user.EmployeeCode || '',
+      AssignedWorkspaceIDs: Array.isArray(assignedWorkspaceIds)
+        ? assignedWorkspaceIds
+        : []
+    };
+
+    if (detailLevel === 'SUPER_ADMIN') {
+      dto.CreatedAt = user.CreatedAt || '';
+      dto.CreatedBy = user.CreatedBy || '';
+      dto.UpdatedAt = user.UpdatedAt || '';
+      dto.UpdatedBy = user.UpdatedBy || '';
+      dto.LastLoginAt = user.LastLoginAt || '';
+      dto.MustChangePassword =
+        user.MustChangePassword === true || user.MustChangePassword === 'TRUE';
+      dto.Version = parseInt(user.Version, 10) || 1;
+    }
+
+    return dto;
+  },
+
   /**
    * Super Admin creates a new user account with initial salted credentials
    */
@@ -374,13 +405,16 @@ const UserService = {
    */
   listUsers(authContext, workspaceId = null) {
     const { rows } = MasterRepository.getTableData(CONSTANTS.MASTER_TABS.ACCOUNTS);
+    const { rows: allAccessRows } = MasterRepository.getTableData(CONSTANTS.MASTER_TABS.WORKSPACE_ACCESS);
+    const activeAccessRows = allAccessRows.filter(a =>
+      a.Active === true || a.Active === 'TRUE' || a.Active === 1
+    );
+
+    const assignedIdsFor = userId => activeAccessRows
+      .filter(a => a.UserID === userId)
+      .map(a => a.WorkspaceID);
 
     if (authContext.role === CONSTANTS.ROLES.SUPER_ADMIN) {
-      const { rows: allAccessRows } = MasterRepository.getTableData(CONSTANTS.MASTER_TABS.WORKSPACE_ACCESS);
-      const activeAccessRows = allAccessRows.filter(a =>
-        a.Active === true || a.Active === 'TRUE' || a.Active === 1
-      );
-
       let visibleRows = rows;
       if (workspaceId) {
         const userIds = new Set(
@@ -391,30 +425,40 @@ const UserService = {
         visibleRows = rows.filter(u => userIds.has(u.UserID));
       }
 
-      return visibleRows.map(user => ({
-        ...user,
-        AssignedWorkspaceIDs: activeAccessRows
-          .filter(a => a.UserID === user.UserID)
-          .map(a => a.WorkspaceID)
-      }));
+      return visibleRows.map(user =>
+        this._toUserDTO(user, assignedIdsFor(user.UserID), 'SUPER_ADMIN')
+      );
     }
 
     if (authContext.role === CONSTANTS.ROLES.ADMIN) {
-      const adminAccesses = MasterRepository.getWorkspaceAccessForUser(authContext.userId);
-      const adminWorkspaceIds = adminAccesses.map(a => a.WorkspaceID);
+      const adminWorkspaceIds = MasterRepository
+        .getWorkspaceAccessForUser(authContext.userId)
+        .map(a => a.WorkspaceID);
       const targetWorkspace = workspaceId || adminWorkspaceIds[0];
 
       if (!targetWorkspace || !adminWorkspaceIds.includes(targetWorkspace)) {
-        throw new AppError(ERROR_CODES.WORKSPACE_DENIED, 'Access denied to requested workspace users.', 403);
+        throw new AppError(
+          ERROR_CODES.WORKSPACE_DENIED,
+          'Access denied to requested workspace users.',
+          403
+        );
       }
 
-      const teamAccesses = MasterRepository.getWorkspaceAccessForWorkspace(targetWorkspace);
-      const teamUserIds = new Set(teamAccesses.map(a => a.UserID));
-      return rows.filter(u => teamUserIds.has(u.UserID));
+      const teamUserIds = new Set(
+        activeAccessRows
+          .filter(a => a.WorkspaceID === targetWorkspace)
+          .map(a => a.UserID)
+      );
+
+      return rows
+        .filter(u => teamUserIds.has(u.UserID))
+        .map(user => this._toUserDTO(user, assignedIdsFor(user.UserID), 'ADMIN'));
     }
 
-    // Regular users can only see their own profile.
-    return rows.filter(u => u.UserID === authContext.userId);
+    const self = rows.find(u => u.UserID === authContext.userId);
+    return self
+      ? [this._toUserDTO(self, assignedIdsFor(self.UserID), 'SELF')]
+      : [];
   }
 };
 
