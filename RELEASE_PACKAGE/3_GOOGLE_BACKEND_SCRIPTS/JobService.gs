@@ -85,28 +85,98 @@ const JobService = {
     };
   },
 
+  _beginJobExecution() {
+    if (typeof MasterRepository !== 'undefined' && MasterRepository.beginRequest) {
+      MasterRepository.beginRequest();
+    }
+    if (typeof SheetRepository !== 'undefined' && SheetRepository.beginRequest) {
+      SheetRepository.beginRequest();
+    }
+    if (typeof WorkspaceRouter !== 'undefined' && WorkspaceRouter.clearCache) {
+      WorkspaceRouter.clearCache();
+    }
+  },
+
   /**
    * Central Housekeeping Dispatcher
    * Cleans up expired sessions, archives stale cache, and logs execution.
    */
   dispatchHousekeeping() {
+    this._beginJobExecution();
     const runId = Validation.generateId('RUN');
     const startMs = Date.now();
     let expiredSessionsCount = 0;
+    let purgedSessionsCount = 0;
+    let purgedMfaChallengesCount = 0;
 
     try {
       const { rows: sessions } = MasterRepository.getTableData(CONSTANTS.MASTER_TABS.SESSIONS);
       const now = Date.now();
       const nowIso = new Date().toISOString();
+      const retentionMs =
+        (CONSTANTS.LIMITS.SESSION_RETENTION_DAYS || 30) * 24 * 3600 * 1000;
+      const retentionCutoff = now - retentionMs;
 
       for (const s of sessions) {
-        if (!s.Revoked && new Date(s.ExpiresAt).getTime() <= now) {
+        const expiresMs = new Date(s.ExpiresAt).getTime();
+        const revoked =
+          s.Revoked === true || s.Revoked === 'TRUE' || s.Revoked === 1;
+
+        if (!revoked && !isNaN(expiresMs) && expiresMs <= now) {
           MasterRepository.updateRow(CONSTANTS.MASTER_TABS.SESSIONS, s._rowIndex, {
             Revoked: true,
             RevokedAt: nowIso,
             RevokeReason: 'EXPIRED_IDLE_TIMEOUT'
           });
           expiredSessionsCount++;
+        }
+      }
+
+      // Purge only old, already-invalid session rows; security/audit events remain
+      // in their dedicated logs.
+      const refreshedSessions =
+        MasterRepository.getTableData(CONSTANTS.MASTER_TABS.SESSIONS).rows || [];
+      const purgeRows = refreshedSessions
+        .filter(s => {
+          const revoked =
+            s.Revoked === true || s.Revoked === 'TRUE' || s.Revoked === 1;
+          const revokedAt = new Date(s.RevokedAt || '').getTime();
+          const expiresAt = new Date(s.ExpiresAt || '').getTime();
+          const oldEnough =
+            (!isNaN(revokedAt) && revokedAt < retentionCutoff) ||
+            (!isNaN(expiresAt) && expiresAt < retentionCutoff);
+          return revoked && oldEnough;
+        })
+        .sort((a, b) => b._rowIndex - a._rowIndex);
+
+      for (const session of purgeRows) {
+        MasterRepository.deleteRow(
+          CONSTANTS.MASTER_TABS.SESSIONS,
+          session._rowIndex
+        );
+        purgedSessionsCount++;
+      }
+
+      // MFA challenges are one-per-user, but failed/abandoned challenges should
+      // not occupy Script Properties forever.
+      if (
+        typeof PropertiesService !== 'undefined' &&
+        PropertiesService.getScriptProperties
+      ) {
+        const props = PropertiesService.getScriptProperties();
+        const all = props.getProperties();
+        for (const [key, raw] of Object.entries(all)) {
+          if (!key.startsWith('FLINK_MFA_CHALLENGE_')) continue;
+          try {
+            const challenge = JSON.parse(raw);
+            if (Number(challenge.expiresAtMs || 0) < now) {
+              props.deleteProperty(key);
+              purgedMfaChallengesCount++;
+            }
+          } catch (e) {
+            props.deleteProperty(key);
+            purgedMfaChallengesCount++;
+          }
         }
       }
 
@@ -118,12 +188,19 @@ const JobService = {
         StartedAt: new Date(startMs).toISOString(),
         EndedAt: new Date().toISOString(),
         DurationMs: Date.now() - startMs,
-        ItemsProcessed: expiredSessionsCount,
+        ItemsProcessed:
+          expiredSessionsCount + purgedSessionsCount + purgedMfaChallengesCount,
         Status: CONSTANTS.JOB_STATUS.COMPLETED,
-        LogDetails: `Housekeeping pruned ${expiredSessionsCount} expired sessions.`
+        LogDetails:
+          `Housekeeping revoked ${expiredSessionsCount} expired sessions, purged ${purgedSessionsCount} retained session rows, and removed ${purgedMfaChallengesCount} stale MFA challenges.`
       });
 
-      return { ok: true, expiredSessionsCount };
+      return {
+        ok: true,
+        expiredSessionsCount,
+        purgedSessionsCount,
+        purgedMfaChallengesCount
+      };
     } catch (e) {
       this.logJobRun({
         RunID: runId,
@@ -146,6 +223,7 @@ const JobService = {
    * Synchronizes precomputed daily, weekly, monthly, and project rollups for all active workspaces.
    */
   dispatchRollups() {
+    this._beginJobExecution();
     const runId = Validation.generateId('RUN');
     const startMs = Date.now();
     const workspaces = MasterRepository.listWorkspaces();
