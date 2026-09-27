@@ -688,7 +688,19 @@ const AuditService = {
     let previousHash = '0000000000000000000000000000000000000000000000000000000000000000';
     for (let i = 0; i < rows.length; i++) {
       const row = rows[i];
-      if (row.PreviousHash && row.PreviousHash !== previousHash) {
+
+      if (!row.AuditID || !row.TimestampUTC || !row.PreviousHash || !row.RecordHash) {
+        return {
+          ok: false,
+          verified: false,
+          brokenAtIndex: i,
+          auditId: row.AuditID || '',
+          message:
+            `Audit chain is incomplete at record index ${i}: required identity/timestamp/hash fields are missing.`
+        };
+      }
+
+      if (row.PreviousHash !== previousHash) {
         return {
           ok: false,
           verified: false,
@@ -700,28 +712,26 @@ const AuditService = {
         };
       }
 
-      if (row.RecordHash) {
-        const recordPayload = {
+      const recordPayload = {
+        auditId: row.AuditID,
+        timestamp: row.TimestampUTC,
+        actor: row.ActorUserID || '',
+        action: row.Action,
+        entityType: row.EntityType,
+        entityId: row.EntityID,
+        after: typeof row.AfterJSON === 'object' ? JSON.stringify(row.AfterJSON) : (row.AfterJSON || '')
+      };
+      const computedHash = SecurityService.computeAuditHash(row.PreviousHash, recordPayload);
+      if (!SecurityService.constantTimeEquals(computedHash, row.RecordHash)) {
+        return {
+          ok: false,
+          verified: false,
+          brokenAtIndex: i,
           auditId: row.AuditID,
-          timestamp: row.TimestampUTC,
-          actor: row.ActorUserID || '',
-          action: row.Action,
-          entityType: row.EntityType,
-          entityId: row.EntityID,
-          after: typeof row.AfterJSON === 'object' ? JSON.stringify(row.AfterJSON) : (row.AfterJSON || '')
+          message: `Tamper detected: Record HMAC mismatch at record index ${i} (${row.AuditID}).`
         };
-        const computedHash = SecurityService.computeAuditHash(row.PreviousHash || previousHash, recordPayload);
-        if (!SecurityService.constantTimeEquals(computedHash, row.RecordHash)) {
-          return {
-            ok: false,
-            verified: false,
-            brokenAtIndex: i,
-            auditId: row.AuditID,
-            message: `Tamper detected: Record HMAC mismatch at record index ${i} (${row.AuditID}).`
-          };
-        }
-        previousHash = row.RecordHash;
       }
+      previousHash = row.RecordHash;
     }
 
     // Check against external checkpoints if available
