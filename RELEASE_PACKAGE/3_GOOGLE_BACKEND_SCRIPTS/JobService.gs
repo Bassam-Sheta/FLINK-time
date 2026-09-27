@@ -152,7 +152,7 @@ const JobService = {
     const results = [];
 
     for (const ws of workspaces) {
-      if (ws.Status === CONSTANTS.WORKSPACE_STATUS.ARCHIVED) continue;
+      if (ws.Status !== CONSTANTS.WORKSPACE_STATUS.ACTIVE) continue;
       try {
         const res = RollupService.rebuildRollups(ws.WorkspaceID);
         results.push({ workspaceId: ws.WorkspaceID, name: ws.WorkspaceName, ok: true, rollups: res });
