@@ -5,6 +5,31 @@
  */
 
 const WorkspaceService = {
+  _toWorkspaceDTO(workspace, includePhysicalIds = false) {
+    if (!workspace) return null;
+    const dto = {
+      WorkspaceID: workspace.WorkspaceID,
+      WorkspaceCode: workspace.WorkspaceCode || '',
+      WorkspaceName: workspace.WorkspaceName,
+      Status: workspace.Status,
+      Timezone: workspace.Timezone || 'UTC',
+      SchemaVersion: workspace.SchemaVersion || CONSTANTS.SCHEMA_VERSION,
+      CreatedAt: workspace.CreatedAt || ''
+    };
+
+    if (includePhysicalIds) {
+      dto.SpreadsheetID = workspace.SpreadsheetID || '';
+      dto.DriveFolderID = workspace.DriveFolderID || '';
+      dto.CreatedBy = workspace.CreatedBy || '';
+      dto.ArchivedAt = workspace.ArchivedAt || '';
+      dto.PartitionPolicy = workspace.PartitionPolicy || '';
+      dto.CurrentPartition = workspace.CurrentPartition || '';
+      dto.Version = workspace.Version || 1;
+    }
+
+    return dto;
+  },
+
   /**
    * Super Admin creates and provisions a new isolated workspace
    */
@@ -285,16 +310,22 @@ const WorkspaceService = {
    * Lists workspaces accessible to authenticated user
    */
   listWorkspaces(authContext) {
-    const allWorkspaces = MasterRepository.listWorkspaces().filter(w => w.Status !== CONSTANTS.WORKSPACE_STATUS.ARCHIVED);
+    const allWorkspaces = MasterRepository
+      .listWorkspaces()
+      .filter(w => w.Status !== CONSTANTS.WORKSPACE_STATUS.ARCHIVED);
 
     if (authContext.role === CONSTANTS.ROLES.SUPER_ADMIN) {
-      return allWorkspaces;
+      return allWorkspaces.map(w => this._toWorkspaceDTO(w, true));
     }
 
     const accesses = MasterRepository.getWorkspaceAccessForUser(authContext.userId);
     const allowedIds = new Set(accesses.map(a => a.WorkspaceID));
 
-    return allWorkspaces.filter(w => allowedIds.has(w.WorkspaceID));
+    // Physical spreadsheet/folder IDs are infrastructure metadata and are never
+    // required by Admin/User clients.
+    return allWorkspaces
+      .filter(w => allowedIds.has(w.WorkspaceID))
+      .map(w => this._toWorkspaceDTO(w, false));
   }
 };
 
