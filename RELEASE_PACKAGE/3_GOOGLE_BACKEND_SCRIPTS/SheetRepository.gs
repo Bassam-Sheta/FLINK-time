@@ -61,13 +61,34 @@ const SheetRepository = {
   updateRow(workspaceId, tabName, rowIndex, updates) {
     const ss = WorkspaceRouter.resolveSpreadsheet(workspaceId);
     const sheet = ss.getSheetByName(tabName);
-    const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(h => String(h).trim());
+    const headers = sheet
+      .getRange(1, 1, 1, sheet.getLastColumn())
+      .getValues()[0]
+      .map(h => String(h).trim());
 
-    for (const [colName, val] of Object.entries(updates)) {
-      const colIdx = headers.indexOf(colName);
-      if (colIdx !== -1) {
-        sheet.getRange(rowIndex, colIdx + 1).setValue(Validation.sanitizeCellValue(val));
+    const changes = Object.entries(updates)
+      .map(([colName, val]) => ({
+        colIdx: headers.indexOf(colName),
+        value: Validation.sanitizeCellValue(val)
+      }))
+      .filter(change => change.colIdx >= 0)
+      .sort((a, b) => a.colIdx - b.colIdx);
+
+    for (let i = 0; i < changes.length;) {
+      const group = [changes[i]];
+      let j = i + 1;
+      while (
+        j < changes.length &&
+        changes[j].colIdx === group[group.length - 1].colIdx + 1
+      ) {
+        group.push(changes[j]);
+        j++;
       }
+
+      sheet
+        .getRange(rowIndex, group[0].colIdx + 1, 1, group.length)
+        .setValues([group.map(change => change.value)]);
+      i = j;
     }
   },
 
