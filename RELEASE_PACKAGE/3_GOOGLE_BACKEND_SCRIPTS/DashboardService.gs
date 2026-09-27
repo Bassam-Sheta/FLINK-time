@@ -76,11 +76,14 @@ const DashboardService = {
     let totalTrackedSecondsToday = 0;
     let totalTrackedSecondsThisWeek = 0;
     let pendingApprovalsCount = 0;
-    const todayStr = new Date().toISOString().substring(0, 10);
 
     for (const ws of targetWorkspaces) {
       try {
-        // Read fast from DailyRollups
+        const now = new Date();
+        const todayStr = TimezoneService.formatDateKey(ws.WorkspaceID, now);
+        const currentWeek = TimezoneService.getWeekBounds(ws.WorkspaceID, now);
+
+        // Read fast from DailyRollups for the workspace-local business date.
         const { rows: dailyRollups } = SheetRepository.getTableData(ws.WorkspaceID, CONSTANTS.WORKSPACE_TABS.DAILY_ROLLUPS);
         for (const r of dailyRollups) {
           if (authContext.role === CONSTANTS.ROLES.USER && r.UserID !== authContext.userId) continue;
@@ -89,11 +92,13 @@ const DashboardService = {
           }
         }
 
-        // Read fast from WeeklyRollups
+        // Count only the current workspace-local week; do not sum historical weeks.
         const { rows: weeklyRollups } = SheetRepository.getTableData(ws.WorkspaceID, CONSTANTS.WORKSPACE_TABS.WEEKLY_ROLLUPS);
         for (const r of weeklyRollups) {
           if (authContext.role === CONSTANTS.ROLES.USER && r.UserID !== authContext.userId) continue;
-          totalTrackedSecondsThisWeek += parseInt(r.TotalSeconds, 10) || 0;
+          if (r.WeekStart === currentWeek.startLocalDate) {
+            totalTrackedSecondsThisWeek += parseInt(r.TotalSeconds, 10) || 0;
+          }
         }
 
         // Count pending timesheets
