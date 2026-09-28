@@ -39,16 +39,35 @@ const TrackingPolicyService = {
     return [...new Set(values.map(v => String(v).trim()).filter(Boolean))];
   },
 
+  getProjectAccessState(authContext, workspaceId) {
+    if (authContext.role !== CONSTANTS.ROLES.USER) {
+      return { aclEnabled: false, allowedProjectIds: null };
+    }
+
+    const allAssignments = SheetRepository.listAllUserProjectAccess(workspaceId);
+    if (allAssignments.length === 0) {
+      return { aclEnabled: false, allowedProjectIds: null };
+    }
+
+    const allowedProjectIds = new Set(
+      allAssignments
+        .filter(row =>
+          row.UserID === authContext.userId &&
+          this._toBoolean(row.CanTrack, false)
+        )
+        .map(row => row.ProjectID)
+    );
+
+    return { aclEnabled: true, allowedProjectIds };
+  },
+
   assertProjectAccess(authContext, workspaceId, projectId) {
     if (!projectId || authContext.role !== CONSTANTS.ROLES.USER) return true;
 
-    const assignments = SheetRepository.listUserProjectAccess(workspaceId, authContext.userId);
-    // Backwards-compatible default: if no project ACLs exist for this user, active projects are available.
-    if (assignments.length === 0) return true;
+    const state = this.getProjectAccessState(authContext, workspaceId);
+    if (!state.aclEnabled) return true;
 
-    const assignment = assignments.find(row => row.ProjectID === projectId);
-    const canTrack = assignment && this._toBoolean(assignment.CanTrack, false);
-    if (!canTrack) {
+    if (!state.allowedProjectIds.has(projectId)) {
       throw new AppError(
         ERROR_CODES.PERMISSION_DENIED,
         'You are not authorized to track time against the selected project.',
