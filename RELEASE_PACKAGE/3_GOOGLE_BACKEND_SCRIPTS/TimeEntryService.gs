@@ -148,7 +148,6 @@ const TimeEntryService = {
       if (!entry) throw new AppError(ERROR_CODES.NOT_FOUND, `Time entry ${entryId} not found.`);
 
       AuthorizationService.assertRecordOwnership(authContext, entry.UserID);
-      Validation.assertRecordVersion(entry, expectedVersion);
       if (authContext.role === CONSTANTS.ROLES.USER) {
         TrackingPolicyService.assertEntryEditableByAge(workspaceId, entry);
       }
@@ -348,6 +347,7 @@ const TimeEntryService = {
       if (!entry) throw new AppError(ERROR_CODES.NOT_FOUND, `Time entry ${entryId} not found.`);
 
       AuthorizationService.assertRecordOwnership(authContext, entry.UserID);
+      Validation.assertRecordVersion(entry, expectedVersion);
       if (authContext.role === CONSTANTS.ROLES.USER) {
         TrackingPolicyService.assertEntryEditableByAge(workspaceId, entry);
       }
