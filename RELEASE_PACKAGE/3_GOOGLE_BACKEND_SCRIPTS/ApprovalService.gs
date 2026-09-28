@@ -10,54 +10,142 @@ const ApprovalService = {
    * Legacy submitted sheets without a snapshot fall back only to entries already
    * carrying the same TimesheetID; never to unassigned entries in the date range.
    */
+  _assertTransition(fromStatus, toStatus) {
+    const from = String(fromStatus || '').toUpperCase();
+    const to = String(toStatus || '').toUpperCase();
+    const allowed = (CONSTANTS.TIMESHEET_TRANSITIONS &&
+      CONSTANTS.TIMESHEET_TRANSITIONS[from]) || [];
+    if (!allowed.includes(to)) {
+      throw new AppError(
+        ERROR_CODES.CONFLICT,
+        `Invalid timesheet state transition: ${from || 'UNKNOWN'} -> ${to || 'UNKNOWN'}.`,
+        409
+      );
+    }
+    return true;
+  },
+
+  _restoreTimesheetHeader(workspaceId, timesheet) {
+    SheetRepository.updateTimesheet(workspaceId, timesheet.TimesheetID, {
+      Status: timesheet.Status,
+      SubmittedAt: timesheet.SubmittedAt || '',
+      ReviewedBy: timesheet.ReviewedBy || '',
+      ReviewedAt: timesheet.ReviewedAt || '',
+      ReviewComment: timesheet.ReviewComment || '',
+      LockedAt: timesheet.LockedAt || '',
+      EntrySnapshotJSON: timesheet.EntrySnapshotJSON || '',
+      TotalSeconds: parseInt(timesheet.TotalSeconds, 10) || 0
+    });
+  },
+
+  /**
+   * Resolve and verify the exact immutable entry membership captured at submission.
+   * Missing snapshots fail closed: pre-snapshot legacy submissions must be reopened
+   * and resubmitted rather than approved from an unverifiable date range.
+   */
   _resolveSubmissionEntries(workspaceId, timesheet) {
-    let snapshot = [];
-    if (timesheet.EntrySnapshotJSON) {
-      try {
-        const parsed = JSON.parse(timesheet.EntrySnapshotJSON);
-        if (Array.isArray(parsed)) snapshot = parsed;
-      } catch (e) {
-        throw new AppError(ERROR_CODES.CONFLICT, 'Timesheet submission snapshot is malformed.', 409);
-      }
+    if (!timesheet.EntrySnapshotJSON) {
+      throw new AppError(
+        ERROR_CODES.CONFLICT,
+        'Timesheet has no immutable submission snapshot. Reopen and resubmit it before review.',
+        409
+      );
     }
 
-    if (snapshot.length > 0) {
-      const entries = [];
-      for (const item of snapshot) {
-        const entry = SheetRepository.getEntry(workspaceId, item.entryId);
-        if (!entry) {
-          throw new AppError(ERROR_CODES.CONFLICT, `Submitted entry ${item.entryId} no longer exists.`, 409);
-        }
-        if (entry.TimesheetID !== timesheet.TimesheetID) {
-          throw new AppError(ERROR_CODES.CONFLICT, `Submitted entry ${item.entryId} is no longer bound to this timesheet.`, 409);
-        }
-        const currentVersion = parseInt(entry.Version, 10) || 1;
-        const currentDuration = parseInt(entry.DurationSeconds, 10) || 0;
-        if (
-          currentVersion !== (parseInt(item.version, 10) || 1) ||
-          currentDuration !== (parseInt(item.durationSeconds, 10) || 0)
-        ) {
-          throw new AppError(
-            ERROR_CODES.CONFLICT,
-            `Submitted entry ${item.entryId} changed after submission. Reopen/resubmit before review.`,
-            409
-          );
-        }
-        entries.push(entry);
-      }
-      return entries;
+    let snapshot;
+    try {
+      snapshot = JSON.parse(timesheet.EntrySnapshotJSON);
+    } catch (e) {
+      throw new AppError(ERROR_CODES.CONFLICT, 'Timesheet submission snapshot is malformed.', 409);
+    }
+    if (!Array.isArray(snapshot) || snapshot.length === 0) {
+      throw new AppError(ERROR_CODES.CONFLICT, 'Timesheet submission snapshot is empty or invalid.', 409);
     }
 
-    const legacyEntries = SheetRepository.listTimeEntries(workspaceId, {
+    const snapshotIds = new Set();
+    const entries = [];
+    let snapshotTotalSeconds = 0;
+
+    for (const item of snapshot) {
+      const entryId = String(item && item.entryId || '');
+      if (!entryId || snapshotIds.has(entryId)) {
+        throw new AppError(
+          ERROR_CODES.CONFLICT,
+          'Timesheet submission snapshot contains duplicate or missing entry IDs.',
+          409
+        );
+      }
+      snapshotIds.add(entryId);
+
+      const entry = SheetRepository.getEntry(workspaceId, entryId);
+      if (!entry) {
+        throw new AppError(ERROR_CODES.CONFLICT, `Submitted entry ${entryId} no longer exists.`, 409);
+      }
+      if (entry.UserID !== timesheet.UserID) {
+        throw new AppError(ERROR_CODES.CONFLICT, `Submitted entry ${entryId} belongs to another user.`, 409);
+      }
+      if (entry.TimesheetID !== timesheet.TimesheetID) {
+        throw new AppError(ERROR_CODES.CONFLICT, `Submitted entry ${entryId} is no longer bound to this timesheet.`, 409);
+      }
+
+      const currentBillable =
+        entry.Billable === true || entry.Billable === 'TRUE' || entry.Billable === 1;
+      const snapshotBillable =
+        item.billable === true || item.billable === 'TRUE' || item.billable === 1;
+
+      const comparisons = [
+        ['version', parseInt(entry.Version, 10) || 1, parseInt(item.version, 10) || 1],
+        ['duration', parseInt(entry.DurationSeconds, 10) || 0, parseInt(item.durationSeconds, 10) || 0],
+        ['start', String(entry.StartUTC || ''), String(item.startUtc || '')],
+        ['end', String(entry.EndUTC || ''), String(item.endUtc || '')],
+        ['project', String(entry.ProjectID || ''), String(item.projectId || '')],
+        ['task', String(entry.TaskID || ''), String(item.taskId || '')],
+        ['billable', currentBillable, snapshotBillable],
+        ['hourly rate', Number(entry.HourlyRateSnapshot || 0), Number(item.hourlyRateSnapshot || 0)],
+        ['cost rate', Number(entry.CostRateSnapshot || 0), Number(item.costRateSnapshot || 0)]
+      ];
+      const mismatch = comparisons.find(([, current, submitted]) => current !== submitted);
+      if (mismatch) {
+        throw new AppError(
+          ERROR_CODES.CONFLICT,
+          `Submitted entry ${entryId} changed after submission (${mismatch[0]} mismatch). Reopen/resubmit before review.`,
+          409
+        );
+      }
+
+      snapshotTotalSeconds += parseInt(item.durationSeconds, 10) || 0;
+      entries.push(entry);
+    }
+
+    if (snapshotTotalSeconds !== (parseInt(timesheet.TotalSeconds, 10) || 0)) {
+      throw new AppError(
+        ERROR_CODES.CONFLICT,
+        'Timesheet total no longer matches its immutable submission snapshot.',
+        409
+      );
+    }
+
+    // Detect any extra entry bound to the same timesheet but omitted from the
+    // snapshot. Membership must be exact in both directions.
+    const boundEntries = SheetRepository.listTimeEntries(workspaceId, {
       userId: timesheet.UserID,
       startDate: timesheet.PeriodStart,
       endDate: timesheet.PeriodEnd
     }).filter(entry => entry.TimesheetID === timesheet.TimesheetID);
 
-    if (legacyEntries.length === 0) {
-      throw new AppError(ERROR_CODES.CONFLICT, 'Timesheet has no verifiable submitted entries.', 409);
+    const boundIds = new Set(boundEntries.map(entry => String(entry.EntryID || '')));
+    if (
+      boundIds.size !== snapshotIds.size ||
+      [...boundIds].some(id => !snapshotIds.has(id))
+    ) {
+      throw new AppError(
+        ERROR_CODES.CONFLICT,
+        'Timesheet entry membership changed after submission. Reopen/resubmit before review.',
+        409
+      );
     }
-    return legacyEntries;
+
+    return entries;
   },
 
   /**
