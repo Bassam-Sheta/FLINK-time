@@ -779,9 +779,20 @@
       users: [],
       activeTimer: null,
       timerInterval: null,
+      pendingTimerStartOperationId: '',
+      pendingTimerStopOperationId: '',
       currentTimesheetPeriod: null,
       setupStatus: null
     };
+
+    function newOperationId() {
+      if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+        return window.crypto.randomUUID();
+      }
+      return 'op-' + Date.now().toString(36) + '-' +
+        Math.random().toString(36).slice(2) + '-' +
+        Math.random().toString(36).slice(2);
+    }
 
     function escapeHtml(value) {
       return String(value === null || value === undefined ? '' : value).replace(/[&<>"']/g, ch => ({
@@ -1056,8 +1067,16 @@
     async function toggleTimer() {
       const btn = document.getElementById('timerToggleBtn');
       if (state.activeTimer) {
+        const operationId =
+          state.pendingTimerStopOperationId || newOperationId();
+        state.pendingTimerStopOperationId = operationId;
+
         try {
-          await apiCall('timer.stop');
+          await apiCall('timer.stop', {
+            timerId: state.activeTimer.timerId,
+            operationId
+          });
+          state.pendingTimerStopOperationId = '';
           state.activeTimer = null;
           clearInterval(state.timerInterval);
           document.getElementById('timerClockDisplay').classList.remove('running');
@@ -1066,6 +1085,8 @@
           btn.className = 'btn btn-success';
           loadRecentEntries();
         } catch (err) {
+          // Keep the same operationId. A network retry must represent the same
+          // logical stop request rather than creating a second operation.
           alert(err.message || 'Failed to stop timer.');
         }
       } else {
@@ -1073,13 +1094,36 @@
         const taskId = document.getElementById('timerTaskSelect').value;
         const description = document.getElementById('timerDescriptionInput').value;
         const tagIds = Array.from(document.getElementById('timerTagsSelect').selectedOptions).map(option => option.value);
+        const operationId =
+          state.pendingTimerStartOperationId || newOperationId();
+        state.pendingTimerStartOperationId = operationId;
+
         try {
-          const res = await apiCall('timer.start', { projectId, taskId, description, tagIds });
+          const res = await apiCall('timer.start', {
+            projectId,
+            taskId,
+            description,
+            tagIds,
+            operationId
+          });
+          state.pendingTimerStartOperationId = '';
+
+          // A delayed retry can arrive after this same logical timer has already
+          // been stopped. In that case do not resurrect a local running state.
+          if (res.completed) {
+            state.activeTimer = null;
+            btn.innerText = 'START';
+            btn.className = 'btn btn-success';
+            loadRecentEntries();
+            return;
+          }
+
           state.activeTimer = res;
           startLocalClock(res.startedAtUTC);
           btn.innerText = 'STOP';
           btn.className = 'btn btn-danger';
         } catch (err) {
+          // Keep the operationId for the next retry.
           alert(err.message || 'Failed to start timer.');
         }
       }
