@@ -253,6 +253,22 @@ const AuthService = {
     const mfaLock = LockService.getScriptLock();
     mfaLock.waitLock(10000);
     try {
+    // Re-check the one-time challenge after entering the critical section.
+    // Another concurrent request may have consumed it after our pre-lock check.
+    const lockedChallenge = this._getMfaChallenge(userId);
+    if (
+      !lockedChallenge ||
+      !lockedChallenge.tokenHash ||
+      !SecurityService.constantTimeEquals(lockedChallenge.tokenHash, suppliedChallengeHash) ||
+      Number(lockedChallenge.expiresAtMs || 0) < Date.now()
+    ) {
+      throw new AppError(
+        ERROR_CODES.AUTH_REQUIRED,
+        'MFA challenge is invalid, expired, replaced, or already used. Please log in again.',
+        401
+      );
+    }
+
     const account = MasterRepository.findAccountById(userId);
     const cred = MasterRepository.getCredentials(userId);
     if (!account || !cred || !cred.TotpSecret) {
@@ -402,32 +418,41 @@ const AuthService = {
    * Confirms TOTP MFA enrollment
    */
   confirmMfa(authContext, code) {
-    const cred = MasterRepository.getCredentials(authContext.userId);
-    if (!cred || !cred.PendingTotpSecret) {
-      throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'No pending MFA enrollment found. Call enrollMfa first.');
+    const lock = LockService.getScriptLock();
+    lock.waitLock(10000);
+    try {
+      const cred = MasterRepository.getCredentials(authContext.userId);
+      if (!cred || !cred.PendingTotpSecret) {
+        throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'No pending MFA enrollment found. Call enrollMfa first.');
+      }
+
+      const verification = SecurityService.verifyTotpWithStep(cred.PendingTotpSecret, code);
+      if (!verification.valid) {
+        throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'Invalid verification code. Could not verify authenticator app.');
+      }
+
+      MasterRepository.updateCredentials(authContext.userId, {
+        TotpSecret: cred.PendingTotpSecret,
+        MfaEnabled: true,
+        PendingTotpSecret: '',
+        // Treat the enrollment code as consumed so it cannot immediately be
+        // replayed as the first login MFA code in the same 30-second step.
+        LastSuccessfulTotpStep: verification.timeStep
+      });
+
+      MasterRepository.logGlobalAudit({
+        ActorUserID: authContext.userId,
+        ActorRole: authContext.role,
+        EntityType: 'USER_SECURITY',
+        EntityID: authContext.userId,
+        Action: CONSTANTS.AUDIT_EVENTS.MFA_ENROLLED,
+        Reason: 'TOTP Multi-factor authentication successfully enabled'
+      });
+
+      return { ok: true, message: 'Two-factor authentication successfully enabled.' };
+    } finally {
+      lock.releaseLock();
     }
-
-    const verification = SecurityService.verifyTotpWithStep(cred.PendingTotpSecret, code);
-    if (!verification.valid) {
-      throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'Invalid verification code. Could not verify authenticator app.');
-    }
-
-    MasterRepository.updateCredentials(authContext.userId, {
-      TotpSecret: cred.PendingTotpSecret,
-      MfaEnabled: true,
-      PendingTotpSecret: ''
-    });
-
-    MasterRepository.logGlobalAudit({
-      ActorUserID: authContext.userId,
-      ActorRole: authContext.role,
-      EntityType: 'USER_SECURITY',
-      EntityID: authContext.userId,
-      Action: CONSTANTS.AUDIT_EVENTS.MFA_ENROLLED,
-      Reason: 'TOTP Multi-factor authentication successfully enabled'
-    });
-
-    return { ok: true, message: 'Two-factor authentication successfully enabled.' };
   },
 
   /**
@@ -441,7 +466,8 @@ const AuthService = {
     MasterRepository.updateCredentials(targetUserId, {
       TotpSecret: '',
       MfaEnabled: false,
-      PendingTotpSecret: ''
+      PendingTotpSecret: '',
+      LastSuccessfulTotpStep: ''
     });
 
     MasterRepository.logGlobalAudit({
