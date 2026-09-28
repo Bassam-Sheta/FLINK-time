@@ -34,6 +34,15 @@ function baseGlobals(repoOverrides = {}, trackingOverrides = {}) {
     assertWorkspaceAccess() {},
     assertRecordOwnership() {}
   };
+  global.Validation = {
+    assertRecordVersion(record, expectedVersion) {
+      const current = parseInt(record.Version, 10) || 1;
+      const expected = parseInt(expectedVersion, 10);
+      if (current !== expected) {
+        throw new AppError('CONFLICT', 'stale version', 409);
+      }
+    }
+  };
   global.LockService = {
     getScriptLock() {
       return { tryLock() { return true; }, releaseLock() {} };
@@ -116,7 +125,7 @@ test('bulk CHANGE_PROJECT validates all entries before any write', () => {
       'W1',
       ['E1', 'E2'],
       'CHANGE_PROJECT',
-      { projectId: 'P2', taskId: 'T2' }
+      { projectId: 'P2', taskId: 'T2', expectedVersions: { E1: 1, E2: 1 } }
     ),
     /invalid target task/
   );
@@ -137,7 +146,7 @@ test('bulk CHANGE_PROJECT refreshes rate snapshots from target project', () => {
     'W1',
     ['E1'],
     'CHANGE_PROJECT',
-    { projectId: 'P2', taskId: 'T2' }
+    { projectId: 'P2', taskId: 'T2', expectedVersions: { E1: 1 } }
   );
 
   assert.equal(affected, 1);
@@ -186,4 +195,105 @@ test('bulk CHANGE_PROJECT rolls back earlier writes when a later write fails', (
     ),
     true
   );
+});
+
+
+test('bulk action rejects duplicate entry IDs before any write', () => {
+  const writes = [];
+  const entries = { E1: entry('E1') };
+  const svc = loadService({
+    getEntry(_ws, id) { return entries[id]; },
+    updateTimeEntry(_ws, id, updates) { writes.push({ id, updates }); }
+  });
+
+  assert.throws(
+    () => svc.bulkAction(
+      { userId:'U1', role:'USER' },
+      'W1',
+      ['E1', 'E1'],
+      'DELETE',
+      { expectedVersions:{ E1:1 } }
+    ),
+    /must not contain duplicates/
+  );
+  assert.deepEqual(writes, []);
+});
+
+test('stale version aborts the entire bulk batch before any write', () => {
+  const writes = [];
+  const entries = { E1: entry('E1'), E2: entry('E2') };
+  entries.E2.Version = 2;
+
+  const svc = loadService({
+    getEntry(_ws, id) { return entries[id]; },
+    updateTimeEntry(_ws, id, updates) { writes.push({ id, updates }); }
+  });
+
+  assert.throws(
+    () => svc.bulkAction(
+      { userId:'U1', role:'USER' },
+      'W1',
+      ['E1','E2'],
+      'DELETE',
+      { expectedVersions:{ E1:1, E2:1 } }
+    ),
+    /stale version/
+  );
+  assert.deepEqual(writes, []);
+});
+
+test('bulk UNLOCK can unlock an ordinary locked OPEN entry', () => {
+  const writes = [];
+  const entries = { E1: entry('E1') };
+  entries.E1.Locked = true;
+
+  const svc = loadService({
+    getEntry(_ws, id) { return entries[id]; },
+    updateTimeEntry(_ws, id, updates) { writes.push({ id, updates }); }
+  });
+
+  const affected = svc.bulkAction(
+    { userId:'A1', role:'ADMIN' },
+    'W1',
+    ['E1'],
+    'UNLOCK',
+    { expectedVersions:{ E1:1 } }
+  );
+
+  assert.equal(affected, 1);
+  assert.equal(writes[0].updates.Locked, false);
+  assert.equal(writes[0].updates.Version, 2);
+});
+
+test('bulk CHANGE_PROJECT to same project preserves historical rate snapshots', () => {
+  const writes = [];
+  const entries = { E1: entry('E1') };
+
+  const svc = loadService(
+    {
+      getEntry(_ws, id) { return entries[id]; },
+      updateTimeEntry(_ws, id, updates) { writes.push({ id, updates }); }
+    },
+    {
+      validateTrackingContext() {
+        return {
+          projectId:'P1',
+          taskId:'T2',
+          billable:true,
+          project:{ HourlyRate:999, CostRate:888 }
+        };
+      }
+    }
+  );
+
+  svc.bulkAction(
+    { userId:'U1', role:'USER' },
+    'W1',
+    ['E1'],
+    'CHANGE_PROJECT',
+    { projectId:'P1', taskId:'T2', expectedVersions:{ E1:1 } }
+  );
+
+  assert.equal(writes[0].updates.HourlyRateSnapshot, 100);
+  assert.equal(writes[0].updates.CostRateSnapshot, 40);
 });
