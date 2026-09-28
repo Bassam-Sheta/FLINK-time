@@ -179,7 +179,7 @@ test('bulk CHANGE_PROJECT rolls back earlier writes when a later write fails', (
       'W1',
       ['E1', 'E2'],
       'CHANGE_PROJECT',
-      { projectId: 'P2', taskId: 'T2' }
+      { projectId: 'P2', taskId: 'T2', expectedVersions: { E1: 1, E2: 1 } }
     ),
     /simulated sheet write failure/
   );
