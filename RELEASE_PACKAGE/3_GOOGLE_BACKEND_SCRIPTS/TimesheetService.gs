@@ -18,6 +18,48 @@ const TimesheetService = {
       dayLabels: bounds.dayLabels,
       timezone: bounds.timezone
     };
+  }, 
+
+  _findCanonicalTimesheet(timesheets, startDate, endDate) {
+    const startMs = startDate.getTime();
+    const endMs = endDate.getTime();
+    const exact = [];
+    const overlaps = [];
+
+    for (const ts of timesheets || []) {
+      const tsStart = new Date(ts.PeriodStart).getTime();
+      const tsEnd = new Date(ts.PeriodEnd).getTime();
+      if (!Number.isFinite(tsStart) || !Number.isFinite(tsEnd) || tsEnd < tsStart) {
+        continue;
+      }
+
+      const isExact = tsStart === startMs && tsEnd === endMs;
+      if (isExact) {
+        exact.push(ts);
+        continue;
+      }
+
+      if (tsStart <= endMs && tsEnd >= startMs) {
+        overlaps.push(ts);
+      }
+    }
+
+    if (exact.length > 1) {
+      throw new AppError(
+        ERROR_CODES.CONFLICT,
+        'Multiple timesheets exist for the same canonical week. Administrative repair is required.',
+        409
+      );
+    }
+    if (overlaps.length > 0) {
+      throw new AppError(
+        ERROR_CODES.CONFLICT,
+        'An existing timesheet overlaps this canonical workspace week. Administrative repair is required before submission.',
+        409
+      );
+    }
+
+    return exact[0] || null;
   },
 
   /**
@@ -44,10 +86,11 @@ const TimesheetService = {
 
     // Check existing timesheet record
     const timesheets = SheetRepository.listTimesheets(workspaceId, { userId });
-    const existingTimesheet = timesheets.find(ts => {
-      const pStart = new Date(ts.PeriodStart).getTime();
-      return pStart === startDate.getTime();
-    }) || null;
+    const existingTimesheet = this._findCanonicalTimesheet(
+      timesheets,
+      startDate,
+      endDate
+    );
 
     // Build project/task matrix
     const matrixMap = {};
@@ -143,10 +186,9 @@ const TimesheetService = {
       const expectedWeek = TimezoneService.getWeekBounds(workspaceId, requestedStart);
       const startDate = expectedWeek.startUtc;
       const endDate = expectedWeek.endUtc;
-      const toleranceMs = 1000;
       if (
-        Math.abs(requestedStart.getTime() - startDate.getTime()) > toleranceMs ||
-        Math.abs(requestedEnd.getTime() - endDate.getTime()) > toleranceMs
+        requestedStart.getTime() !== startDate.getTime() ||
+        requestedEnd.getTime() !== endDate.getTime()
       ) {
         throw new AppError(
           ERROR_CODES.VALIDATION_ERROR,
@@ -174,12 +216,14 @@ const TimesheetService = {
         throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'Cannot submit an empty timesheet with 0 hours.');
       }
 
-      // Check if timesheet already exists
+      // A user may have at most one record for this exact canonical week, and
+      // no other period may overlap it.
       const existingTimesheets = SheetRepository.listTimesheets(workspaceId, { userId });
-      const existing = existingTimesheets.find(ts => {
-        const pStart = new Date(ts.PeriodStart).getTime();
-        return pStart === startDate.getTime();
-      });
+      const existing = this._findCanonicalTimesheet(
+        existingTimesheets,
+        startDate,
+        endDate
+      );
 
       if (existing && existing.Status === CONSTANTS.TIMESHEET_STATUS.APPROVED) {
         throw new AppError(ERROR_CODES.CONFLICT, 'This timesheet has already been approved and cannot be resubmitted.', 409);
