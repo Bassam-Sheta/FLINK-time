@@ -38,7 +38,9 @@ const WorkspaceService = {
     Validation.assertRequired(workspacePayload, ['name']);
 
     const workspaceName = workspacePayload.name.trim();
-    const timezone = workspacePayload.timezone || 'UTC';
+    const timezone = TimezoneService._assertValidTimezone(
+      workspacePayload.timezone || 'UTC'
+    );
     const workspaceId = Validation.generateId('WSP');
 
     let spreadsheetId = '';
