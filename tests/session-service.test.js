@@ -17,7 +17,7 @@ class AppError extends Error {
   }
 }
 
-function fixture(lastSeenAgeMinutes) {
+function fixture(lastSeenAgeMinutes, options = {}) {
   const now = Date.now();
   const writes = [];
   const session = {
@@ -25,8 +25,8 @@ function fixture(lastSeenAgeMinutes) {
     UserID: 'U1',
     CreatedAt: new Date(now - 60 * 60 * 1000).toISOString(),
     LastSeenAt: new Date(now - lastSeenAgeMinutes * 60 * 1000).toISOString(),
-    ExpiresAt: new Date(now + 7 * 60 * 60 * 1000).toISOString(),
-    AbsoluteExpiresAt: new Date(now + 23 * 60 * 60 * 1000).toISOString(),
+    ExpiresAt: options.expiresAt || new Date(now + 7 * 60 * 60 * 1000).toISOString(),
+    AbsoluteExpiresAt: options.absoluteExpiresAt || new Date(now + 23 * 60 * 60 * 1000).toISOString(),
     Revoked: false
   };
 
@@ -53,7 +53,8 @@ function fixture(lastSeenAgeMinutes) {
   global.MasterRepository = {
     findSessionByTokenHash() { return session; },
     findAccountById() {
-      return { UserID: 'U1', Username: 'user', Role: 'USER', Status: 'ACTIVE' };
+      if (options.accountMissing) return null;
+      return { UserID: 'U1', Username: 'user', Role: 'USER', Status: options.accountStatus || 'ACTIVE' };
     },
     updateSession(_id, updates) { writes.push({ ...updates }); },
     createSession() {}
@@ -62,7 +63,8 @@ function fixture(lastSeenAgeMinutes) {
   delete require.cache[require.resolve(servicePath)];
   return {
     SessionService: require(servicePath).SessionService,
-    writes
+    writes,
+    session
   };
 }
 
@@ -79,4 +81,49 @@ test('session activity is persisted after configured touch interval', () => {
   assert.ok(fx.writes[0].LastSeenAt);
   assert.ok(fx.writes[0].ExpiresAt);
   assert.ok(fx.writes[0].AbsoluteExpiresAt);
+});
+
+
+test('malformed session timestamps fail closed and revoke the session', () => {
+  const fx = fixture(1);
+  fx.session.ExpiresAt = 'not-a-date';
+
+  assert.throws(
+    () => fx.SessionService.validateSession('TOKEN'),
+    err => err instanceof AppError && err.code === 'AUTH_REQUIRED'
+  );
+  assert.equal(fx.writes.length, 1);
+  assert.equal(fx.writes[0].Revoked, true);
+});
+
+test('absolute timeout cannot be extended by recent activity', () => {
+  const fx = fixture(1, {
+    absoluteExpiresAt: new Date(Date.now() - 1000).toISOString()
+  });
+
+  assert.throws(
+    () => fx.SessionService.validateSession('TOKEN'),
+    err => err instanceof AppError && err.code === 'SESSION_EXPIRED'
+  );
+  assert.equal(fx.writes.at(-1).Revoked, true);
+});
+
+test('locked account revokes existing session instead of allowing automatic reuse later', () => {
+  const fx = fixture(1, { accountStatus: 'LOCKED' });
+
+  assert.throws(
+    () => fx.SessionService.validateSession('TOKEN'),
+    err => err instanceof AppError && err.code === 'ACCOUNT_LOCKED'
+  );
+  assert.equal(fx.writes.at(-1).Revoked, true);
+});
+
+test('deleted/missing account revokes orphaned session', () => {
+  const fx = fixture(1, { accountMissing: true });
+
+  assert.throws(
+    () => fx.SessionService.validateSession('TOKEN'),
+    err => err instanceof AppError && err.code === 'AUTH_REQUIRED'
+  );
+  assert.equal(fx.writes.at(-1).Revoked, true);
 });
