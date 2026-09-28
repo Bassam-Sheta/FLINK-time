@@ -202,6 +202,33 @@ test('manual create canonicalizes timestamps, rejects zero duration, and enforce
   assert.equal(fx.creates.length, 0);
 });
 
+test('invalid entry timestamps return controlled validation errors', () => {
+  const fx = fixture();
+
+  assert.throws(
+    () => fx.service.createManualEntry(user, 'W1', {
+      startUtc:'not-a-date',
+      endUtc:'2026-09-28T09:00:00.000Z'
+    }),
+    err => err instanceof AppError &&
+      err.code === 'VALIDATION_ERROR' &&
+      err.statusCode === 400
+  );
+
+  assert.throws(
+    () => fx.service.updateEntry(
+      user,
+      'W1',
+      'E1',
+      { startUtc:'not-a-date' },
+      3
+    ),
+    err => err instanceof AppError &&
+      err.code === 'VALIDATION_ERROR' &&
+      err.statusCode === 400
+  );
+});
+
 test('manual create remains successful when incremental rollup maintenance fails', () => {
   const fx = fixture({ rollupCreateFails:true });
   const created = fx.service.createManualEntry(user, 'W1', {
