@@ -52,6 +52,12 @@ function fixture(timesheets = []) {
       APPROVED:'APPROVED',
       REJECTED:'REJECTED'
     },
+    TIMESHEET_TRANSITIONS:{
+      OPEN:['SUBMITTED'],
+      REJECTED:['SUBMITTED'],
+      SUBMITTED:['APPROVED','REJECTED'],
+      APPROVED:['OPEN']
+    },
     AUDIT_EVENTS:{ TIMESHEET_SUBMITTED:'TIMESHEET_SUBMITTED' }
   };
   global.AuthorizationService = { assertWorkspaceAccess() {} };
@@ -95,6 +101,12 @@ function fixture(timesheets = []) {
     createTimesheet(_ws,data) {
       creates += 1;
       timesheets.push({ ...data });
+    },
+    deleteTimesheet(_ws,id) {
+      const idx = timesheets.findIndex(t => t.TimesheetID === id);
+      if (idx < 0) return false;
+      timesheets.splice(idx, 1);
+      return true;
     },
     updateTimesheet(_ws,id,data) {
       updates += 1;
