@@ -73,7 +73,15 @@ const AuthorizationService = {
    */
   assertAdminWorkspaceLimit(targetUserId, targetWorkspaceId) {
     const existingAccesses = MasterRepository.getWorkspaceAccessForUser(targetUserId);
-    const activeAdminWorkspaces = existingAccesses.filter(a => a.Role === CONSTANTS.ROLES.ADMIN);
+
+    // The business rule is "maximum active workspaces", not "maximum active ACL
+    // rows". A stale ACL pointing at SUSPENDED/MAINTENANCE/ARCHIVED workspace
+    // must not consume one of the three operational Admin slots.
+    const activeAdminWorkspaces = existingAccesses.filter(access => {
+      if (access.Role !== CONSTANTS.ROLES.ADMIN) return false;
+      const workspace = MasterRepository.getWorkspace(access.WorkspaceID);
+      return workspace && workspace.Status === CONSTANTS.WORKSPACE_STATUS.ACTIVE;
+    });
 
     const alreadyAssigned = activeAdminWorkspaces.some(a => a.WorkspaceID === targetWorkspaceId);
     if (!alreadyAssigned && activeAdminWorkspaces.length >= CONSTANTS.LIMITS.ADMIN_MAX_ACTIVE_WORKSPACES) {
