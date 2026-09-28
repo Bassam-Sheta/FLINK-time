@@ -31,6 +31,13 @@ const AdminRequestService = {
       if (!targetAccount) {
         throw new AppError(ERROR_CODES.NOT_FOUND, `Target user ${targetUserId} was not found.`, 404);
       }
+      if (targetAccount.Role !== CONSTANTS.ROLES.USER) {
+        throw new AppError(
+          ERROR_CODES.PERMISSION_DENIED,
+          'Admin lifecycle requests may only target ordinary USER accounts.',
+          403
+        );
+      }
 
       const targetAccess = MasterRepository
         .getWorkspaceAccessForUser(targetUserId)
@@ -45,7 +52,15 @@ const AdminRequestService = {
       }
     }
 
-    if (requestType === CONSTANTS.REQUEST_TYPES.NEW_USER && requestedData) {
+    if (requestType === CONSTANTS.REQUEST_TYPES.NEW_USER) {
+      if (!requestedData || typeof requestedData !== 'object' || Array.isArray(requestedData)) {
+        throw new AppError(
+          ERROR_CODES.VALIDATION_ERROR,
+          'requestedData is required for NEW_USER requests.',
+          400
+        );
+      }
+      Validation.assertRequired(requestedData, ['username', 'displayName']);
       const requestedRole = requestedData.role || CONSTANTS.ROLES.USER;
       if (requestedRole !== CONSTANTS.ROLES.USER) {
         throw new AppError(
@@ -102,8 +117,17 @@ const AdminRequestService = {
     if (authContext.role === CONSTANTS.ROLES.ADMIN) {
       const adminAccesses = MasterRepository.getWorkspaceAccessForUser(authContext.userId);
       const allowedWs = new Set(adminAccesses.map(a => a.WorkspaceID));
+      if (workspaceId && !allowedWs.has(workspaceId)) {
+        throw new AppError(
+          ERROR_CODES.WORKSPACE_DENIED,
+          'Access denied to request queue for this workspace.',
+          403
+        );
+      }
       const all = MasterRepository.listRequests(statusFilter, workspaceId);
-      return all.filter(r => allowedWs.has(r.WorkspaceID) || r.RequestedBy === authContext.userId);
+      // Losing workspace access also removes visibility of historical requests
+      // from that workspace. RequestedBy is not an authorization grant.
+      return all.filter(r => allowedWs.has(r.WorkspaceID));
     }
 
     throw new AppError(ERROR_CODES.PERMISSION_DENIED, 'Only Admins and Super Admins can access request queues.', 403);
@@ -116,63 +140,118 @@ const AdminRequestService = {
     AuthorizationService.assertRole(superAdminContext, [CONSTANTS.ROLES.SUPER_ADMIN]);
     Validation.assertRequired(reviewPayload, ['action']);
 
-    const action = reviewPayload.action.toUpperCase(); // 'APPROVE' or 'REJECT'
-    const reviewComment = reviewPayload.reviewComment ? Validation.sanitizeCellValue(reviewPayload.reviewComment) : '';
-    const req = MasterRepository.getRequest(requestId);
-
-    if (!req) throw new AppError(ERROR_CODES.NOT_FOUND, `Request ${requestId} not found.`);
-    if (req.Status !== CONSTANTS.REQUEST_STATUS.PENDING) {
-      throw new AppError(ERROR_CODES.CONFLICT, `Request ${requestId} has already been ${req.Status.toLowerCase()}.`);
+    const action = String(reviewPayload.action || '').toUpperCase();
+    if (!['APPROVE', 'REJECT'].includes(action)) {
+      throw new AppError(ERROR_CODES.VALIDATION_ERROR, `Unsupported review action: ${action}`);
     }
-
+    const reviewComment = reviewPayload.reviewComment
+      ? Validation.sanitizeCellValue(reviewPayload.reviewComment)
+      : '';
     const now = new Date().toISOString();
 
-    if (action === 'REJECT') {
-      const updated = MasterRepository.updateRequest(requestId, {
-        Status: CONSTANTS.REQUEST_STATUS.REJECTED,
+    // Claim/reject the request under a short ScriptLock. Do not hold this lock
+    // while executing UserService/AuthService because those services acquire
+    // their own ScriptLock and Apps Script locks are not re-entrant.
+    const lock = LockService.getScriptLock();
+    lock.waitLock(10000);
+    let req;
+    try {
+      req = MasterRepository.getRequest(requestId);
+      if (!req) throw new AppError(ERROR_CODES.NOT_FOUND, `Request ${requestId} not found.`);
+      if (req.Status !== CONSTANTS.REQUEST_STATUS.PENDING) {
+        throw new AppError(
+          ERROR_CODES.CONFLICT,
+          `Request ${requestId} has already been ${String(req.Status).toLowerCase()}.`,
+          409
+        );
+      }
+
+      if (action === 'REJECT') {
+        const updated = MasterRepository.updateRequest(requestId, {
+          Status: CONSTANTS.REQUEST_STATUS.REJECTED,
+          ReviewedBy: superAdminContext.userId,
+          ReviewedAt: now,
+          ReviewComment: reviewComment
+        });
+
+        MasterRepository.logGlobalAudit({
+          ActorUserID: superAdminContext.userId,
+          ActorRole: superAdminContext.role,
+          WorkspaceID: req.WorkspaceID,
+          EntityType: 'REQUEST',
+          EntityID: requestId,
+          Action: 'REQUEST_REJECTED',
+          Reason: reviewComment
+        });
+
+        return { ok: true, request: updated };
+      }
+
+      // APPROVED is the exclusive execution claim. A concurrent reviewer will
+      // now see a non-PENDING request and cannot execute it a second time.
+      MasterRepository.updateRequest(requestId, {
+        Status: CONSTANTS.REQUEST_STATUS.APPROVED,
         ReviewedBy: superAdminContext.userId,
         ReviewedAt: now,
         ReviewComment: reviewComment
       });
-
-      MasterRepository.logGlobalAudit({
-        ActorUserID: superAdminContext.userId,
-        ActorRole: superAdminContext.role,
-        WorkspaceID: req.WorkspaceID,
-        EntityType: 'REQUEST',
-        EntityID: requestId,
-        Action: 'REQUEST_REJECTED',
-        Reason: reviewComment
-      });
-
-      return { ok: true, request: updated };
+    } finally {
+      lock.releaseLock();
     }
 
-    if (action === 'APPROVE') {
+    try {
+      const originWorkspace = MasterRepository.getWorkspace(req.WorkspaceID);
+      if (!originWorkspace || originWorkspace.Status !== CONSTANTS.WORKSPACE_STATUS.ACTIVE) {
+        throw new AppError(
+          ERROR_CODES.WORKSPACE_DENIED,
+          'Request can no longer be executed because the originating workspace is not active.',
+          403
+        );
+      }
+
       let executionResult = null;
 
-      // Automatically execute requested operation
       if (req.RequestType === CONSTANTS.REQUEST_TYPES.NEW_USER) {
-        let requestedData = {};
+        let requestedData;
         try {
-          requestedData = JSON.parse(req.RequestedDataJSON || '{}');
-        } catch (e) {}
+          requestedData = JSON.parse(req.RequestedDataJSON || '');
+        } catch (e) {
+          throw new AppError(
+            ERROR_CODES.VALIDATION_ERROR,
+            'Stored NEW_USER request data is invalid and cannot be executed.',
+            400
+          );
+        }
+        if (!requestedData || typeof requestedData !== 'object' || Array.isArray(requestedData)) {
+          throw new AppError(
+            ERROR_CODES.VALIDATION_ERROR,
+            'Stored NEW_USER request data is invalid and cannot be executed.',
+            400
+          );
+        }
+        Validation.assertRequired(requestedData, ['username', 'displayName']);
 
-        const userPayload = {
+        executionResult = UserService.createUser(superAdminContext, {
           ...requestedData,
           primaryWorkspaceId: req.WorkspaceID,
           role: CONSTANTS.ROLES.USER
-        };
-        executionResult = UserService.createUser(superAdminContext, userPayload);
+        });
       } else if (
         req.RequestType === CONSTANTS.REQUEST_TYPES.MAKE_PASSIVE ||
         req.RequestType === CONSTANTS.REQUEST_TYPES.PASSWORD_RESET
       ) {
-        // Revalidate membership at execution time. A request must not retain authority
-        // after the target user's workspace access has been revoked or moved.
+        // Revalidate identity and membership at execution time. A queued request
+        // must not retain authority after role/access changes.
         const targetAccount = MasterRepository.findAccountById(req.TargetUserID);
         if (!targetAccount) {
           throw new AppError(ERROR_CODES.NOT_FOUND, `Target user ${req.TargetUserID} was not found.`, 404);
+        }
+        if (targetAccount.Role !== CONSTANTS.ROLES.USER) {
+          throw new AppError(
+            ERROR_CODES.PERMISSION_DENIED,
+            'Request can no longer be executed because the target is not an ordinary USER account.',
+            403
+          );
         }
         const stillAssigned = MasterRepository
           .getWorkspaceAccessForUser(req.TargetUserID)
@@ -186,20 +265,31 @@ const AdminRequestService = {
         }
 
         if (req.RequestType === CONSTANTS.REQUEST_TYPES.MAKE_PASSIVE) {
-          executionResult = UserService.makeUserPassive(superAdminContext, req.TargetUserID, req.Reason);
+          executionResult = UserService.makeUserPassive(
+            superAdminContext,
+            req.TargetUserID,
+            req.Reason
+          );
         } else {
           const tempPassword = 'Flk-' + SecurityService.generateRandomHex(4) + '!9';
-          executionResult = AuthService.resetPasswordByAdmin(superAdminContext, req.TargetUserID, tempPassword);
+          executionResult = AuthService.resetPasswordByAdmin(
+            superAdminContext,
+            req.TargetUserID,
+            tempPassword
+          );
           executionResult.temporaryPassword = tempPassword;
         }
+      } else {
+        throw new AppError(
+          ERROR_CODES.VALIDATION_ERROR,
+          `Unsupported executable request type: ${req.RequestType}`,
+          400
+        );
       }
 
       const updated = MasterRepository.updateRequest(requestId, {
         Status: CONSTANTS.REQUEST_STATUS.EXECUTED,
-        ReviewedBy: superAdminContext.userId,
-        ReviewedAt: now,
-        ReviewComment: reviewComment,
-        ExecutedAt: now
+        ExecutedAt: new Date().toISOString()
       });
 
       MasterRepository.logGlobalAudit({
@@ -213,16 +303,26 @@ const AdminRequestService = {
         Reason: reviewComment
       });
 
-      return {
-        ok: true,
-        request: updated,
-        executionResult
-      };
+      return { ok: true, request: updated, executionResult };
+    } catch (executionErr) {
+      // Release the execution claim for a safe retry while preserving the error
+      // to the reviewer. Another reviewer can only retry after this reset.
+      try {
+        MasterRepository.updateRequest(requestId, {
+          Status: CONSTANTS.REQUEST_STATUS.PENDING,
+          ReviewedBy: '',
+          ReviewedAt: '',
+          ReviewComment: ''
+        });
+      } catch (resetErr) {
+        console.error(
+          `Failed to reset request ${requestId} after execution failure: ${resetErr.message}`
+        );
+      }
+      throw executionErr;
     }
-
-    throw new AppError(ERROR_CODES.VALIDATION_ERROR, `Unsupported review action: ${action}`);
   }
-};
+};};
 
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
