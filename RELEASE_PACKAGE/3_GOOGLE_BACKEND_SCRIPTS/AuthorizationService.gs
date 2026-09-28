@@ -52,7 +52,10 @@ const AuthorizationService = {
     // Authorization is based only on active WorkspaceAccess mappings.
     // PrimaryWorkspaceID is profile/default-selection metadata, not an ACL.
     const accesses = MasterRepository.getWorkspaceAccessForUser(authContext.userId);
-    const hasAccess = accesses.some(a => a.WorkspaceID === requestedWorkspaceId);
+    const hasAccess = accesses.some(a =>
+      a.WorkspaceID === requestedWorkspaceId &&
+      (a.Active === true || a.Active === 'TRUE' || a.Active === 1)
+    );
 
     if (!hasAccess) {
       throw new AppError(
