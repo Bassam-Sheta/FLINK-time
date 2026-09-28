@@ -171,13 +171,10 @@ const ApprovalService = {
       const timesheet = SheetRepository.getTimesheet(workspaceId, timesheetId);
       if (!timesheet) throw new AppError(ERROR_CODES.NOT_FOUND, `Timesheet ${timesheetId} not found.`);
 
-      if (timesheet.Status !== CONSTANTS.TIMESHEET_STATUS.SUBMITTED) {
-        throw new AppError(
-          ERROR_CODES.CONFLICT,
-          `Only SUBMITTED timesheets can be approved. Current status: ${timesheet.Status}.`,
-          409
-        );
-      }
+      this._assertTransition(
+        timesheet.Status,
+        CONSTANTS.TIMESHEET_STATUS.APPROVED
+      );
 
       const now = new Date().toISOString();
       const cleanComment = comment ? Validation.sanitizeCellValue(comment) : 'Approved';
@@ -195,18 +192,27 @@ const ApprovalService = {
         }
       }
 
-      const changedEntryIds = [];
+      const changedEntries = [];
+      let headerAttempted = false;
       try {
         for (const entry of entries) {
+          changedEntries.push({
+            entryId: entry.EntryID,
+            TimesheetID: entry.TimesheetID || '',
+            ApprovalStatus: entry.ApprovalStatus,
+            Locked: entry.Locked === true || entry.Locked === 'TRUE' || entry.Locked === 1,
+            Version: parseInt(entry.Version, 10) || 1,
+            UpdatedAt: entry.UpdatedAt || '',
+            UpdatedBy: entry.UpdatedBy || ''
+          });
           SheetRepository.updateTimeEntry(workspaceId, entry.EntryID, {
             TimesheetID: timesheetId,
             ApprovalStatus: CONSTANTS.TIMESHEET_STATUS.APPROVED,
             Locked: true
           });
-          changedEntryIds.push(entry.EntryID);
         }
 
-        // Commit the timesheet state only after every member entry succeeds.
+        headerAttempted = true;
         var updatedTimesheet = SheetRepository.updateTimesheet(workspaceId, timesheetId, {
           Status: CONSTANTS.TIMESHEET_STATUS.APPROVED,
           ReviewedBy: authContext.userId,
@@ -215,17 +221,24 @@ const ApprovalService = {
           LockedAt: now
         });
       } catch (mutationErr) {
-        // Best-effort rollback of any entries already changed in this critical section.
-        for (const entry of entries) {
-          if (!changedEntryIds.includes(entry.EntryID)) continue;
+        if (headerAttempted) {
+          try { this._restoreTimesheetHeader(workspaceId, timesheet); }
+          catch (headerRollbackErr) {
+            console.error('Approval header rollback failed: ' + headerRollbackErr.message);
+          }
+        }
+        for (const prior of changedEntries.reverse()) {
           try {
-            SheetRepository.updateTimeEntry(workspaceId, entry.EntryID, {
-              TimesheetID: timesheetId,
-              ApprovalStatus: CONSTANTS.TIMESHEET_STATUS.SUBMITTED,
-              Locked: true
+            SheetRepository.updateTimeEntry(workspaceId, prior.entryId, {
+              TimesheetID: prior.TimesheetID,
+              ApprovalStatus: prior.ApprovalStatus,
+              Locked: prior.Locked,
+              Version: prior.Version,
+              UpdatedAt: prior.UpdatedAt,
+              UpdatedBy: prior.UpdatedBy
             });
           } catch (rollbackErr) {
-            console.error(`Approval rollback failed for entry ${entry.EntryID}: ${rollbackErr.message}`);
+            console.error(`Approval rollback failed for entry ${prior.entryId}: ${rollbackErr.message}`);
           }
         }
         throw mutationErr;
@@ -235,27 +248,29 @@ const ApprovalService = {
         try { SpreadsheetApp.flush(); } catch (fErr) {}
       }
 
-      // Append immutable audit to Approvals tab
-      SheetRepository.logApproval(workspaceId, {
-        ApprovalID: Validation.generateId('APP'),
-        TimesheetID: timesheetId,
-        UserID: timesheet.UserID,
-        Action: 'APPROVED',
-        ActorUserID: authContext.userId,
-        ActorRole: authContext.role,
-        TimestampUTC: now,
-        Comment: cleanComment,
-        SnapshotTotalSeconds: timesheet.TotalSeconds
-      });
-
-      SheetRepository.logWorkspaceAudit(workspaceId, {
-        ActorUserID: authContext.userId,
-        ActorRole: authContext.role,
-        EntityType: 'TIMESHEET',
-        EntityID: timesheetId,
-        Action: CONSTANTS.AUDIT_EVENTS.TIMESHEET_APPROVED,
-        Reason: cleanComment
-      });
+      try {
+        SheetRepository.logApproval(workspaceId, {
+          ApprovalID: Validation.generateId('APP'),
+          TimesheetID: timesheetId,
+          UserID: timesheet.UserID,
+          Action: 'APPROVED',
+          ActorUserID: authContext.userId,
+          ActorRole: authContext.role,
+          TimestampUTC: now,
+          Comment: cleanComment,
+          SnapshotTotalSeconds: timesheet.TotalSeconds
+        });
+        SheetRepository.logWorkspaceAudit(workspaceId, {
+          ActorUserID: authContext.userId,
+          ActorRole: authContext.role,
+          EntityType: 'TIMESHEET',
+          EntityID: timesheetId,
+          Action: CONSTANTS.AUDIT_EVENTS.TIMESHEET_APPROVED,
+          Reason: cleanComment
+        });
+      } catch (auditErr) {
+        console.error('Approval audit failed after committed state transition: ' + auditErr.message);
+      }
 
       return updatedTimesheet;
     } finally {
@@ -288,13 +303,10 @@ const ApprovalService = {
     try {
       const timesheet = SheetRepository.getTimesheet(workspaceId, timesheetId);
       if (!timesheet) throw new AppError(ERROR_CODES.NOT_FOUND, `Timesheet ${timesheetId} not found.`);
-      if (timesheet.Status !== CONSTANTS.TIMESHEET_STATUS.SUBMITTED) {
-        throw new AppError(
-          ERROR_CODES.CONFLICT,
-          `Only SUBMITTED timesheets can be rejected. Current status: ${timesheet.Status}.`,
-          409
-        );
-      }
+      this._assertTransition(
+        timesheet.Status,
+        CONSTANTS.TIMESHEET_STATUS.REJECTED
+      );
 
       const now = new Date().toISOString();
       const cleanComment = Validation.sanitizeCellValue(reasonComment.trim());
@@ -311,32 +323,58 @@ const ApprovalService = {
         }
       }
 
-      const changedEntryIds = [];
+      const changedEntries = [];
+      let headerAttempted = false;
       try {
         for (const entry of entries) {
-          SheetRepository.updateTimeEntry(workspaceId, entry.EntryID, {
-            ApprovalStatus: CONSTANTS.TIMESHEET_STATUS.REJECTED,
-            Locked: false
+          const previousVersion = parseInt(entry.Version, 10) || 1;
+          changedEntries.push({
+            entryId: entry.EntryID,
+            TimesheetID: entry.TimesheetID || '',
+            ApprovalStatus: entry.ApprovalStatus,
+            Locked: entry.Locked === true || entry.Locked === 'TRUE' || entry.Locked === 1,
+            Version: previousVersion,
+            UpdatedAt: entry.UpdatedAt || '',
+            UpdatedBy: entry.UpdatedBy || ''
           });
-          changedEntryIds.push(entry.EntryID);
+          SheetRepository.updateTimeEntry(workspaceId, entry.EntryID, {
+            TimesheetID: '',
+            ApprovalStatus: CONSTANTS.TIMESHEET_STATUS.REJECTED,
+            Locked: false,
+            Version: previousVersion + 1,
+            UpdatedAt: now,
+            UpdatedBy: authContext.userId
+          });
         }
 
+        headerAttempted = true;
         var updatedTimesheet = SheetRepository.updateTimesheet(workspaceId, timesheetId, {
           Status: CONSTANTS.TIMESHEET_STATUS.REJECTED,
           ReviewedBy: authContext.userId,
           ReviewedAt: now,
-          ReviewComment: cleanComment
+          ReviewComment: cleanComment,
+          LockedAt: '',
+          EntrySnapshotJSON: ''
         });
       } catch (mutationErr) {
-        for (const entry of entries) {
-          if (!changedEntryIds.includes(entry.EntryID)) continue;
+        if (headerAttempted) {
+          try { this._restoreTimesheetHeader(workspaceId, timesheet); }
+          catch (headerRollbackErr) {
+            console.error('Rejection header rollback failed: ' + headerRollbackErr.message);
+          }
+        }
+        for (const prior of changedEntries.reverse()) {
           try {
-            SheetRepository.updateTimeEntry(workspaceId, entry.EntryID, {
-              ApprovalStatus: CONSTANTS.TIMESHEET_STATUS.SUBMITTED,
-              Locked: true
+            SheetRepository.updateTimeEntry(workspaceId, prior.entryId, {
+              TimesheetID: prior.TimesheetID,
+              ApprovalStatus: prior.ApprovalStatus,
+              Locked: prior.Locked,
+              Version: prior.Version,
+              UpdatedAt: prior.UpdatedAt,
+              UpdatedBy: prior.UpdatedBy
             });
           } catch (rollbackErr) {
-            console.error(`Rejection rollback failed for entry ${entry.EntryID}: ${rollbackErr.message}`);
+            console.error(`Rejection rollback failed for entry ${prior.entryId}: ${rollbackErr.message}`);
           }
         }
         throw mutationErr;
@@ -346,27 +384,29 @@ const ApprovalService = {
         try { SpreadsheetApp.flush(); } catch (fErr) {}
       }
 
-      // Append immutable audit to Approvals tab
-      SheetRepository.logApproval(workspaceId, {
-        ApprovalID: Validation.generateId('APP'),
-        TimesheetID: timesheetId,
-        UserID: timesheet.UserID,
-        Action: 'REJECTED',
-        ActorUserID: authContext.userId,
-        ActorRole: authContext.role,
-        TimestampUTC: now,
-        Comment: cleanComment,
-        SnapshotTotalSeconds: timesheet.TotalSeconds
-      });
-
-      SheetRepository.logWorkspaceAudit(workspaceId, {
-        ActorUserID: authContext.userId,
-        ActorRole: authContext.role,
-        EntityType: 'TIMESHEET',
-        EntityID: timesheetId,
-        Action: CONSTANTS.AUDIT_EVENTS.TIMESHEET_REJECTED,
-        Reason: cleanComment
-      });
+      try {
+        SheetRepository.logApproval(workspaceId, {
+          ApprovalID: Validation.generateId('APP'),
+          TimesheetID: timesheetId,
+          UserID: timesheet.UserID,
+          Action: 'REJECTED',
+          ActorUserID: authContext.userId,
+          ActorRole: authContext.role,
+          TimestampUTC: now,
+          Comment: cleanComment,
+          SnapshotTotalSeconds: timesheet.TotalSeconds
+        });
+        SheetRepository.logWorkspaceAudit(workspaceId, {
+          ActorUserID: authContext.userId,
+          ActorRole: authContext.role,
+          EntityType: 'TIMESHEET',
+          EntityID: timesheetId,
+          Action: CONSTANTS.AUDIT_EVENTS.TIMESHEET_REJECTED,
+          Reason: cleanComment
+        });
+      } catch (auditErr) {
+        console.error('Rejection audit failed after committed state transition: ' + auditErr.message);
+      }
 
       return updatedTimesheet;
     } finally {
@@ -382,6 +422,13 @@ const ApprovalService = {
   reopenTimesheet(superAdminContext, workspaceId, timesheetId, reason) {
     AuthorizationService.assertRole(superAdminContext, [CONSTANTS.ROLES.SUPER_ADMIN]);
     AuthorizationService.assertWorkspaceAccess(superAdminContext, workspaceId);
+    if (!reason || !String(reason).trim()) {
+      throw new AppError(
+        ERROR_CODES.VALIDATION_ERROR,
+        'A reason is required when reopening an approved timesheet.',
+        400
+      );
+    }
 
     let scriptLock = null;
     if (typeof LockService !== 'undefined' && LockService.getScriptLock) {
@@ -395,16 +442,13 @@ const ApprovalService = {
     try {
       const timesheet = SheetRepository.getTimesheet(workspaceId, timesheetId);
       if (!timesheet) throw new AppError(ERROR_CODES.NOT_FOUND, `Timesheet ${timesheetId} not found.`);
-      if (timesheet.Status !== CONSTANTS.TIMESHEET_STATUS.APPROVED) {
-        throw new AppError(
-          ERROR_CODES.CONFLICT,
-          `Only APPROVED timesheets can be reopened. Current status: ${timesheet.Status}.`,
-          409
-        );
-      }
+      this._assertTransition(
+        timesheet.Status,
+        CONSTANTS.TIMESHEET_STATUS.OPEN
+      );
 
       const now = new Date().toISOString();
-      const cleanReason = reason ? Validation.sanitizeCellValue(reason) : 'Reopened by Super Admin';
+      const cleanReason = Validation.sanitizeCellValue(String(reason).trim());
 
       // Resolve the original immutable membership while the header is still APPROVED.
       const entries = this._resolveSubmissionEntries(workspaceId, timesheet);
@@ -418,30 +462,58 @@ const ApprovalService = {
         }
       }
 
-      const changedEntryIds = [];
+      const changedEntries = [];
+      let headerAttempted = false;
       try {
         for (const entry of entries) {
-          SheetRepository.updateTimeEntry(workspaceId, entry.EntryID, {
-            ApprovalStatus: CONSTANTS.TIMESHEET_STATUS.OPEN,
-            Locked: false
+          const previousVersion = parseInt(entry.Version, 10) || 1;
+          changedEntries.push({
+            entryId: entry.EntryID,
+            TimesheetID: entry.TimesheetID || '',
+            ApprovalStatus: entry.ApprovalStatus,
+            Locked: entry.Locked === true || entry.Locked === 'TRUE' || entry.Locked === 1,
+            Version: previousVersion,
+            UpdatedAt: entry.UpdatedAt || '',
+            UpdatedBy: entry.UpdatedBy || ''
           });
-          changedEntryIds.push(entry.EntryID);
+          SheetRepository.updateTimeEntry(workspaceId, entry.EntryID, {
+            TimesheetID: '',
+            ApprovalStatus: CONSTANTS.TIMESHEET_STATUS.OPEN,
+            Locked: false,
+            Version: previousVersion + 1,
+            UpdatedAt: now,
+            UpdatedBy: superAdminContext.userId
+          });
         }
 
+        headerAttempted = true;
         var updated = SheetRepository.updateTimesheet(workspaceId, timesheetId, {
           Status: CONSTANTS.TIMESHEET_STATUS.OPEN,
-          LockedAt: ''
+          ReviewedBy: '',
+          ReviewedAt: '',
+          ReviewComment: '',
+          LockedAt: '',
+          EntrySnapshotJSON: ''
         });
       } catch (mutationErr) {
-        for (const entry of entries) {
-          if (!changedEntryIds.includes(entry.EntryID)) continue;
+        if (headerAttempted) {
+          try { this._restoreTimesheetHeader(workspaceId, timesheet); }
+          catch (headerRollbackErr) {
+            console.error('Reopen header rollback failed: ' + headerRollbackErr.message);
+          }
+        }
+        for (const prior of changedEntries.reverse()) {
           try {
-            SheetRepository.updateTimeEntry(workspaceId, entry.EntryID, {
-              ApprovalStatus: CONSTANTS.TIMESHEET_STATUS.APPROVED,
-              Locked: true
+            SheetRepository.updateTimeEntry(workspaceId, prior.entryId, {
+              TimesheetID: prior.TimesheetID,
+              ApprovalStatus: prior.ApprovalStatus,
+              Locked: prior.Locked,
+              Version: prior.Version,
+              UpdatedAt: prior.UpdatedAt,
+              UpdatedBy: prior.UpdatedBy
             });
           } catch (rollbackErr) {
-            console.error(`Reopen rollback failed for entry ${entry.EntryID}: ${rollbackErr.message}`);
+            console.error(`Reopen rollback failed for entry ${prior.entryId}: ${rollbackErr.message}`);
           }
         }
         throw mutationErr;
@@ -451,26 +523,29 @@ const ApprovalService = {
         try { SpreadsheetApp.flush(); } catch (fErr) {}
       }
 
-      SheetRepository.logApproval(workspaceId, {
-        ApprovalID: Validation.generateId('APP'),
-        TimesheetID: timesheetId,
-        UserID: timesheet.UserID,
-        Action: 'REOPENED',
-        ActorUserID: superAdminContext.userId,
-        ActorRole: superAdminContext.role,
-        TimestampUTC: now,
-        Comment: cleanReason,
-        SnapshotTotalSeconds: timesheet.TotalSeconds
-      });
-
-      SheetRepository.logWorkspaceAudit(workspaceId, {
-        ActorUserID: superAdminContext.userId,
-        ActorRole: superAdminContext.role,
-        EntityType: 'TIMESHEET',
-        EntityID: timesheetId,
-        Action: CONSTANTS.AUDIT_EVENTS.TIMESHEET_REOPENED,
-        Reason: cleanReason
-      });
+      try {
+        SheetRepository.logApproval(workspaceId, {
+          ApprovalID: Validation.generateId('APP'),
+          TimesheetID: timesheetId,
+          UserID: timesheet.UserID,
+          Action: 'REOPENED',
+          ActorUserID: superAdminContext.userId,
+          ActorRole: superAdminContext.role,
+          TimestampUTC: now,
+          Comment: cleanReason,
+          SnapshotTotalSeconds: timesheet.TotalSeconds
+        });
+        SheetRepository.logWorkspaceAudit(workspaceId, {
+          ActorUserID: superAdminContext.userId,
+          ActorRole: superAdminContext.role,
+          EntityType: 'TIMESHEET',
+          EntityID: timesheetId,
+          Action: CONSTANTS.AUDIT_EVENTS.TIMESHEET_REOPENED,
+          Reason: cleanReason
+        });
+      } catch (auditErr) {
+        console.error('Reopen audit failed after committed state transition: ' + auditErr.message);
+      }
 
       return updated;
     } finally {
