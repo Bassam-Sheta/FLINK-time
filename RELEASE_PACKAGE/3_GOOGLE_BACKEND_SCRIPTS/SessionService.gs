@@ -61,6 +61,14 @@ const SessionService = {
     const lastSeenAt = new Date(session.LastSeenAt).getTime();
     const createdAt = new Date(session.CreatedAt).getTime();
 
+    if ([expiresAt, lastSeenAt, createdAt].some(v => !Number.isFinite(v))) {
+      MasterRepository.updateSession(session.SessionID, {
+        Revoked: true,
+        RevokedAt: new Date().toISOString()
+      });
+      throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'Session record is invalid. Please sign in again.', 401);
+    }
+
     const idleTimeoutMs = CONSTANTS.LIMITS.SESSION_IDLE_TIMEOUT_HOURS * 3600 * 1000;
     const absoluteTimeoutMs = CONSTANTS.LIMITS.SESSION_ABSOLUTE_TIMEOUT_HOURS * 3600 * 1000;
     const storedAbsoluteExpiresAt = new Date(session.AbsoluteExpiresAt || '').getTime();
@@ -83,11 +91,19 @@ const SessionService = {
     // Verify User Account status
     const user = MasterRepository.findAccountById(session.UserID);
     if (!user) {
+      MasterRepository.updateSession(session.SessionID, {
+        Revoked: true,
+        RevokedAt: new Date().toISOString()
+      });
       throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'User account no longer exists.', 401);
     }
 
     if (user.Status === CONSTANTS.ACCOUNT_STATUS.LOCKED) {
-      throw new AppError(ERROR_CODES.ACCOUNT_LOCKED, 'Account is temporarily locked. Contact Super Admin.', 403);
+      MasterRepository.updateSession(session.SessionID, {
+        Revoked: true,
+        RevokedAt: new Date().toISOString()
+      });
+      throw new AppError(ERROR_CODES.ACCOUNT_LOCKED, 'Account is temporarily locked. Sign in again after it is unlocked.', 403);
     }
 
     if (user.Status !== CONSTANTS.ACCOUNT_STATUS.ACTIVE) {
