@@ -473,6 +473,13 @@ const AuthService = {
       if (!isOldValid) {
         throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'Current password is incorrect.');
       }
+      if (SecurityService.verifyPassword(newPassword, cred.PasswordHash)) {
+        throw new AppError(
+          ERROR_CODES.VALIDATION_ERROR,
+          'New password must be different from the current password.',
+          400
+        );
+      }
 
       const newHash = SecurityService.hashPassword(newPassword);
       MasterRepository.updateCredentials(authContext.userId, {
@@ -546,6 +553,13 @@ const AuthService = {
       const targetCred = MasterRepository.getCredentials(targetUserId);
       if (!targetCred) {
         throw new AppError(ERROR_CODES.NOT_FOUND, 'Target credentials record not found.');
+      }
+      if (SecurityService.verifyPassword(temporaryPassword, targetCred.PasswordHash)) {
+        throw new AppError(
+          ERROR_CODES.VALIDATION_ERROR,
+          'Temporary password must be different from the user\'s current password.',
+          400
+        );
       }
       const newHash = SecurityService.hashPassword(temporaryPassword);
       const nextStatus =
