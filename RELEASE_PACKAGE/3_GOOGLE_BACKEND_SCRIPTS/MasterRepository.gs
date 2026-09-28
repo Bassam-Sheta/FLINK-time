@@ -264,6 +264,20 @@ const MasterRepository = {
     const ws = rows.find(r => r.WorkspaceID === workspaceId);
     if (!ws) throw new AppError(ERROR_CODES.NOT_FOUND, `Workspace ${workspaceId} not found.`);
     this.updateRow(CONSTANTS.MASTER_TABS.WORKSPACES, ws._rowIndex, updates);
+
+    // Workspace status and physical-pointer changes must invalidate the router's
+    // warm execution cache immediately; otherwise a previously cached ACTIVE
+    // spreadsheet could remain reachable after MAINTENANCE/ARCHIVE transitions.
+    if (
+      updates &&
+      (Object.prototype.hasOwnProperty.call(updates, 'Status') ||
+       Object.prototype.hasOwnProperty.call(updates, 'SpreadsheetID')) &&
+      typeof WorkspaceRouter !== 'undefined' &&
+      WorkspaceRouter.clearCache
+    ) {
+      WorkspaceRouter.clearCache();
+    }
+
     return { ...ws, ...updates };
   },
 
@@ -586,6 +600,9 @@ const MasterRepository = {
       Status: CONSTANTS.WORKSPACE_STATUS.ARCHIVED,
       ArchivedAt: new Date().toISOString()
     });
+    if (typeof WorkspaceRouter !== 'undefined' && WorkspaceRouter.clearCache) {
+      WorkspaceRouter.clearCache();
+    }
 
     return { ok: true, message: `Workspace ${workspaceId} permanently archived and unlinked.` };
   }
