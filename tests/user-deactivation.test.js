@@ -72,6 +72,9 @@ test('deactivation finalizes active timer before account becomes passive', () =>
       getActiveTimer() {
         return { TimerID: 'TMR-1', UserID: 'U1', StartedAtUTC: '2026-09-27T10:00:00.000Z' };
       },
+      getMember() {
+        return { UserID: 'U1', Status: 'ACTIVE', LeftAt: '' };
+      },
       updateMember(_ws, _id, updates) {
         order.push('member:' + updates.Status);
       }
@@ -119,6 +122,7 @@ test('deactivation does not mark account passive when timer finalization fails',
     SessionService: { revokeAllUserSessions() {} },
     SheetRepository: {
       getActiveTimer() { return { TimerID: 'TMR-1', UserID: 'U1' }; },
+      getMember() { return { UserID: 'U1', Status: 'ACTIVE', LeftAt: '' }; },
       updateMember() {}
     },
     TimerService: {
@@ -139,5 +143,62 @@ test('deactivation does not mark account passive when timer finalization fails',
   assert.equal(
     updates.some(patch => patch.Status === 'PASSIVE'),
     false
+  );
+});
+
+
+test('deactivation rolls back earlier member-state changes when a later workspace update fails', () => {
+  const accountUpdates = [];
+  const memberWrites = [];
+  const account = {
+    UserID: 'U1',
+    Username: 'worker',
+    Role: 'USER',
+    Status: 'ACTIVE'
+  };
+
+  const UserService = loadService({
+    MasterRepository: {
+      findAccountById() { return account; },
+      getWorkspaceAccessForUser() {
+        return [{ WorkspaceID:'W1' }, { WorkspaceID:'W2' }];
+      },
+      getWorkspace() { return { Status:'ACTIVE' }; },
+      updateAccount(_id, patch) { accountUpdates.push(patch); },
+      logGlobalAudit() {}
+    },
+    SessionService: { revokeAllUserSessions() {} },
+    SheetRepository: {
+      getActiveTimer() { return null; },
+      getMember(ws) {
+        return { UserID:'U1', Status:'ACTIVE', LeftAt:'', WorkspaceID:ws };
+      },
+      updateMember(ws, _id, updates) {
+        memberWrites.push({ ws, ...updates });
+        if (ws === 'W2' && updates.Status === 'PASSIVE') {
+          throw new Error('member write failed');
+        }
+      }
+    },
+    TimerService: { _finalizeActiveTimerLocked() {} }
+  });
+
+  assert.throws(
+    () => UserService.makeUserPassive(
+      { userId:'SA1', role:'SUPER_ADMIN' },
+      'U1'
+    ),
+    /member write failed/
+  );
+
+  assert.equal(
+    accountUpdates.some(patch => patch.Status === 'PASSIVE'),
+    false,
+    'account must remain ACTIVE when a member-state transition fails'
+  );
+  assert.equal(
+    memberWrites.some(w => w.ws === 'W1' && w.Status === 'ACTIVE'),
+    true,
+    'earlier workspace member transition must be rolled back'
   );
 });
