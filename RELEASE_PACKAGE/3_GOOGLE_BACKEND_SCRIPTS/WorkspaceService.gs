@@ -137,6 +137,13 @@ const WorkspaceService = {
 
       const ws = MasterRepository.getWorkspace(workspaceId);
       if (!ws) throw new AppError(ERROR_CODES.NOT_FOUND, `Workspace ${workspaceId} not found.`);
+      if (ws.Status !== CONSTANTS.WORKSPACE_STATUS.ACTIVE) {
+        throw new AppError(
+          ERROR_CODES.WORKSPACE_DENIED,
+          `Admin access cannot be granted to inactive workspace '${workspaceId}' (${ws.Status}).`,
+          403
+        );
+      }
 
       // Hard Limit Check: Max 3 active workspaces
       AuthorizationService.assertAdminWorkspaceLimit(adminUserId, workspaceId);
