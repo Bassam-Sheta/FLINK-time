@@ -328,10 +328,13 @@ const WorkspaceService = {
     const accesses = MasterRepository.getWorkspaceAccessForUser(authContext.userId);
     const allowedIds = new Set(accesses.map(a => a.WorkspaceID));
 
-    // Physical spreadsheet/folder IDs are infrastructure metadata and are never
-    // required by Admin/User clients.
+    // Admin/User workspace selectors contain only operational workspaces.
+    // Suspended/Maintenance workspaces remain visible to Super Admin only.
     return allWorkspaces
-      .filter(w => allowedIds.has(w.WorkspaceID))
+      .filter(w =>
+        w.Status === CONSTANTS.WORKSPACE_STATUS.ACTIVE &&
+        allowedIds.has(w.WorkspaceID)
+      )
       .map(w => this._toWorkspaceDTO(w, false));
   }
 };
