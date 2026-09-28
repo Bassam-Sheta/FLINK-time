@@ -5,6 +5,18 @@
  */
 
 const TimeEntryService = {
+  _canonicalUtcTimestamp(value, fieldName) {
+    const date = new Date(value);
+    if (!Number.isFinite(date.getTime())) {
+      throw new AppError(
+        ERROR_CODES.VALIDATION_ERROR,
+        `${fieldName} must be a valid timestamp.`,
+        400
+      );
+    }
+    return date.toISOString();
+  },
+
   /**
    * Creates a manual time entry
    */
@@ -27,8 +39,8 @@ const TimeEntryService = {
         payload,
         { manual: true, enforceRequired: true }
       );
-      const startUtc = new Date(payload.startUtc).toISOString();
-      const endUtc = new Date(payload.endUtc).toISOString();
+      const startUtc = this._canonicalUtcTimestamp(payload.startUtc, 'startUtc');
+      const endUtc = this._canonicalUtcTimestamp(payload.endUtc, 'endUtc');
       const durationSeconds = Validation.validateDateRange(startUtc, endUtc);
       if (durationSeconds <= 0) {
         throw new AppError(
@@ -206,12 +218,14 @@ const TimeEntryService = {
       if (updates.billable !== undefined) allowed.Billable = tracking.billable;
 
       if (updates.startUtc !== undefined || updates.endUtc !== undefined) {
-        const nextStart = new Date(
-          updates.startUtc !== undefined ? updates.startUtc : entry.StartUTC
-        ).toISOString();
-        const nextEnd = new Date(
-          updates.endUtc !== undefined ? updates.endUtc : entry.EndUTC
-        ).toISOString();
+        const nextStart = this._canonicalUtcTimestamp(
+          updates.startUtc !== undefined ? updates.startUtc : entry.StartUTC,
+          'startUtc'
+        );
+        const nextEnd = this._canonicalUtcTimestamp(
+          updates.endUtc !== undefined ? updates.endUtc : entry.EndUTC,
+          'endUtc'
+        );
         const nextDuration = Validation.validateDateRange(nextStart, nextEnd);
         if (nextDuration <= 0) {
           throw new AppError(
