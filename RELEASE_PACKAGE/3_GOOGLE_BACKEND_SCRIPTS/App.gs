@@ -131,12 +131,12 @@ const ACTION_PERMISSIONS = {
   'reports.detailed': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN, CONSTANTS.ROLES.ADMIN, CONSTANTS.ROLES.USER], requiresWorkspace: true, isWrite: false },
   'reports.attendance': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN, CONSTANTS.ROLES.ADMIN], requiresWorkspace: true, isWrite: false },
   'reports.exceptions': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN, CONSTANTS.ROLES.ADMIN], requiresWorkspace: true, isWrite: false },
-  'reports.exportCsv': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN, CONSTANTS.ROLES.ADMIN], requiresWorkspace: true, isWrite: false },
+  'reports.exportCsv': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN, CONSTANTS.ROLES.ADMIN], requiresWorkspace: true, isWrite: true },
   'dashboard.radar': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN, CONSTANTS.ROLES.ADMIN, CONSTANTS.ROLES.USER], requiresWorkspace: false, isWrite: false },
   'dashboard.overview': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN, CONSTANTS.ROLES.ADMIN, CONSTANTS.ROLES.USER], requiresWorkspace: false, isWrite: false },
 
   // System Diagnostics & Repairs
-  'system.health': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN], isWrite: false },
+  'system.health': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN], isWrite: true },
   'system.repair': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN], isWrite: true },
   'system.diagnostics': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN], isWrite: false },
 
@@ -161,9 +161,39 @@ const ACTION_PERMISSIONS = {
   'jobs.capacity': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN, CONSTANTS.ROLES.ADMIN], isWrite: false },
 
   // Integrity & Audit
-  'integrity.audit': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN], isWrite: false },
+  'integrity.audit': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN], isWrite: true },
   'audit.verifyChain': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN], isWrite: false }
 };
+
+/**
+ * Explicit unauthenticated boundary. Any new public action must be added here
+ * and to ACTION_PERMISSIONS with authRequired:false, or CI will fail.
+ */
+const PUBLIC_ACTIONS = new Set([
+  'auth.login',
+  'auth.verifyMfa',
+  'setup.status'
+]);
+
+/**
+ * Explicit API GET allowlist.
+ *
+ * Authenticated actions intentionally remain POST-only even when logically
+ * read-only, because this application carries session tokens in request data.
+ * Allowing authenticated GET would encourage tokens in URLs, browser history,
+ * proxy logs, and referrer surfaces.
+ */
+const GET_SAFE_ACTIONS = new Set([
+  'setup.status'
+]);
+
+function isHttpMethodAllowed(action, method) {
+  if (!ACTION_PERMISSIONS[action]) return false;
+  const normalized = String(method || '').toUpperCase();
+  if (normalized === 'POST') return true;
+  if (normalized === 'GET') return GET_SAFE_ACTIONS.has(action);
+  return false;
+}
 
 /**
  * Universal API Request Handler
@@ -191,12 +221,12 @@ function executeApiRequest(action, requestData, httpMethod = 'POST') {
     };
   }
 
-  if (httpMethod === 'GET' && perm.isWrite) {
+  if (!isHttpMethodAllowed(action, httpMethod)) {
     return {
       ok: false,
       error: {
         code: ERROR_CODES.VALIDATION_ERROR,
-        message: `Action ${action} requires POST.`,
+        message: `HTTP method ${String(httpMethod || '').toUpperCase()} is not allowed for action ${action}.`,
         statusCode: 405
       }
     };
@@ -247,7 +277,7 @@ function dispatchAction(action, data, authContextOverride = null) {
   const payload = data.payload || data;
 
   // Unauthenticated actions
-  if (!perm.authRequired) {
+  if (PUBLIC_ACTIONS.has(action)) {
     if (action === 'auth.login') {
       return AuthService.login(payload.username, payload.password, payload.clientType);
     }
@@ -261,7 +291,7 @@ function dispatchAction(action, data, authContextOverride = null) {
   }
 
   // Allow unauthenticated bootstrap for Setup step 1 if system is fresh
-  if (action === 'setup.completeStep' && (payload.step === 1 || payload.step === '1') && !token) {
+  if (perm.allowUnauthStep1 === true && (payload.step === 1 || payload.step === '1') && !token) {
     return SetupService.processStep(1, payload, null);
   }
 
@@ -579,6 +609,9 @@ function buildJsonResponse(obj) {
 
 const App = {
   ACTION_PERMISSIONS,
+  PUBLIC_ACTIONS,
+  GET_SAFE_ACTIONS,
+  isHttpMethodAllowed,
   doGet,
   doPost,
   handleApiRequest,
@@ -591,6 +624,9 @@ const App = {
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     ACTION_PERMISSIONS,
+    PUBLIC_ACTIONS,
+    GET_SAFE_ACTIONS,
+    isHttpMethodAllowed,
     App,
     doGet,
     doPost,
