@@ -130,15 +130,8 @@ const SetupService = {
   _step1_SystemOwnerLocked(payload) {
     Validation.assertRequired(payload, ['setupKey', 'fullName', 'username', 'password', 'confirmPassword']);
 
-    let setupLock = null;
-    if (typeof LockService !== 'undefined' && LockService.getScriptLock) {
-      setupLock = LockService.getScriptLock();
-      if (!setupLock.tryLock(15000)) {
-        throw new AppError(ERROR_CODES.CONFLICT, 'Setup is already being completed by another request. Please retry.', 409);
-      }
-    }
-
-    try {
+    // Caller already holds the script-wide installation lock. Do not reacquire
+    // the same lock here; Apps Script locks are not a re-entrant transaction.
     // Ensure schema/pepper exist before reading master tables.
     MigrationService.bootstrapMasterSheet();
 
@@ -229,9 +222,6 @@ const SetupService = {
       },
       sessionToken: session.sessionToken
     };
-    } finally {
-      if (setupLock) setupLock.releaseLock();
-    }
   },
 
   _step2_CompanySettings(payload, authContext) {
