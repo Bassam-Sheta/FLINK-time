@@ -49,6 +49,22 @@ const TimesheetService = {
     });
   },
 
+  _restoreTimesheetHeader(workspaceId, timesheet) {
+    SheetRepository.updateTimesheet(workspaceId, timesheet.TimesheetID, {
+      UserID: timesheet.UserID,
+      PeriodStart: timesheet.PeriodStart,
+      PeriodEnd: timesheet.PeriodEnd,
+      TotalSeconds: parseInt(timesheet.TotalSeconds, 10) || 0,
+      Status: timesheet.Status,
+      SubmittedAt: timesheet.SubmittedAt || '',
+      ReviewedBy: timesheet.ReviewedBy || '',
+      ReviewedAt: timesheet.ReviewedAt || '',
+      ReviewComment: timesheet.ReviewComment || '',
+      LockedAt: timesheet.LockedAt || '',
+      EntrySnapshotJSON: timesheet.EntrySnapshotJSON || ''
+    });
+  },
+
   _resolveWeek(workspaceId, dateStr) {
     if (!dateStr) {
       throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'Invalid week date.');
@@ -325,6 +341,7 @@ const TimesheetService = {
       // remember their exact previous state, then commit the timesheet header last.
       // If any write fails, roll entries back best-effort before surfacing the error.
       const changedEntries = [];
+      let headerAttempted = false;
       try {
         for (const entry of entries) {
           const previousState = {
@@ -347,13 +364,25 @@ const TimesheetService = {
           });
         }
 
+        headerAttempted = true;
         if (existing) {
           SheetRepository.updateTimesheet(workspaceId, existing.TimesheetID, tsData);
         } else {
           SheetRepository.createTimesheet(workspaceId, tsData);
         }
       } catch (mutationErr) {
-        for (const prior of changedEntries) {
+        if (headerAttempted) {
+          try {
+            if (existing) {
+              this._restoreTimesheetHeader(workspaceId, existing);
+            } else {
+              SheetRepository.deleteTimesheet(workspaceId, timesheetId);
+            }
+          } catch (headerRollbackErr) {
+            console.error('Submission header rollback failed: ' + headerRollbackErr.message);
+          }
+        }
+        for (const prior of changedEntries.reverse()) {
           try {
             SheetRepository.updateTimeEntry(workspaceId, prior.entryId, {
               TimesheetID: prior.TimesheetID,
