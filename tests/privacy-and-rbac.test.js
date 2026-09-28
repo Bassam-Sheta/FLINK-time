@@ -248,3 +248,29 @@ test('user DTO never leaks repository row index', () => {
   assert.equal(Object.hasOwn(rows[0], 'CreatedBy'), false);
   assert.equal(rows[0].Username, 'worker');
 });
+
+
+test('inactive WorkspaceAccess row never grants access even if repository returns it', () => {
+  installCommon();
+  global.MasterRepository = {
+    getWorkspace(id) {
+      return { WorkspaceID: id, Status: 'ACTIVE' };
+    },
+    getWorkspaceAccessForUser() {
+      return [{ WorkspaceID: 'W1', Active: false }];
+    }
+  };
+
+  delete require.cache[require.resolve(authzPath)];
+  const { AuthorizationService } = require(authzPath);
+
+  assert.throws(
+    () => AuthorizationService.assertWorkspaceAccess(
+      { userId: 'U1', role: 'USER', user: { Username: 'user1' } },
+      'W1'
+    ),
+    err => err instanceof AppError &&
+      err.code === 'WORKSPACE_DENIED' &&
+      err.statusCode === 403
+  );
+});
