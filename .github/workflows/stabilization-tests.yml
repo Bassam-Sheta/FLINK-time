@@ -2,9 +2,6 @@ name: Stabilization Tests
 
 on:
   pull_request:
-  push:
-    branches:
-      - work/steps-16-20-20260928
 
 concurrency:
   group: stabilization-${{ github.event.pull_request.number || github.ref }}
