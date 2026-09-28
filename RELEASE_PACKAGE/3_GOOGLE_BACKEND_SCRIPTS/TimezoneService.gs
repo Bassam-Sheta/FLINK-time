@@ -5,11 +5,73 @@
  */
 
 const TimezoneService = {
+  _assertValidTimezone(timezone) {
+    const value = String(timezone || '').trim();
+    if (!value) {
+      throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'Timezone is required.', 400);
+    }
+
+    try {
+      if (typeof Intl !== 'undefined' && Intl.DateTimeFormat) {
+        new Intl.DateTimeFormat('en-US', { timeZone: value }).format(new Date());
+        return value;
+      }
+      if (typeof Utilities !== 'undefined' && Utilities.formatDate) {
+        Utilities.formatDate(new Date(), value, 'yyyy-MM-dd');
+        return value;
+      }
+    } catch (err) {
+      throw new AppError(
+        ERROR_CODES.VALIDATION_ERROR,
+        `Invalid IANA timezone: ${value}.`,
+        400
+      );
+    }
+
+    if (value !== 'UTC') {
+      throw new AppError(
+        ERROR_CODES.VALIDATION_ERROR,
+        `Timezone ${value} cannot be validated in this runtime.`,
+        400
+      );
+    }
+    return value;
+  },
+
   getWorkspaceTimezone(workspaceId) {
     const ws = MasterRepository.getWorkspace(workspaceId);
-    return (ws && ws.Timezone) ||
+    const configured = (ws && ws.Timezone) ||
       MasterRepository.getGlobalSetting('DEFAULT_TIMEZONE', 'UTC') ||
       'UTC';
+    return this._assertValidTimezone(configured);
+  },
+
+  getWeekStartName(workspaceId) {
+    const dayNames = [
+      'Sunday', 'Monday', 'Tuesday', 'Wednesday',
+      'Thursday', 'Friday', 'Saturday'
+    ];
+    const workspaceOverride = MasterRepository.getGlobalSetting(
+      `WS_${workspaceId}_WEEK_STARTS`,
+      ''
+    );
+    const configured = String(
+      workspaceOverride ||
+      MasterRepository.getGlobalSetting('WEEK_STARTS', 'Sunday') ||
+      'Sunday'
+    ).trim();
+
+    const canonical = dayNames.find(
+      day => day.toLowerCase() === configured.toLowerCase()
+    );
+    if (!canonical) {
+      throw new AppError(
+        ERROR_CODES.VALIDATION_ERROR,
+        `Invalid week start '${configured}'. Expected a weekday name.`,
+        400
+      );
+    }
+    return canonical;
   },
 
   _parseDateKey(dateKey) {
@@ -107,6 +169,30 @@ const TimezoneService = {
     return date.toISOString().substring(0, 10);
   },
 
+  formatDateTime(workspaceId, dateValue) {
+    const date = dateValue instanceof Date ? dateValue : new Date(dateValue);
+    if (isNaN(date.getTime())) {
+      throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'Invalid UTC timestamp.', 400);
+    }
+    const timezone = this.getWorkspaceTimezone(workspaceId);
+    if (typeof Utilities !== 'undefined' && Utilities.formatDate) {
+      return Utilities.formatDate(date, timezone, 'yyyy-MM-dd HH:mm:ss') + ' ' + timezone;
+    }
+    if (typeof Intl !== 'undefined' && Intl.DateTimeFormat) {
+      return new Intl.DateTimeFormat('sv-SE', {
+        timeZone: timezone,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hourCycle: 'h23'
+      }).format(date) + ' ' + timezone;
+    }
+    return date.toISOString() + ' UTC';
+  },
+
   formatMonthKey(workspaceId, dateValue) {
     return this.formatDateKey(workspaceId, dateValue).substring(0, 7);
   },
@@ -133,9 +219,8 @@ const TimezoneService = {
       : this.formatDateKey(workspaceId, dateOrLocalKey);
 
     const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-    const configured = String(MasterRepository.getGlobalSetting('WEEK_STARTS', 'Sunday') || 'Sunday');
-    const configuredIndex = dayNames.findIndex(d => d.toLowerCase() === configured.toLowerCase());
-    const startDayIndex = configuredIndex >= 0 ? configuredIndex : 0;
+    const configured = this.getWeekStartName(workspaceId);
+    const startDayIndex = dayNames.indexOf(configured);
 
     const p = this._parseDateKey(localDateKey);
     const calendarDate = new Date(Date.UTC(p.year, p.month - 1, p.day));
