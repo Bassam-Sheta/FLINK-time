@@ -5,6 +5,50 @@
  */
 
 const TimesheetService = {
+  _assertTransition(fromStatus, toStatus) {
+    const from = String(fromStatus || '').toUpperCase();
+    const to = String(toStatus || '').toUpperCase();
+    const allowed = (CONSTANTS.TIMESHEET_TRANSITIONS &&
+      CONSTANTS.TIMESHEET_TRANSITIONS[from]) || [];
+    if (!allowed.includes(to)) {
+      throw new AppError(
+        ERROR_CODES.CONFLICT,
+        `Invalid timesheet state transition: ${from || 'UNKNOWN'} -> ${to || 'UNKNOWN'}.`,
+        409
+      );
+    }
+    return true;
+  },
+
+  _buildSubmissionSnapshot(entries) {
+    const seen = new Set();
+    return entries.map(entry => {
+      const entryId = String(entry.EntryID || '');
+      if (!entryId || seen.has(entryId)) {
+        throw new AppError(
+          ERROR_CODES.CONFLICT,
+          'Timesheet contains duplicate or missing entry IDs and cannot be submitted.',
+          409
+        );
+      }
+      seen.add(entryId);
+
+      const nextVersion = (parseInt(entry.Version, 10) || 1) + 1;
+      return {
+        entryId,
+        version: nextVersion,
+        startUtc: entry.StartUTC || '',
+        endUtc: entry.EndUTC || '',
+        durationSeconds: parseInt(entry.DurationSeconds, 10) || 0,
+        projectId: entry.ProjectID || '',
+        taskId: entry.TaskID || '',
+        billable: entry.Billable === true || entry.Billable === 'TRUE' || entry.Billable === 1,
+        hourlyRateSnapshot: parseFloat(entry.HourlyRateSnapshot) || 0,
+        costRateSnapshot: parseFloat(entry.CostRateSnapshot) || 0
+      };
+    });
+  },
+
   _resolveWeek(workspaceId, dateStr) {
     if (!dateStr) {
       throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'Invalid week date.');
@@ -225,12 +269,10 @@ const TimesheetService = {
         endDate
       );
 
-      if (existing && existing.Status === CONSTANTS.TIMESHEET_STATUS.APPROVED) {
-        throw new AppError(ERROR_CODES.CONFLICT, 'This timesheet has already been approved and cannot be resubmitted.', 409);
-      }
-      if (existing && existing.Status === CONSTANTS.TIMESHEET_STATUS.SUBMITTED) {
-        throw new AppError(ERROR_CODES.CONFLICT, 'This timesheet is already submitted and pending review.', 409);
-      }
+      const currentStatus = existing
+        ? String(existing.Status || '').toUpperCase()
+        : CONSTANTS.TIMESHEET_STATUS.OPEN;
+      this._assertTransition(currentStatus, CONSTANTS.TIMESHEET_STATUS.SUBMITTED);
 
       const now = new Date().toISOString();
       const timesheetId = existing ? existing.TimesheetID : Validation.generateId('TMS');
@@ -251,13 +293,18 @@ const TimesheetService = {
         }
       }
 
-      const entrySnapshot = entries.map(entry => ({
-        entryId: entry.EntryID,
-        version: parseInt(entry.Version, 10) || 1,
-        durationSeconds: parseInt(entry.DurationSeconds, 10) || 0,
-        hourlyRateSnapshot: parseFloat(entry.HourlyRateSnapshot) || 0,
-        costRateSnapshot: parseFloat(entry.CostRateSnapshot) || 0
-      }));
+      const entrySnapshot = this._buildSubmissionSnapshot(entries);
+      const snapshotTotalSeconds = entrySnapshot.reduce(
+        (sum, item) => sum + item.durationSeconds,
+        0
+      );
+      if (snapshotTotalSeconds !== totalSeconds) {
+        throw new AppError(
+          ERROR_CODES.CONFLICT,
+          'Timesheet snapshot total does not match the selected entries.',
+          409
+        );
+      }
 
       const tsData = {
         TimesheetID: timesheetId,
@@ -284,12 +331,16 @@ const TimesheetService = {
             entryId: entry.EntryID,
             TimesheetID: entry.TimesheetID || '',
             ApprovalStatus: entry.ApprovalStatus || CONSTANTS.TIMESHEET_STATUS.OPEN,
-            Locked: entry.Locked === true || entry.Locked === 'TRUE' || entry.Locked === 1
+            Locked: entry.Locked === true || entry.Locked === 'TRUE' || entry.Locked === 1,
+            Version: parseInt(entry.Version, 10) || 1
           };
           SheetRepository.updateTimeEntry(workspaceId, entry.EntryID, {
             TimesheetID: timesheetId,
             ApprovalStatus: CONSTANTS.TIMESHEET_STATUS.SUBMITTED,
-            Locked: true
+            Locked: true,
+            Version: previousState.Version + 1,
+            UpdatedAt: now,
+            UpdatedBy: authContext.userId
           });
           changedEntries.push(previousState);
         }
@@ -305,7 +356,8 @@ const TimesheetService = {
             SheetRepository.updateTimeEntry(workspaceId, prior.entryId, {
               TimesheetID: prior.TimesheetID,
               ApprovalStatus: prior.ApprovalStatus,
-              Locked: prior.Locked
+              Locked: prior.Locked,
+              Version: prior.Version
             });
           } catch (rollbackErr) {
             console.error(`Submission rollback failed for entry ${prior.entryId}: ${rollbackErr.message}`);
@@ -318,14 +370,18 @@ const TimesheetService = {
         try { SpreadsheetApp.flush(); } catch (fErr) {}
       }
 
-      SheetRepository.logWorkspaceAudit(workspaceId, {
-        ActorUserID: authContext.userId,
-        ActorRole: authContext.role,
-        EntityType: 'TIMESHEET',
-        EntityID: timesheetId,
-        Action: CONSTANTS.AUDIT_EVENTS.TIMESHEET_SUBMITTED,
-        AfterJSON: tsData
-      });
+      try {
+        SheetRepository.logWorkspaceAudit(workspaceId, {
+          ActorUserID: authContext.userId,
+          ActorRole: authContext.role,
+          EntityType: 'TIMESHEET',
+          EntityID: timesheetId,
+          Action: CONSTANTS.AUDIT_EVENTS.TIMESHEET_SUBMITTED,
+          AfterJSON: tsData
+        });
+      } catch (auditErr) {
+        console.error('Timesheet submission audit failed after commit: ' + auditErr.message);
+      }
 
       return tsData;
     } finally {
