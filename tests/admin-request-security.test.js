@@ -35,8 +35,13 @@ function loadService(overrides = {}) {
     },
     REQUEST_STATUS: {
       PENDING: 'PENDING',
+      APPROVED: 'APPROVED',
       REJECTED: 'REJECTED',
       EXECUTED: 'EXECUTED'
+    },
+    WORKSPACE_STATUS: {
+      ACTIVE: 'ACTIVE',
+      SUSPENDED: 'SUSPENDED'
     },
     AUDIT_EVENTS: {
       REQUEST_SUBMITTED: 'REQUEST_SUBMITTED',
@@ -61,6 +66,11 @@ function loadService(overrides = {}) {
   };
   global.SecurityService = {
     generateRandomHex() { return 'abcdef12'; }
+  };
+  global.LockService = {
+    getScriptLock() {
+      return { waitLock() {}, releaseLock() {} };
+    }
   };
   Object.assign(global, overrides);
   delete require.cache[require.resolve(servicePath)];
@@ -136,8 +146,12 @@ test('approved lifecycle request revalidates target workspace membership', () =>
     MasterRepository: {
       getRequest() { return req; },
       findAccountById() { return { UserID: 'U2', Role: 'USER' }; },
+      getWorkspace() { return { WorkspaceID: 'W1', Status: 'ACTIVE' }; },
       getWorkspaceAccessForUser() { return []; },
-      updateRequest() { throw new Error('must not update request'); },
+      updateRequest(_id, patch) {
+        Object.assign(req, patch);
+        return { ...req };
+      },
       logGlobalAudit() {}
     },
     AuthService: {
@@ -159,4 +173,5 @@ test('approved lifecycle request revalidates target workspace membership', () =>
       err.code === 'WORKSPACE_DENIED'
   );
   assert.equal(executed, false);
+  assert.equal(req.Status, 'PENDING', 'failed execution must release the APPROVED claim for retry');
 });
