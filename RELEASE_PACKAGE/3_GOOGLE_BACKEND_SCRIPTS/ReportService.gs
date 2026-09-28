@@ -47,7 +47,9 @@ const ReportService = {
         case 'task':
           return taskMap[entry.TaskID] || entry.TaskID || 'No Task';
         case 'date':
-          return (entry.StartUTC || '').substring(0, 10) || 'Unknown Date';
+          return entry.StartUTC
+            ? TimezoneService.formatDateKey(workspaceId, entry.StartUTC)
+            : 'Unknown Date';
         case 'billable':
           return (entry.Billable === true || entry.Billable === 'TRUE') ? 'Billable' : 'Non-Billable';
         case 'tag':
@@ -210,6 +212,10 @@ const ReportService = {
         tags: e.Tags,
         startUTC: e.StartUTC,
         endUTC: e.EndUTC,
+        businessDate: e.StartUTC ? TimezoneService.formatDateKey(workspaceId, e.StartUTC) : '',
+        startLocal: e.StartUTC ? TimezoneService.formatDateTime(workspaceId, e.StartUTC) : '',
+        endLocal: e.EndUTC ? TimezoneService.formatDateTime(workspaceId, e.EndUTC) : '',
+        timezone: TimezoneService.getWorkspaceTimezone(workspaceId),
         durationSeconds: dur,
         durationFormatted: this._formatSeconds(dur),
         billable: e.Billable === true || e.Billable === 'TRUE' || e.Billable === 1,
