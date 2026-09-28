@@ -322,7 +322,7 @@ const AdminRequestService = {
       throw executionErr;
     }
   }
-};};
+};
 
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
