@@ -306,15 +306,14 @@ const UserService = {
       };
 
       const accesses = MasterRepository.getWorkspaceAccessForUser(targetUserId);
+      const activeAccesses = accesses.filter(acc => {
+        const ws = MasterRepository.getWorkspace(acc.WorkspaceID);
+        return ws && ws.Status === CONSTANTS.WORKSPACE_STATUS.ACTIVE;
+      });
       const finalizedTimers = [];
 
-      for (const acc of accesses) {
-        const ws = MasterRepository.getWorkspace(acc.WorkspaceID);
-        if (!ws || ws.Status !== CONSTANTS.WORKSPACE_STATUS.ACTIVE) {
-          continue;
-        }
-
-        // Preserve already-worked time instead of deleting an active timer.
+      // Phase 1: preserve every active timer before changing account/member state.
+      for (const acc of activeAccesses) {
         const timer = SheetRepository.getActiveTimer(acc.WorkspaceID, targetUserId);
         if (timer) {
           const entry = TimerService._finalizeActiveTimerLocked(
@@ -331,20 +330,45 @@ const UserService = {
             durationSeconds: entry.DurationSeconds
           });
         }
-
-        try {
-          SheetRepository.updateMember(acc.WorkspaceID, targetUserId, {
-            Status: CONSTANTS.ACCOUNT_STATUS.PASSIVE,
-            LeftAt: new Date().toISOString()
-          });
-        } catch (memberErr) {
-          console.warn(
-            `Could not update workspace member status for ${targetUserId} in ${acc.WorkspaceID}: ${memberErr.message}`
-          );
-        }
       }
 
-      // Only mark the account passive after active time has been safely finalized.
+      // Phase 2: transition all active workspace member rows. Do not silently
+      // continue if one workspace fails, because that would leave a PASSIVE
+      // account with an ACTIVE membership record. Roll back member rows already
+      // changed and leave the account ACTIVE so the operation can be retried.
+      const changedMembers = [];
+      const leftAt = new Date().toISOString();
+      try {
+        for (const acc of activeAccesses) {
+          const beforeMember = SheetRepository.getMember(acc.WorkspaceID, targetUserId);
+          SheetRepository.updateMember(acc.WorkspaceID, targetUserId, {
+            Status: CONSTANTS.ACCOUNT_STATUS.PASSIVE,
+            LeftAt: leftAt
+          });
+          changedMembers.push({
+            workspaceId: acc.WorkspaceID,
+            status: beforeMember ? beforeMember.Status : CONSTANTS.ACCOUNT_STATUS.ACTIVE,
+            leftAt: beforeMember ? (beforeMember.LeftAt || '') : ''
+          });
+        }
+      } catch (memberErr) {
+        for (const changed of changedMembers.reverse()) {
+          try {
+            SheetRepository.updateMember(changed.workspaceId, targetUserId, {
+              Status: changed.status || CONSTANTS.ACCOUNT_STATUS.ACTIVE,
+              LeftAt: changed.leftAt
+            });
+          } catch (rollbackErr) {
+            console.error(
+              `Member rollback failed for ${targetUserId} in ${changed.workspaceId}: ${rollbackErr.message}`
+            );
+          }
+        }
+        throw memberErr;
+      }
+
+      // Only mark the account passive after active time and every active member
+      // row have been transitioned safely.
       MasterRepository.updateAccount(targetUserId, {
         Status: CONSTANTS.ACCOUNT_STATUS.PASSIVE,
         UpdatedAt: new Date().toISOString(),
