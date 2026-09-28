@@ -415,10 +415,21 @@ function dispatchAction(action, data, authContextOverride = null) {
       return TimeEntryService.createManualEntry(authContext, wsId, payload);
 
     case 'entries.update':
-      return TimeEntryService.updateEntry(authContext, wsId, payload.entryId, payload.updates);
+      return TimeEntryService.updateEntry(
+        authContext,
+        wsId,
+        payload.entryId,
+        payload.updates,
+        payload.expectedVersion
+      );
 
     case 'entries.delete':
-      return TimeEntryService.deleteEntry(authContext, wsId, payload.entryId);
+      return TimeEntryService.deleteEntry(
+        authContext,
+        wsId,
+        payload.entryId,
+        payload.expectedVersion
+      );
 
     case 'entries.list':
       return TimeEntryService.listEntries(authContext, wsId, payload.filters);
