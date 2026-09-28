@@ -17,226 +17,308 @@ class AppError extends Error {
   }
 }
 
-function installBaseGlobals(overrides = {}) {
+function makeEntry(id, overrides = {}) {
+  return {
+    EntryID:id,
+    UserID:'USR-1',
+    ProjectID:'P1',
+    TaskID:'T1',
+    StartUTC:'2026-09-28T08:00:00.000Z',
+    EndUTC:'2026-09-28T09:00:00.000Z',
+    DurationSeconds:3600,
+    Billable:true,
+    HourlyRateSnapshot:100,
+    CostRateSnapshot:40,
+    TimesheetID:'TMS-1',
+    ApprovalStatus:'SUBMITTED',
+    Locked:true,
+    Version:2,
+    UpdatedAt:'2026-09-28T09:00:00.000Z',
+    UpdatedBy:'USR-1',
+    ...overrides
+  };
+}
+
+function makeSnapshot(entries) {
+  return entries.map(e => ({
+    entryId:e.EntryID,
+    version:parseInt(e.Version, 10) || 1,
+    startUtc:e.StartUTC,
+    endUtc:e.EndUTC,
+    durationSeconds:parseInt(e.DurationSeconds, 10) || 0,
+    projectId:e.ProjectID || '',
+    taskId:e.TaskID || '',
+    billable:e.Billable === true || e.Billable === 'TRUE' || e.Billable === 1,
+    hourlyRateSnapshot:parseFloat(e.HourlyRateSnapshot) || 0,
+    costRateSnapshot:parseFloat(e.CostRateSnapshot) || 0
+  }));
+}
+
+function makeTimesheet(entries, overrides = {}) {
+  return {
+    TimesheetID:'TMS-1',
+    UserID:'USR-1',
+    Status:'SUBMITTED',
+    PeriodStart:'2026-09-27T00:00:00.000Z',
+    PeriodEnd:'2026-10-03T23:59:59.999Z',
+    TotalSeconds:entries.reduce((sum,e) => sum + (parseInt(e.DurationSeconds,10)||0), 0),
+    SubmittedAt:'2026-10-04T00:00:00.000Z',
+    ReviewedBy:'',
+    ReviewedAt:'',
+    ReviewComment:'',
+    LockedAt:'',
+    EntrySnapshotJSON:JSON.stringify(makeSnapshot(entries)),
+    ...overrides
+  };
+}
+
+function fixture(options = {}) {
+  const entries = new Map(
+    (options.entries || [makeEntry('E1'), makeEntry('E2')])
+      .map(e => [e.EntryID, { ...e }])
+  );
+  const timesheet = {
+    ...makeTimesheet([...entries.values()]),
+    ...(options.timesheet || {})
+  };
+  const calls = [];
+  let approvalLogs = 0;
+  let auditLogs = 0;
+  let headerFailuresRemaining = options.headerFailures || 0;
+
   global.AppError = AppError;
   global.ERROR_CODES = {
-    AUTH_REQUIRED: 'AUTH_REQUIRED',
-    VALIDATION_ERROR: 'VALIDATION_ERROR',
-    NOT_FOUND: 'NOT_FOUND',
-    CONFLICT: 'CONFLICT',
-    SERVER_BUSY: 'SERVER_BUSY'
+    AUTH_REQUIRED:'AUTH_REQUIRED',
+    VALIDATION_ERROR:'VALIDATION_ERROR',
+    NOT_FOUND:'NOT_FOUND',
+    CONFLICT:'CONFLICT',
+    SERVER_BUSY:'SERVER_BUSY'
   };
   global.CONSTANTS = {
-    ROLES: { SUPER_ADMIN: 'SUPER_ADMIN', ADMIN: 'ADMIN', USER: 'USER' },
-    TIMESHEET_STATUS: {
-      OPEN: 'OPEN',
-      SUBMITTED: 'SUBMITTED',
-      APPROVED: 'APPROVED',
-      REJECTED: 'REJECTED'
+    ROLES:{ SUPER_ADMIN:'SUPER_ADMIN', ADMIN:'ADMIN', USER:'USER' },
+    TIMESHEET_STATUS:{
+      OPEN:'OPEN',
+      SUBMITTED:'SUBMITTED',
+      APPROVED:'APPROVED',
+      REJECTED:'REJECTED'
     },
-    AUDIT_EVENTS: {
-      TIMESHEET_APPROVED: 'TIMESHEET_APPROVED',
-      TIMESHEET_REJECTED: 'TIMESHEET_REJECTED',
-      TIMESHEET_REOPENED: 'TIMESHEET_REOPENED'
+    TIMESHEET_TRANSITIONS:{
+      OPEN:['SUBMITTED'],
+      REJECTED:['SUBMITTED'],
+      SUBMITTED:['APPROVED','REJECTED'],
+      APPROVED:['OPEN']
+    },
+    AUDIT_EVENTS:{
+      TIMESHEET_APPROVED:'TIMESHEET_APPROVED',
+      TIMESHEET_REJECTED:'TIMESHEET_REJECTED',
+      TIMESHEET_REOPENED:'TIMESHEET_REOPENED'
     }
   };
   global.Validation = {
-    sanitizeCellValue(value) { return String(value); },
+    sanitizeCellValue(v) { return String(v); },
     generateId(prefix) { return prefix + '-TEST'; }
   };
   global.AuthorizationService = {
     assertWorkspaceAccess() {},
-    assertRole() {}
+    assertRole(ctx, allowed) {
+      if (!allowed.includes(ctx.role)) {
+        throw new AppError('AUTH_REQUIRED', 'role denied', 403);
+      }
+    }
   };
-  global.SpreadsheetApp = { flush() {} };
   global.LockService = {
     getScriptLock() {
-      return {
-        tryLock() { return true; },
-        releaseLock() {}
-      };
+      return { tryLock() { return true; }, releaseLock() {} };
     }
   };
-  Object.assign(global, overrides);
-}
+  global.SpreadsheetApp = { flush() {} };
+  global.SheetRepository = {
+    getTimesheet() { return { ...timesheet }; },
+    getEntry(_ws,id) {
+      const e = entries.get(id);
+      return e ? { ...e } : null;
+    },
+    listTimeEntries() {
+      return [...entries.values()].map(e => ({ ...e }));
+    },
+    updateTimeEntry(_ws,id,patch) {
+      calls.push({ type:'entry', id, patch:{ ...patch } });
+      const e = entries.get(id);
+      if (!e) throw new Error('entry missing');
+      Object.assign(e, patch);
+      if (options.failEntryId === id && options.failEntryStatus === patch.ApprovalStatus) {
+        options.failEntryId = null;
+        throw new Error('entry write failure');
+      }
+      return { ...e };
+    },
+    updateTimesheet(_ws,_id,patch) {
+      calls.push({ type:'timesheet', patch:{ ...patch } });
+      Object.assign(timesheet, patch);
+      if (headerFailuresRemaining > 0) {
+        headerFailuresRemaining -= 1;
+        throw new Error('header write failure');
+      }
+      return { ...timesheet };
+    },
+    logApproval() {
+      approvalLogs += 1;
+      if (options.auditFails) throw new Error('approval audit failed');
+    },
+    logWorkspaceAudit() {
+      auditLogs += 1;
+      if (options.workspaceAuditFails) throw new Error('workspace audit failed');
+    }
+  };
 
-function loadService(overrides = {}) {
-  installBaseGlobals(overrides);
   delete require.cache[require.resolve(servicePath)];
-  return require(servicePath).ApprovalService;
-}
-
-function submittedTimesheet() {
   return {
-    TimesheetID: 'TMS-1',
-    UserID: 'USR-1',
-    Status: 'SUBMITTED',
-    PeriodStart: '2026-09-20T00:00:00.000Z',
-    PeriodEnd: '2026-09-26T23:59:59.999Z',
-    TotalSeconds: 7200,
-    EntrySnapshotJSON: JSON.stringify([
-      { entryId: 'E1', version: 1, durationSeconds: 3600 },
-      { entryId: 'E2', version: 1, durationSeconds: 3600 }
-    ])
+    service:require(servicePath).ApprovalService,
+    entries,
+    timesheet,
+    calls,
+    getApprovalLogs:() => approvalLogs,
+    getAuditLogs:() => auditLogs
   };
 }
 
-function submittedEntry(id) {
-  return {
-    EntryID: id,
-    TimesheetID: 'TMS-1',
-    ApprovalStatus: 'SUBMITTED',
-    Locked: true,
-    Version: 1,
-    DurationSeconds: 3600
-  };
-}
+const admin = { userId:'A1', role:'ADMIN' };
+const superAdmin = { userId:'SA1', role:'SUPER_ADMIN' };
 
-test('approve validates immutable membership before changing timesheet header', () => {
-  const calls = [];
-  const timesheet = submittedTimesheet();
-  const entries = { E1: submittedEntry('E1') };
-
-  const ApprovalService = loadService({
-    SheetRepository: {
-      getTimesheet() { return timesheet; },
-      getEntry(_ws, id) { return entries[id] || null; },
-      updateTimeEntry() { calls.push('entry-update'); },
-      updateTimesheet() { calls.push('timesheet-update'); },
-      logApproval() {},
-      logWorkspaceAudit() {}
-    }
-  });
+test('immutable snapshot rejects changed project/rate data before approval', () => {
+  const fx = fixture();
+  fx.entries.get('E1').ProjectID = 'P2';
 
   assert.throws(
-    () => ApprovalService.approveTimesheet(
-      { userId: 'A1', role: 'ADMIN' }, 'W1', 'TMS-1', 'ok'
-    ),
-    /Submitted entry E2 no longer exists/
+    () => fx.service.approveTimesheet(admin, 'W1', 'TMS-1', 'ok'),
+    err => err instanceof AppError &&
+      err.code === 'CONFLICT' &&
+      /project mismatch/.test(err.message)
   );
-
-  assert.deepEqual(calls, []);
+  assert.equal(fx.calls.length, 0);
 });
 
-test('approve rolls back earlier entry mutations when a later entry write fails', () => {
-  const calls = [];
-  const timesheet = submittedTimesheet();
-  const entries = { E1: submittedEntry('E1'), E2: submittedEntry('E2') };
-  let e2Attempts = 0;
-
-  const ApprovalService = loadService({
-    SheetRepository: {
-      getTimesheet() { return timesheet; },
-      getEntry(_ws, id) { return entries[id]; },
-      updateTimeEntry(_ws, id, updates) {
-        calls.push({ type: 'entry', id, updates: { ...updates } });
-        if (id === 'E2' && updates.ApprovalStatus === 'APPROVED' && e2Attempts++ === 0) {
-          throw new Error('simulated write failure');
-        }
-      },
-      updateTimesheet() {
-        calls.push({ type: 'timesheet' });
-        return {};
-      },
-      logApproval() {},
-      logWorkspaceAudit() {}
-    }
-  });
+test('immutable snapshot rejects an extra entry bound to the timesheet', () => {
+  const fx = fixture();
+  fx.entries.set('EXTRA', makeEntry('EXTRA', {
+    DurationSeconds:10,
+    StartUTC:'2026-09-29T08:00:00.000Z',
+    EndUTC:'2026-09-29T08:00:10.000Z'
+  }));
 
   assert.throws(
-    () => ApprovalService.approveTimesheet(
-      { userId: 'A1', role: 'ADMIN' }, 'W1', 'TMS-1', 'ok'
-    ),
-    /simulated write failure/
+    () => fx.service.approveTimesheet(admin, 'W1', 'TMS-1', 'ok'),
+    /entry membership changed/
   );
+  assert.equal(fx.calls.length, 0);
+});
 
-  assert.equal(calls.some(c => c.type === 'timesheet'), false);
-  assert.equal(
-    calls.some(c =>
-      c.type === 'entry' &&
-      c.id === 'E1' &&
-      c.updates.ApprovalStatus === 'SUBMITTED' &&
-      c.updates.Locked === true
-    ),
-    true
+test('missing immutable snapshot fails closed instead of using date-range fallback', () => {
+  const fx = fixture({ timesheet:{ EntrySnapshotJSON:'' } });
+  assert.throws(
+    () => fx.service.approveTimesheet(admin, 'W1', 'TMS-1', 'ok'),
+    /no immutable submission snapshot/
   );
 });
 
-test('approve commits timesheet header only after all entries are approved', () => {
-  const order = [];
-  const timesheet = submittedTimesheet();
-  const entries = { E1: submittedEntry('E1'), E2: submittedEntry('E2') };
-
-  const ApprovalService = loadService({
-    SheetRepository: {
-      getTimesheet() { return timesheet; },
-      getEntry(_ws, id) { return entries[id]; },
-      updateTimeEntry(_ws, id, updates) {
-        order.push('entry:' + id + ':' + updates.ApprovalStatus);
-      },
-      updateTimesheet(_ws, id, updates) {
-        order.push('timesheet:' + updates.Status);
-        return { ...timesheet, ...updates };
-      },
-      logApproval() {},
-      logWorkspaceAudit() {}
-    }
-  });
-
-  const result = ApprovalService.approveTimesheet(
-    { userId: 'A1', role: 'ADMIN' }, 'W1', 'TMS-1', 'ok'
+test('approval allows only SUBMITTED -> APPROVED', () => {
+  const fx = fixture({ timesheet:{ Status:'APPROVED' } });
+  assert.throws(
+    () => fx.service.approveTimesheet(admin, 'W1', 'TMS-1', 'ok'),
+    /Invalid timesheet state transition/
   );
+  assert.equal(fx.calls.length, 0);
+});
+
+test('approval commits member entries before APPROVED header', () => {
+  const fx = fixture();
+  const result = fx.service.approveTimesheet(admin, 'W1', 'TMS-1', 'ok');
 
   assert.equal(result.Status, 'APPROVED');
-  assert.deepEqual(order, [
+  const sequence = fx.calls.map(c =>
+    c.type === 'entry' ? 'entry:' + c.id + ':' + c.patch.ApprovalStatus : 'header:' + c.patch.Status
+  );
+  assert.deepEqual(sequence.slice(0,3), [
     'entry:E1:APPROVED',
     'entry:E2:APPROVED',
-    'timesheet:APPROVED'
+    'header:APPROVED'
   ]);
 });
 
-test('reject refuses non-SUBMITTED timesheet without mutating records', () => {
-  const calls = [];
-  const timesheet = { ...submittedTimesheet(), Status: 'APPROVED' };
-
-  const ApprovalService = loadService({
-    SheetRepository: {
-      getTimesheet() { return timesheet; },
-      updateTimeEntry() { calls.push('entry'); },
-      updateTimesheet() { calls.push('timesheet'); },
-      logApproval() {},
-      logWorkspaceAudit() {}
-    }
-  });
+test('approval header failure restores exact submitted header and entry state', () => {
+  const fx = fixture({ headerFailures:1 });
 
   assert.throws(
-    () => ApprovalService.rejectTimesheet(
-      { userId: 'A1', role: 'ADMIN' }, 'W1', 'TMS-1', 'reason'
-    ),
-    /Only SUBMITTED timesheets can be rejected/
+    () => fx.service.approveTimesheet(admin, 'W1', 'TMS-1', 'ok'),
+    /header write failure/
   );
-  assert.deepEqual(calls, []);
+
+  assert.equal(fx.timesheet.Status, 'SUBMITTED');
+  for (const e of fx.entries.values()) {
+    assert.equal(e.ApprovalStatus, 'SUBMITTED');
+    assert.equal(e.Locked, true);
+    assert.equal(e.TimesheetID, 'TMS-1');
+    assert.equal(e.Version, 2);
+  }
 });
 
-test('reopen refuses non-APPROVED timesheet without mutating records', () => {
-  const calls = [];
-  const timesheet = submittedTimesheet();
+test('rejection clears editable entries from old submission and increments versions', () => {
+  const fx = fixture();
+  const result = fx.service.rejectTimesheet(admin, 'W1', 'TMS-1', 'needs correction');
 
-  const ApprovalService = loadService({
-    SheetRepository: {
-      getTimesheet() { return timesheet; },
-      updateTimeEntry() { calls.push('entry'); },
-      updateTimesheet() { calls.push('timesheet'); },
-      logApproval() {},
-      logWorkspaceAudit() {}
+  assert.equal(result.Status, 'REJECTED');
+  assert.equal(result.EntrySnapshotJSON, '');
+  for (const e of fx.entries.values()) {
+    assert.equal(e.ApprovalStatus, 'REJECTED');
+    assert.equal(e.Locked, false);
+    assert.equal(e.TimesheetID, '');
+    assert.equal(e.Version, 3);
+  }
+});
+
+test('rejection is allowed only from SUBMITTED state', () => {
+  const fx = fixture({ timesheet:{ Status:'APPROVED' } });
+  assert.throws(
+    () => fx.service.rejectTimesheet(admin, 'W1', 'TMS-1', 'reason'),
+    /Invalid timesheet state transition/
+  );
+});
+
+test('reopen requires Super Admin reason and performs APPROVED -> OPEN only', () => {
+  const approvedEntries = [
+    makeEntry('E1', { ApprovalStatus:'APPROVED' }),
+    makeEntry('E2', { ApprovalStatus:'APPROVED' })
+  ];
+  const fx = fixture({
+    entries:approvedEntries,
+    timesheet:{
+      Status:'APPROVED',
+      LockedAt:'2026-10-04T01:00:00.000Z',
+      EntrySnapshotJSON:JSON.stringify(makeSnapshot(approvedEntries))
     }
   });
 
   assert.throws(
-    () => ApprovalService.reopenTimesheet(
-      { userId: 'SA1', role: 'SUPER_ADMIN' }, 'W1', 'TMS-1', 'reason'
-    ),
-    /Only APPROVED timesheets can be reopened/
+    () => fx.service.reopenTimesheet(superAdmin, 'W1', 'TMS-1', ''),
+    /reason is required/
   );
-  assert.deepEqual(calls, []);
+
+  const result = fx.service.reopenTimesheet(
+    superAdmin, 'W1', 'TMS-1', 'Correction required'
+  );
+  assert.equal(result.Status, 'OPEN');
+  assert.equal(result.EntrySnapshotJSON, '');
+  for (const e of fx.entries.values()) {
+    assert.equal(e.ApprovalStatus, 'OPEN');
+    assert.equal(e.Locked, false);
+    assert.equal(e.TimesheetID, '');
+    assert.equal(e.Version, 3);
+  }
+});
+
+test('audit failure after committed approval does not report business mutation as failed', () => {
+  const fx = fixture({ auditFails:true });
+  const result = fx.service.approveTimesheet(admin, 'W1', 'TMS-1', 'ok');
+  assert.equal(result.Status, 'APPROVED');
+  assert.equal(fx.timesheet.Status, 'APPROVED');
 });
