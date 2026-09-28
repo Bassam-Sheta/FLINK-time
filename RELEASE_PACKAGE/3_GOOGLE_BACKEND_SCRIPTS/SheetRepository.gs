@@ -330,6 +330,14 @@ const SheetRepository = {
     return { ...ts, ...updates };
   },
 
+  deleteTimesheet(workspaceId, timesheetId) {
+    const { rows } = this.getTableData(workspaceId, CONSTANTS.WORKSPACE_TABS.TIMESHEETS);
+    const ts = rows.find(t => t.TimesheetID === timesheetId);
+    if (!ts) return false;
+    this.deleteRow(workspaceId, CONSTANTS.WORKSPACE_TABS.TIMESHEETS, ts._rowIndex);
+    return true;
+  },
+
   logApproval(workspaceId, approvalData) {
     return this.appendRow(workspaceId, CONSTANTS.WORKSPACE_TABS.APPROVALS, approvalData);
   },
