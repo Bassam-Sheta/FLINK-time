@@ -56,6 +56,15 @@ const CONSTANTS = {
     LOCKED: 'LOCKED'
   },
 
+  // Canonical timesheet state machine. LOCKED remains a legacy/storage value
+  // but is not a valid workflow transition target.
+  TIMESHEET_TRANSITIONS: {
+    OPEN: ['SUBMITTED'],
+    REJECTED: ['SUBMITTED'],
+    SUBMITTED: ['APPROVED', 'REJECTED'],
+    APPROVED: ['OPEN']
+  },
+
   ENTRY_SOURCE: {
     WEB: 'WEB',
     PORTABLE_WINDOWS: 'PORTABLE_WINDOWS',
