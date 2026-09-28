@@ -334,6 +334,9 @@ const TimesheetService = {
             Locked: entry.Locked === true || entry.Locked === 'TRUE' || entry.Locked === 1,
             Version: parseInt(entry.Version, 10) || 1
           };
+          // Register compensation state before the write so even a partially
+          // applied Sheet mutation that throws can be restored.
+          changedEntries.push(previousState);
           SheetRepository.updateTimeEntry(workspaceId, entry.EntryID, {
             TimesheetID: timesheetId,
             ApprovalStatus: CONSTANTS.TIMESHEET_STATUS.SUBMITTED,
@@ -342,7 +345,6 @@ const TimesheetService = {
             UpdatedAt: now,
             UpdatedBy: authContext.userId
           });
-          changedEntries.push(previousState);
         }
 
         if (existing) {
