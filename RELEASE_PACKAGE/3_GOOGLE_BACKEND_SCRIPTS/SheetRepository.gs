@@ -216,9 +216,14 @@ const SheetRepository = {
     return rows.find(t => t.TagID === tagId) || null;
   },
 
-  listUserProjectAccess(workspaceId, userId) {
+  listAllUserProjectAccess(workspaceId) {
     const { rows } = this.getTableData(workspaceId, CONSTANTS.WORKSPACE_TABS.USER_PROJECT_ACCESS);
-    return rows.filter(row => row.UserID === userId);
+    return rows;
+  },
+
+  listUserProjectAccess(workspaceId, userId) {
+    return this.listAllUserProjectAccess(workspaceId)
+      .filter(row => row.UserID === userId);
   },
 
   createTag(workspaceId, tagData) {
@@ -244,9 +249,9 @@ const SheetRepository = {
   deleteActiveTimer(workspaceId, userId) {
     const { rows } = this.getTableData(workspaceId, CONSTANTS.WORKSPACE_TABS.ACTIVE_TIMERS);
     const timer = rows.find(t => t.UserID === userId);
-    if (timer) {
-      this.deleteRow(workspaceId, CONSTANTS.WORKSPACE_TABS.ACTIVE_TIMERS, timer._rowIndex);
-    }
+    if (!timer) return false;
+    this.deleteRow(workspaceId, CONSTANTS.WORKSPACE_TABS.ACTIVE_TIMERS, timer._rowIndex);
+    return true;
   },
 
   /* ------------------- TIME ENTRIES ------------------- */
@@ -275,9 +280,14 @@ const SheetRepository = {
     });
   },
 
-  getEntry(workspaceId, entryId) {
+  getEntryAnyStatus(workspaceId, entryId) {
     const { rows } = this.getTableData(workspaceId, CONSTANTS.WORKSPACE_TABS.TIME_ENTRIES);
-    return rows.find(e => e.EntryID === entryId && e.Status !== 'DELETED') || null;
+    return rows.find(e => e.EntryID === entryId) || null;
+  },
+
+  getEntry(workspaceId, entryId) {
+    const entry = this.getEntryAnyStatus(workspaceId, entryId);
+    return entry && entry.Status !== 'DELETED' ? entry : null;
   },
 
   createTimeEntry(workspaceId, entryData) {
