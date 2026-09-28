@@ -27,7 +27,22 @@ const TimeEntryService = {
         payload,
         { manual: true, enforceRequired: true }
       );
-      const durationSeconds = Validation.validateDateRange(payload.startUtc, payload.endUtc);
+      const startUtc = new Date(payload.startUtc).toISOString();
+      const endUtc = new Date(payload.endUtc).toISOString();
+      const durationSeconds = Validation.validateDateRange(startUtc, endUtc);
+      if (durationSeconds <= 0) {
+        throw new AppError(
+          ERROR_CODES.VALIDATION_ERROR,
+          'Manual time entry duration must be greater than zero.',
+          400
+        );
+      }
+      if (authContext.role === CONSTANTS.ROLES.USER) {
+        TrackingPolicyService.assertEntryEditableByAge(workspaceId, {
+          StartUTC: startUtc,
+          EndUTC: endUtc
+        });
+      }
       const now = new Date().toISOString();
 
       const hourlyRateSnapshot = tracking.project ? (parseFloat(tracking.project.HourlyRate) || 0) : 0;
@@ -41,8 +56,8 @@ const TimeEntryService = {
         TaskID: tracking.taskId,
         Description: tracking.description,
         Tags: tracking.tagIdsCsv,
-        StartUTC: payload.startUtc,
-        EndUTC: payload.endUtc,
+        StartUTC: startUtc,
+        EndUTC: endUtc,
         DurationSeconds: durationSeconds,
         Billable: tracking.billable,
         HourlyRateSnapshot: hourlyRateSnapshot,
@@ -69,7 +84,11 @@ const TimeEntryService = {
       }
 
       if (typeof RollupService !== 'undefined' && RollupService.recordTimeEntry) {
-        RollupService.recordTimeEntry(workspaceId, timeEntry);
+        try {
+          RollupService.recordTimeEntry(workspaceId, timeEntry);
+        } catch (rollupErr) {
+          console.warn('Manual-entry rollup update notice: ' + rollupErr.message);
+        }
       }
 
       SheetRepository.logWorkspaceAudit(workspaceId, {
@@ -98,6 +117,20 @@ const TimeEntryService = {
    */
   updateEntry(authContext, workspaceId, entryId, updates, expectedVersionParam = null) {
     AuthorizationService.assertWorkspaceAccess(authContext, workspaceId);
+    if (!updates || typeof updates !== 'object' || Array.isArray(updates)) {
+      throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'updates must be an object.', 400);
+    }
+
+    const mutableFields = [
+      'projectId', 'taskId', 'description', 'tags', 'billable', 'startUtc', 'endUtc'
+    ];
+    if (!mutableFields.some(field => Object.prototype.hasOwnProperty.call(updates, field))) {
+      throw new AppError(
+        ERROR_CODES.VALIDATION_ERROR,
+        'At least one editable time-entry field is required.',
+        400
+      );
+    }
 
     let scriptLock = null;
     if (typeof LockService !== 'undefined' && LockService.getScriptLock) {
@@ -115,6 +148,7 @@ const TimeEntryService = {
       if (!entry) throw new AppError(ERROR_CODES.NOT_FOUND, `Time entry ${entryId} not found.`);
 
       AuthorizationService.assertRecordOwnership(authContext, entry.UserID);
+      Validation.assertRecordVersion(entry, expectedVersion);
       if (authContext.role === CONSTANTS.ROLES.USER) {
         TrackingPolicyService.assertEntryEditableByAge(workspaceId, entry);
       }
@@ -126,18 +160,19 @@ const TimeEntryService = {
         throw new AppError(ERROR_CODES.ENTRY_LOCKED, 'This time entry is locked, pending approval, or part of an approved timesheet.', 403);
       }
 
-      // Optimistic Concurrency check inside critical section
-      const expVer = updates.expectedVersion !== undefined ? updates.expectedVersion : expectedVersionParam;
-      if (expVer !== null && expVer !== undefined) {
-        const currentVersion = parseInt(entry.Version, 10) || 1;
-        if (currentVersion !== parseInt(expVer, 10)) {
-          throw new AppError(
-            ERROR_CODES.CONFLICT,
-            'This entry was modified by another operation. Please refresh and try again.',
-            409
-          );
-        }
+      // Every client mutation must name the version it read. Optional version
+      // checks allow silent lost updates, so fail closed when the version is absent.
+      const expVer = updates.expectedVersion !== undefined
+        ? updates.expectedVersion
+        : expectedVersionParam;
+      if (expVer === null || expVer === undefined || expVer === '') {
+        throw new AppError(
+          ERROR_CODES.VALIDATION_ERROR,
+          'expectedVersion is required when updating a time entry.',
+          400
+        );
       }
+      Validation.assertRecordVersion(entry, expVer);
 
       const mergedTrackingPayload = {
         projectId: updates.projectId !== undefined ? updates.projectId : entry.ProjectID,
@@ -156,8 +191,15 @@ const TimeEntryService = {
       const allowed = {};
       if (updates.projectId !== undefined) {
         allowed.ProjectID = tracking.projectId;
-        allowed.HourlyRateSnapshot = tracking.project ? (parseFloat(tracking.project.HourlyRate) || 0) : 0;
-        allowed.CostRateSnapshot = tracking.project ? (parseFloat(tracking.project.CostRate) || 0) : 0;
+        const projectChanged = String(tracking.projectId || '') !== String(entry.ProjectID || '');
+        if (projectChanged) {
+          allowed.HourlyRateSnapshot = tracking.project
+            ? (parseFloat(tracking.project.HourlyRate) || 0)
+            : 0;
+          allowed.CostRateSnapshot = tracking.project
+            ? (parseFloat(tracking.project.CostRate) || 0)
+            : 0;
+        }
       }
       if (updates.taskId !== undefined) allowed.TaskID = tracking.taskId;
       if (updates.description !== undefined) allowed.Description = tracking.description;
@@ -165,11 +207,30 @@ const TimeEntryService = {
       if (updates.billable !== undefined) allowed.Billable = tracking.billable;
 
       if (updates.startUtc !== undefined || updates.endUtc !== undefined) {
-        const nextStart = updates.startUtc !== undefined ? updates.startUtc : entry.StartUTC;
-        const nextEnd = updates.endUtc !== undefined ? updates.endUtc : entry.EndUTC;
+        const nextStart = new Date(
+          updates.startUtc !== undefined ? updates.startUtc : entry.StartUTC
+        ).toISOString();
+        const nextEnd = new Date(
+          updates.endUtc !== undefined ? updates.endUtc : entry.EndUTC
+        ).toISOString();
+        const nextDuration = Validation.validateDateRange(nextStart, nextEnd);
+        if (nextDuration <= 0) {
+          throw new AppError(
+            ERROR_CODES.VALIDATION_ERROR,
+            'Time entry duration must be greater than zero.',
+            400
+          );
+        }
+        if (authContext.role === CONSTANTS.ROLES.USER) {
+          TrackingPolicyService.assertEntryEditableByAge(workspaceId, {
+            ...entry,
+            StartUTC: nextStart,
+            EndUTC: nextEnd
+          });
+        }
         allowed.StartUTC = nextStart;
         allowed.EndUTC = nextEnd;
-        allowed.DurationSeconds = Validation.validateDateRange(nextStart, nextEnd);
+        allowed.DurationSeconds = nextDuration;
       }
 
       allowed.UpdatedAt = new Date().toISOString();
@@ -262,8 +323,15 @@ const TimeEntryService = {
   /**
    * Soft-deletes a time entry inside atomic LockService critical section
    */
-  deleteEntry(authContext, workspaceId, entryId) {
+  deleteEntry(authContext, workspaceId, entryId, expectedVersion = null) {
     AuthorizationService.assertWorkspaceAccess(authContext, workspaceId);
+    if (expectedVersion === null || expectedVersion === undefined || expectedVersion === '') {
+      throw new AppError(
+        ERROR_CODES.VALIDATION_ERROR,
+        'expectedVersion is required when deleting a time entry.',
+        400
+      );
+    }
 
     let scriptLock = null;
     if (typeof LockService !== 'undefined' && LockService.getScriptLock) {
@@ -296,7 +364,8 @@ const TimeEntryService = {
         DeletedAt: now,
         DeletedBy: authContext.userId,
         UpdatedAt: now,
-        UpdatedBy: authContext.userId
+        UpdatedBy: authContext.userId,
+        Version: (parseInt(entry.Version, 10) || 1) + 1
       });
 
       if (typeof SpreadsheetApp !== 'undefined' && SpreadsheetApp.flush) {
@@ -317,7 +386,12 @@ const TimeEntryService = {
         Reason: 'User deleted time entry'
       });
 
-      return { ok: true, entryId, message: `Time entry ${entryId} deleted.` };
+      return {
+        ok: true,
+        entryId,
+        version: (parseInt(entry.Version, 10) || 1) + 1,
+        message: `Time entry ${entryId} deleted.`
+      };
     } finally {
       if (scriptLock) {
         try { scriptLock.releaseLock(); } catch (e) {}
@@ -351,6 +425,21 @@ const TimeEntryService = {
 
     if (!Array.isArray(entryIds) || entryIds.length === 0) {
       throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'entryIds must contain at least one time entry.');
+    }
+    if (entryIds.length > 100) {
+      throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'Bulk actions are limited to 100 entries per request.', 400);
+    }
+    if (new Set(entryIds.map(String)).size !== entryIds.length) {
+      throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'entryIds must not contain duplicates.', 400);
+    }
+
+    const expectedVersions = params && params.expectedVersions;
+    if (!expectedVersions || typeof expectedVersions !== 'object' || Array.isArray(expectedVersions)) {
+      throw new AppError(
+        ERROR_CODES.VALIDATION_ERROR,
+        'params.expectedVersions is required for every bulk-mutated entry.',
+        400
+      );
     }
 
     const normalizedAction = String(actionType || '').toUpperCase();
@@ -386,6 +475,15 @@ const TimeEntryService = {
         if (!entry) throw new AppError(ERROR_CODES.NOT_FOUND, `Time entry ${id} not found.`, 404);
 
         AuthorizationService.assertRecordOwnership(authContext, entry.UserID);
+        if (!Object.prototype.hasOwnProperty.call(expectedVersions, id)) {
+          throw new AppError(
+            ERROR_CODES.VALIDATION_ERROR,
+            `Missing expected version for time entry ${id}.`,
+            400
+          );
+        }
+        Validation.assertRecordVersion(entry, expectedVersions[id]);
+
         if (
           authContext.role === CONSTANTS.ROLES.USER &&
           (normalizedAction === 'DELETE' || normalizedAction === 'CHANGE_PROJECT')
@@ -397,13 +495,22 @@ const TimeEntryService = {
         const isSubmitted = entry.ApprovalStatus === CONSTANTS.TIMESHEET_STATUS.SUBMITTED;
         const isApproved = entry.ApprovalStatus === CONSTANTS.TIMESHEET_STATUS.APPROVED;
 
-        if (
-          (normalizedAction === 'DELETE' || normalizedAction === 'CHANGE_PROJECT' || normalizedAction === 'UNLOCK') &&
-          (isLocked || isSubmitted || isApproved)
-        ) {
+        const modifiesContent =
+          normalizedAction === 'DELETE' || normalizedAction === 'CHANGE_PROJECT';
+        if (modifiesContent && (isLocked || isSubmitted || isApproved)) {
           throw new AppError(
             ERROR_CODES.ENTRY_LOCKED,
             `Entry ${entry.EntryID} is locked or belongs to a submitted/approved timesheet. Reopen/reject the timesheet first.`,
+            403
+          );
+        }
+        if (
+          (normalizedAction === 'LOCK' || normalizedAction === 'UNLOCK') &&
+          (isSubmitted || isApproved)
+        ) {
+          throw new AppError(
+            ERROR_CODES.ENTRY_LOCKED,
+            `Entry ${entry.EntryID} belongs to a submitted/approved timesheet and its lock state cannot be changed directly.`,
             403
           );
         }
@@ -468,12 +575,18 @@ const TimeEntryService = {
           };
         } else if (normalizedAction === 'CHANGE_PROJECT') {
           const tracking = changeContexts.get(entry.EntryID);
+          const projectChanged =
+            String(tracking.projectId || '') !== String(entry.ProjectID || '');
           updates = {
             ProjectID: tracking.projectId,
             TaskID: tracking.taskId,
             Billable: tracking.billable,
-            HourlyRateSnapshot: tracking.project ? (parseFloat(tracking.project.HourlyRate) || 0) : 0,
-            CostRateSnapshot: tracking.project ? (parseFloat(tracking.project.CostRate) || 0) : 0,
+            HourlyRateSnapshot: projectChanged
+              ? (tracking.project ? (parseFloat(tracking.project.HourlyRate) || 0) : 0)
+              : (parseFloat(entry.HourlyRateSnapshot) || 0),
+            CostRateSnapshot: projectChanged
+              ? (tracking.project ? (parseFloat(tracking.project.CostRate) || 0) : 0)
+              : (parseFloat(entry.CostRateSnapshot) || 0),
             UpdatedAt: now,
             UpdatedBy: authContext.userId,
             Version: nextVersion
