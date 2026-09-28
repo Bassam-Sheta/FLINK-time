@@ -77,6 +77,7 @@ function loadFixture() {
       Object.assign(account, updates);
     },
     logSecurityEvent(event) { events.push({ ...event }); },
+    logGlobalAudit() {},
     getWorkspaceAccessForUser() { return [{ WorkspaceID: 'W1' }]; }
   };
   global.SessionService = {
@@ -164,4 +165,48 @@ test('MFA completion rechecks account ACTIVE state', () => {
       err.statusCode === 403
   );
   assert.equal(fx.getSessionCount(), 0);
+});
+
+
+test('MFA challenge is rechecked after lock acquisition to close concurrent-consumption race', () => {
+  const fx = loadFixture();
+  const first = fx.AuthService.login('worker', 'Password123!', 'WEB');
+
+  global.LockService = {
+    getScriptLock() {
+      return {
+        waitLock() {
+          // Simulate another request consuming the challenge after our pre-lock
+          // validation but before this request enters the critical section.
+          fx.AuthService._deleteMfaChallenge('USR-1');
+        },
+        releaseLock() {}
+      };
+    }
+  };
+
+  assert.throws(
+    () => fx.AuthService.verifyMfa(first.mfaChallengeToken, '123456', 'WEB'),
+    err => err instanceof AppError &&
+      err.code === 'AUTH_REQUIRED' &&
+      /already used|invalid|expired|replaced/i.test(err.message)
+  );
+  assert.equal(fx.getSessionCount(), 0);
+});
+
+test('MFA enrollment consumes the confirmation TOTP timestep', () => {
+  const fx = loadFixture();
+  fx.cred.PendingTotpSecret = 'PENDING-SECRET';
+  fx.cred.MfaEnabled = false;
+  fx.cred.LastSuccessfulTotpStep = '';
+
+  const result = fx.AuthService.confirmMfa(
+    { userId: 'USR-1', role: 'USER', user: fx.account },
+    '123456'
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(fx.cred.MfaEnabled, true);
+  assert.equal(fx.cred.PendingTotpSecret, '');
+  assert.equal(fx.cred.LastSuccessfulTotpStep, 123456);
 });
