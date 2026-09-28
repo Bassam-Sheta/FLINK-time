@@ -1274,8 +1274,11 @@
     async function loadTimesheet() {
       if (!state.currentWorkspace) return;
       try {
-        const todayStr = new Date().toISOString().substring(0, 10);
-        const data = await apiCall('timesheet.getWeekly', { weekStartDate: todayStr });
+        // Send an absolute instant; the server derives the workspace-local
+        // business date/week. Sending a UTC YYYY-MM-DD can select the wrong week
+        // around local midnight or a configured week boundary.
+        const currentInstant = new Date().toISOString();
+        const data = await apiCall('timesheet.getWeekly', { weekStartDate: currentInstant });
 
         state.currentTimesheetPeriod = {
           periodStart: data.periodStart,
