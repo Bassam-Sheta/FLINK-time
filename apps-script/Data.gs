@@ -1775,5 +1775,5 @@ var TimezoneService = (typeof global !== 'undefined' && global.TimezoneService) 
 };
 
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { DriveManager, MasterRepository, SheetRepository, WorkspaceRouter, WorkspaceService, TimezoneService };
+  module.exports = { MasterRepository, SheetRepository, WorkspaceRouter, WorkspaceService, TimezoneService };
 }
