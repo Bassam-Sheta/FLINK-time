@@ -523,6 +523,90 @@ var Validation = {
     return role;
   },
 
+  validateGlobalSettingsPatch(settings) {
+    if (!settings || typeof settings !== 'object' || Array.isArray(settings)) {
+      throw new AppError(
+        ERROR_CODES.VALIDATION_ERROR,
+        'A settings object is required.',
+        400
+      );
+    }
+
+    const allowedKeys = new Set([
+      'COMPANY_NAME',
+      'DEFAULT_TIMEZONE',
+      'IDLE_TIMEOUT_HOURS',
+      'AUTO_STOP_HOURS'
+    ]);
+    const keys = Object.keys(settings);
+    if (keys.length === 0 || keys.length > allowedKeys.size) {
+      throw new AppError(
+        ERROR_CODES.VALIDATION_ERROR,
+        'One or more supported settings are required.',
+        400
+      );
+    }
+
+    const clean = {};
+    for (const key of keys) {
+      if (!allowedKeys.has(key)) {
+        throw new AppError(
+          ERROR_CODES.VALIDATION_ERROR,
+          `Unsupported global setting: ${key}`,
+          400
+        );
+      }
+
+      const raw = settings[key];
+      if (key === 'COMPANY_NAME') {
+        const value = String(raw === null || raw === undefined ? '' : raw).trim();
+        if (!value || value.length > 120) {
+          throw new AppError(
+            ERROR_CODES.VALIDATION_ERROR,
+            'Company name must be between 1 and 120 characters.',
+            400
+          );
+        }
+        clean[key] = this.sanitizeCellValue(value);
+      } else if (key === 'DEFAULT_TIMEZONE') {
+        const value = String(raw === null || raw === undefined ? '' : raw).trim();
+        if (
+          !value ||
+          value.length > 64 ||
+          !/^[A-Za-z0-9_+\-/]+$/.test(value)
+        ) {
+          throw new AppError(
+            ERROR_CODES.VALIDATION_ERROR,
+            'Default timezone format is invalid.',
+            400
+          );
+        }
+        clean[key] = value;
+      } else if (key === 'IDLE_TIMEOUT_HOURS') {
+        const value = Number(raw);
+        if (!Number.isInteger(value) || value < 1 || value > 24) {
+          throw new AppError(
+            ERROR_CODES.VALIDATION_ERROR,
+            'Idle timeout must be a whole number between 1 and 24 hours.',
+            400
+          );
+        }
+        clean[key] = String(value);
+      } else if (key === 'AUTO_STOP_HOURS') {
+        const value = Number(raw);
+        if (!Number.isInteger(value) || value < 1 || value > 168) {
+          throw new AppError(
+            ERROR_CODES.VALIDATION_ERROR,
+            'Auto-stop must be a whole number between 1 and 168 hours.',
+            400
+          );
+        }
+        clean[key] = String(value);
+      }
+    }
+    return clean;
+  },
+
   validateDateRange(startUtc, endUtc, allowFuture = false) {
     const s = new Date(startUtc).getTime();
     const e = new Date(endUtc).getTime();
@@ -1222,12 +1306,31 @@ function dispatchAction_(action, data) {
       AuthorizationService.assertRole(authContext, [CONSTANTS.ROLES.SUPER_ADMIN, CONSTANTS.ROLES.ADMIN]);
       return MasterRepository.getAllGlobalSettings();
 
-    case 'settings.save':
+    case 'settings.save': {
       AuthorizationService.assertRole(authContext, [CONSTANTS.ROLES.SUPER_ADMIN]);
-      for (const [k, v] of Object.entries(payload.settings || {})) {
-        MasterRepository.setGlobalSetting(k, v, authContext.userId);
+      const cleanSettings = Validation.validateGlobalSettingsPatch(
+        payload.settings
+      );
+      const beforeSettings = {};
+      for (const key of Object.keys(cleanSettings)) {
+        beforeSettings[key] = MasterRepository.getGlobalSetting(key, '');
       }
+      for (const [key, value] of Object.entries(cleanSettings)) {
+        MasterRepository.setGlobalSetting(key, value, authContext.userId);
+      }
+      MasterRepository.logGlobalAudit({
+        ActorUserID: authContext.userId,
+        ActorRole: authContext.role,
+        WorkspaceID: 'MASTER',
+        EntityType: 'GLOBAL_SETTINGS',
+        EntityID: 'GLOBAL_SETTINGS',
+        Action: CONSTANTS.AUDIT_EVENTS.SETTINGS_CHANGED,
+        BeforeJSON: beforeSettings,
+        AfterJSON: cleanSettings,
+        Reason: 'Validated global settings update'
+      });
       return { ok: true, message: 'Settings saved successfully.' };
+    }
 
     /* ---------------- SECURITY & SESSIONS ---------------- */
     case 'users.unlock':
@@ -10265,35 +10368,13 @@ var SetupService = (typeof global !== 'undefined' && global.SetupService) || {
       };
     }
 
-    const companyName = MasterRepository.getGlobalSetting('COMPANY_NAME', 'FLINK Business Solutions');
-    const defaultTimezone = MasterRepository.getGlobalSetting('DEFAULT_TIMEZONE', 'Africa/Cairo');
-
-    // Calculate current step for wizard resume
-    let currentStep = 1;
-    if (!superAdminExists) currentStep = 1;
-    else if (!MasterRepository.getGlobalSetting('COMPANY_NAME')) currentStep = 2;
-    else if (workspaceCount === 0) currentStep = 3;
-    else if (adminCount === 0) currentStep = 4;
-    else if (userCount === 0) currentStep = 5;
-    else if (!isSetupComplete) currentStep = 9;
-
+    // Before setup is complete, unauthenticated callers only need to know
+    // whether the installation still requires setup. Do not expose account,
+    // workspace, company, or partial-configuration metadata.
     return {
-      initialized: isSetupComplete,
-      setupComplete: isSetupComplete,
-      superAdminExists,
-      currentStep,
-      companySettings: {
-        companyName,
-        defaultTimezone,
-        weekStarts: MasterRepository.getGlobalSetting('WEEK_STARTS', 'Sunday'),
-        workdayHours: MasterRepository.getGlobalSetting('DEFAULT_WORKDAY_HOURS', '8'),
-        workweekHours: MasterRepository.getGlobalSetting('DEFAULT_WORKWEEK_HOURS', '40')
-      },
-      counts: {
-        workspaces: workspaceCount,
-        admins: adminCount,
-        users: userCount
-      }
+      initialized: false,
+      setupComplete: false,
+      setupRequired: true
     };
   },
 
@@ -13070,7 +13151,7 @@ var MigrationService = (typeof global !== 'undefined' && global.MigrationService
 /**
  * Owner-only installation helper.
  * Run this function once from the Apps Script editor before opening the public web app.
- * The one-time setup key is written to the execution log and must be entered in Setup Step 1.
+ * The one-time setup key is returned only to the deployment owner when this private helper is run and must be entered in Setup Step 1.
  */
 function initializeInstallation_() {
   MigrationService.bootstrapMasterSheet();
