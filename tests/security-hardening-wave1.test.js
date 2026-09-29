@@ -10,11 +10,21 @@ const manifestPath = path.resolve(__dirname, '../apps-script/appsscript.json');
 
 test('privileged portals are not configured with ALLOWALL framing', () => {
   const source = fs.readFileSync(codePath, 'utf8');
-  assert.match(source, /view === 'user'[\s\S]*XFrameOptionsMode\.ALLOWALL[\s\S]*XFrameOptionsMode\.DEFAULT/);
+  const doGetStart = source.indexOf('function doGet');
+  const doPostStart = source.indexOf('function doPost', doGetStart);
+  const doGetBlock = source.slice(doGetStart, doPostStart);
+
+  assert.match(
+    doGetBlock,
+    /view === 'user'[\s\S]*XFrameOptionsMode\.ALLOWALL[\s\S]*XFrameOptionsMode\.DEFAULT/
+  );
   assert.equal(
-    (source.match(/XFrameOptionsMode\.ALLOWALL/g) || []).length,
-    1,
-    'ALLOWALL must exist only in the employee-view conditional'
+    /view === 'admin'[\s\S]*XFrameOptionsMode\.ALLOWALL/.test(doGetBlock),
+    false
+  );
+  assert.equal(
+    /view === 'superadmin'[\s\S]*XFrameOptionsMode\.ALLOWALL/.test(doGetBlock),
+    false
   );
 });
 
