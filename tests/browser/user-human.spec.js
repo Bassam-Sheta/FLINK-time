@@ -10,7 +10,10 @@ test('returning employee completes a real browser workday flow', async ({ page }
   });
 
   await page.addInitScript(() => {
-    sessionStorage.setItem('flink_session_token', 'SESSION-EXISTING');
+    if (!sessionStorage.getItem('__flink_human_test_seeded')) {
+      sessionStorage.setItem('__flink_human_test_seeded', '1');
+      sessionStorage.setItem('flink_session_token', 'SESSION-EXISTING');
+    }
   });
 
   await page.goto('/');
