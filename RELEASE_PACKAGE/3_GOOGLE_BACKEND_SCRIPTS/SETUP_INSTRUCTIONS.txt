@@ -54,10 +54,19 @@ STEP 4: DEPLOY WEB APP
 3. Configure:
    - Description: "FLINK Time Platform Production"
    - Execute as: Me
-   - Who has access: Anyone
+   - Who has access: Anyone in your Google Workspace domain
 4. Deploy and copy the /exec URL.
 
 The API now rejects mutating operations over GET. Mutating actions must use POST.
+
+IDENTITY-BINDING REQUIREMENT:
+- Keep execution as the deployer so staff do NOT need direct access to the
+  Master/Workspace spreadsheets.
+- Restrict the deployment to your Google Workspace domain.
+- FLINK Time reads the server-observed Google Workspace email with
+  Session.getActiveUser().getEmail() and requires it to match the FLINK
+  account Email before issuing or accepting a WEB session.
+- Do not deploy this production build as public "Anyone" access.
 
 STEP 5: CREATE THE ROOT SUPER ADMIN
 --------------------------------------------------------------------------------
@@ -67,6 +76,8 @@ STEP 5: CREATE THE ROOT SUPER ADMIN
    - Super Admin full name.
    - Username.
    - A strong password entered manually.
+   - The Super Admin Email is bound automatically to the Google Workspace
+     account currently opening the setup page.
 3. Complete Step 1.
 
 There are intentionally no pre-filled production passwords.
@@ -84,6 +95,8 @@ Continue through:
 - System check
 
 Every account password must be supplied explicitly.
+Every Admin/User account must also be created with its Google Workspace email.
+That email is the identity binding used in addition to FLINK credentials.
 
 STEP 7: GOOGLE SITES / DIRECT WEB ACCESS
 --------------------------------------------------------------------------------
