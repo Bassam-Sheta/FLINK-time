@@ -36,6 +36,7 @@ Embed each URL on the matching Google Sites page.
 - `Admin.html` accepts ADMIN and SUPER_ADMIN accounts and exposes Manager / Reports / Account.
 - `SuperAdmin.html` accepts only SUPER_ADMIN and exposes Admin Console / Manager / Reports / Account.
 - Server-side RBAC remains authoritative for every API action.
+- Browser RPC is deliberately limited to `handleClientRequest`; internal router, dispatcher, setup, and scheduled functions are private server functions ending in `_`.
 - WEB sessions are bound to the server-observed Google Workspace email.
 
 ## Deployment
@@ -44,7 +45,7 @@ Embed each URL on the matching Google Sites page.
 2. Open **Extensions → Apps Script**.
 3. Create `Code.gs`, `User.html`, `Admin.html`, and `SuperAdmin.html` from `apps-script/`.
 4. Enable the manifest and paste `appsscript.json`.
-5. Run `initializeInstallation()` once as the deployment owner and save the one-time setup key.
+5. Run the private server function `initializeInstallation_()` once from the Apps Script editor as the deployment owner and save the one-time setup key. The trailing underscore keeps it unavailable to browser RPC calls.
 6. Deploy as a Web App:
    - Execute as: **Me**
    - Access: **Anyone in your Google Workspace domain**
