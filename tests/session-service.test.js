@@ -27,7 +27,9 @@ function fixture(lastSeenAgeMinutes, options = {}) {
     LastSeenAt: new Date(now - lastSeenAgeMinutes * 60 * 1000).toISOString(),
     ExpiresAt: options.expiresAt || new Date(now + 7 * 60 * 60 * 1000).toISOString(),
     AbsoluteExpiresAt: options.absoluteExpiresAt || new Date(now + 23 * 60 * 60 * 1000).toISOString(),
-    Revoked: false
+    Revoked: false,
+    ClientType: 'PORTABLE_WINDOWS',
+    ClientLabel: ''
   };
 
   global.AppError = AppError;
@@ -45,6 +47,10 @@ function fixture(lastSeenAgeMinutes, options = {}) {
     },
     ACCOUNT_STATUS: { ACTIVE: 'ACTIVE', LOCKED: 'LOCKED' }
   };
+  global.IdentityService = {
+    normalizeEmail(v) { return String(v || '').trim().toLowerCase(); },
+    assertAccountIdentity() { return 'user@example.com'; }
+  };
   global.SecurityService = {
     hashToken() { return 'HASH'; },
     generateSessionToken() { return 'TOKEN'; }
@@ -54,7 +60,13 @@ function fixture(lastSeenAgeMinutes, options = {}) {
     findSessionByTokenHash() { return session; },
     findAccountById() {
       if (options.accountMissing) return null;
-      return { UserID: 'U1', Username: 'user', Role: 'USER', Status: options.accountStatus || 'ACTIVE' };
+      return {
+        UserID: 'U1',
+        Username: 'user',
+        Email: 'user@example.com',
+        Role: 'USER',
+        Status: options.accountStatus || 'ACTIVE'
+      };
     },
     updateSession(_id, updates) { writes.push({ ...updates }); },
     createSession() {}
