@@ -18,6 +18,9 @@ class AppError extends Error {
 }
 
 function fixture(options = {}) {
+  global.LockService = undefined;
+  global.CacheService = undefined;
+
   const account = {
     UserID:'U1',
     Username:'worker',
@@ -220,4 +223,109 @@ test('expired timed lock auto-unlocks and valid login succeeds', () => {
   assert.equal(fx.cred.FailedLoginCount, 0);
   assert.equal(fx.cred.LastFailedAt, '');
   assert.equal(fx.getSessions(), 1);
+});
+
+test('failed-login update re-reads the latest counter before incrementing', () => {
+  const fx = fixture({
+    correctPassword:false,
+    retryDelays:[0,0,0,0,0]
+  });
+
+  const liveCred = fx.cred;
+  liveCred.FailedLoginCount = 3;
+  let reads = 0;
+  global.MasterRepository.getCredentials = () => {
+    reads += 1;
+    if (reads === 1) {
+      return { ...liveCred, FailedLoginCount:0 };
+    }
+    return liveCred;
+  };
+
+  let lockWaits = 0;
+  let releases = 0;
+  let held = false;
+  global.LockService = {
+    getScriptLock() {
+      return {
+        hasLock() { return held; },
+        waitLock() { lockWaits += 1; held = true; },
+        releaseLock() { releases += 1; held = false; }
+      };
+    }
+  };
+
+  assertGeneric(() =>
+    fx.AuthService.login('worker', 'WrongPass123!', 'WEB')
+  );
+
+  assert.equal(liveCred.FailedLoginCount, 4);
+  assert.equal(lockWaits, 1);
+  assert.equal(releases, 1);
+  assert.ok(reads >= 2);
+});
+
+test('caller login rate limit rejects before another password hash verification', () => {
+  const fx = fixture({ correctPassword:true });
+  global.CONSTANTS.LIMITS.LOGIN_CALLER_ATTEMPTS_PER_MINUTE = 2;
+  global.CONSTANTS.LIMITS.LOGIN_GLOBAL_ATTEMPTS_PER_MINUTE = 100;
+
+  const cacheValues = new Map();
+  global.CacheService = {
+    getScriptCache() {
+      return {
+        get(key) { return cacheValues.get(key) || null; },
+        put(key, value) { cacheValues.set(key, String(value)); }
+      };
+    }
+  };
+
+  fx.AuthService.login('worker', 'CorrectPass123!', 'WEB');
+  fx.AuthService.login('worker', 'CorrectPass123!', 'WEB');
+  assert.equal(fx.getVerifyCalls(), 2);
+
+  assertGeneric(() =>
+    fx.AuthService.login('worker', 'CorrectPass123!', 'WEB')
+  );
+  assert.equal(fx.getVerifyCalls(), 2);
+});
+
+test('repeated unknown-user attempts are deduplicated in spreadsheet security logging', () => {
+  const fx = fixture({ unknownUser:true });
+  const cacheValues = new Map();
+  global.CacheService = {
+    getScriptCache() {
+      return {
+        get(key) { return cacheValues.get(key) || null; },
+        put(key, value) { cacheValues.set(key, String(value)); }
+      };
+    }
+  };
+
+  assertGeneric(() =>
+    fx.AuthService.login('ghost', 'CorrectPass123!', 'WEB')
+  );
+  assertGeneric(() =>
+    fx.AuthService.login('ghost', 'CorrectPass123!', 'WEB')
+  );
+
+  const unknownEvents = fx.events.filter(
+    event => event.metadata && event.metadata.reason === 'User not found'
+  );
+  assert.equal(unknownEvents.length, 1);
+});
+
+test('oversized login input fails before identity or password work', () => {
+  const fx = fixture();
+  let identityCalls = 0;
+  global.IdentityService.getCurrentGoogleEmail = () => {
+    identityCalls += 1;
+    return 'worker@example.com';
+  };
+
+  assertGeneric(() =>
+    fx.AuthService.login('x'.repeat(51), 'CorrectPass123!', 'WEB')
+  );
+  assert.equal(identityCalls, 0);
+  assert.equal(fx.getVerifyCalls(), 0);
 });
