@@ -3,10 +3,10 @@
 ## Final topology
 
 ```
-Google Sites
-  ├── Employee page   -> Apps Script /exec?view=user
-  ├── Admin page      -> Apps Script /exec?view=admin
-  └── Super Admin page-> Apps Script /exec?view=superadmin
+Google Sites / Direct Web App Access
+  ├── Employee page   -> Apps Script /exec?view=user        (Google Sites embed allowed)
+  ├── Admin page      -> Apps Script /exec?view=admin       (direct access only)
+  └── Super Admin page-> Apps Script /exec?view=superadmin  (direct access only)
                               |
                               v
                            Code.gs
@@ -46,6 +46,14 @@ Client-side portal separation is a usability layer only. Server-side `ACTION_PER
 - Google Workspace domain-restricted web app.
 - Server-observed Google Workspace email must match the FLINK account email.
 - Password hashing, failed-login throttling/lockout, session idle/absolute expiry, password-version invalidation, forced password change, and MFA rules remain in `Code.gs`.
+- High-risk Super Admin mutations require a short-lived step-up grant created only after fresh password + TOTP verification. Step-up rotates the authenticated session and is bound to the replacement SessionID.
+- The sole root SUPER_ADMIN is a protected trust anchor: generic CRUD cannot demote it, deactivate it, re-bind its Google Workspace identity, or disable its MFA.
+
+## Privileged storage boundary
+- The Master Control Sheet, workspace Sheets, backup files, and Apps Script project are privileged infrastructure.
+- Ordinary users must not receive direct Editor access to those resources; direct edit access bypasses application RBAC.
+- Production should use a dedicated deployment/automation identity where possible.
+- Admin and Super Admin portals are direct Web App pages and are not framed with ALLOWALL.
 
 ## Data integrity
 - UTC storage.
@@ -56,6 +64,10 @@ Client-side portal separation is a usability layer only. Server-side `ACTION_PER
 - Immutable timesheet submission membership.
 - Explicit timesheet state machine.
 - Canonical rollup rebuild from raw TimeEntries.
+- Audit records are spreadsheet-canonicalized before HMAC calculation.
+- Daily external checkpoints anchor the Master and each active workspace audit chain in Script Properties.
+- Checkpoints include a full-prefix snapshot HMAC so legacy audit fields become sealed against later mutation.
+- Privileged mutations require a successful pre-action audit write; if the security audit trail is unavailable, the mutation is blocked.
 
 ## Repository policy
 The active source is source-first. Compiled executables, temporary packaging output, legacy desktop clients, and duplicate Apps Script modules are not committed.
