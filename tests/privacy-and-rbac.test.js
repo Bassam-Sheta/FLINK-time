@@ -6,11 +6,11 @@ const path = require('node:path');
 
 const timeEntryPath = path.resolve(
   __dirname,
-  '../RELEASE_PACKAGE/3_GOOGLE_BACKEND_SCRIPTS/TimeEntryService.gs'
+  '../apps-script/Business.gs'
 );
 const authzPath = path.resolve(
   __dirname,
-  '../RELEASE_PACKAGE/3_GOOGLE_BACKEND_SCRIPTS/AuthorizationService.gs'
+  '../apps-script/Security.gs'
 );
 
 class AppError extends Error {
@@ -188,7 +188,7 @@ test('non-super-admin workspace DTO excludes physical storage identifiers', () =
 
   const workspacePath = path.resolve(
     __dirname,
-    '../RELEASE_PACKAGE/3_GOOGLE_BACKEND_SCRIPTS/WorkspaceService.gs'
+    '../apps-script/Data.gs'
   );
   delete require.cache[require.resolve(workspacePath)];
   const { WorkspaceService } = require(workspacePath);
@@ -204,7 +204,7 @@ test('user DTO never leaks repository row index', () => {
   installCommon();
   const userPath = path.resolve(
     __dirname,
-    '../RELEASE_PACKAGE/3_GOOGLE_BACKEND_SCRIPTS/UserService.gs'
+    '../apps-script/Admin.gs'
   );
   global.MasterRepository = {
     getTableData(tab) {

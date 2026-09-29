@@ -7,14 +7,14 @@ const path = require('node:path');
 
 const root = path.resolve(
   __dirname,
-  '../RELEASE_PACKAGE/3_GOOGLE_BACKEND_SCRIPTS'
+  '../apps-script'
 );
-const html = fs.readFileSync(path.join(root,'index.html'),'utf8');
+const html = fs.readFileSync(path.join(root,'App.html'),'utf8');
 const manifest = JSON.parse(
   fs.readFileSync(path.join(root,'appsscript.json'),'utf8')
 );
 const setup = fs.readFileSync(
-  path.join(root,'SETUP_INSTRUCTIONS.txt'),'utf8'
+  path.resolve(__dirname,'../SYSTEM_SPEC.md'),'utf8'
 );
 
 test('production manifest is domain-restricted while retaining deployer execution', () => {

@@ -1,51 +1,59 @@
-# FLINK Time & Workforce Platform (Ultra-Account)
+# FLINK Time & Workforce Platform
 
-Enterprise-grade time tracking, workforce monitoring, and audit-compliant timesheet management backed by Google Sheets and Google Drive Master Vault.
+FLINK Time is a Google Workspace-native time tracking and workforce management application.
 
-> **Stabilization status:** the Windows portable tracker and legacy standalone Admin Controller are not production-compatible with the stabilized modern API yet. Their legacy unauthenticated API bridge was intentionally removed pending migration.
+## Source layout
 
----
+Only the modern source-first application is kept in the active repository:
 
-## Architecture Overview
+```
+apps-script/
+  Code.gs
+  Security.gs
+  Data.gs
+  Business.gs
+  Admin.gs
+  App.html
+  appsscript.json
 
-```mermaid
-graph TD
-    A["1_EMPLOYEE_PORTABLE_APP<br/>UltraAccount.exe (Windows Client)"] -->|HTTPS POST: sync_batch, auth_handshake| C["3_GOOGLE_BACKEND_SCRIPTS<br/>Google Apps Script (Web App)"]
-    B["2_SUPER_ADMIN_CONTROLLER<br/>admin_ui.html (Admin Console)"] -->|HTTPS GET/POST: radar, approvals, audit| C
-    D["Web Portal UI<br/>index.html (Google Sites Embed)"] -->|HTTPS GET/POST: auth, timer, entries| C
-    E["4_CLIENT_PACKAGER_TOOL<br/>UltraPackager.exe (Build Tool)"] -->|Compiles standalone .exe with embedded URL| A
-    C -->|ACID writes with LockService| F["Google Sheets<br/>Master Database (18-20 Tabs)"]
-    C -->|Encrypted screenshots & logs| G["Google Drive<br/>UltraAccount_Master_Vault"]
+tests/
+SYSTEM_SPEC.md
+README.md
+package.json
+.github/workflows/stabilization-tests.yml
 ```
 
----
+The old Windows portable tracker, packager, standalone desktop Admin Controller, bundled executables, launchers, and legacy release-package tree are retired from the active branch. They are not part of the supported stabilized architecture.
 
-## Directory Structure
+## Architecture
 
-| Folder | Component | Description |
-|---|---|---|
-| [`1_EMPLOYEE_PORTABLE_APP/`](file:///d:/projects-antigravity/FLINK-time/RELEASE_PACKAGE/1_EMPLOYEE_PORTABLE_APP/) | **Employee Portable Tracker** | Standalone zero-dependency Windows desktop tracker (`UltraAccount.exe`). Captures active window, logs time entries, and syncs screenshots. Reads `workspace.json`. |
-| [`2_SUPER_ADMIN_CONTROLLER/`](file:///d:/projects-antigravity/FLINK-time/RELEASE_PACKAGE/2_SUPER_ADMIN_CONTROLLER/) | **Super Admin Controller** | Real-time monitoring dashboard (`admin_ui.html`). Live workforce radar, timesheet approvals, screenshots viewer, analytics charts, disaster recovery, and policy configuration. |
-| [`3_GOOGLE_BACKEND_SCRIPTS/`](file:///d:/projects-antigravity/FLINK-time/RELEASE_PACKAGE/3_GOOGLE_BACKEND_SCRIPTS/) | **Google Backend Scripts** | Stabilized Google Apps Script backend (`App.gs`, services, repositories, and schemas). The legacy `Code.gs` API has been removed from the deployable backend. |
-| [`4_CLIENT_PACKAGER_TOOL/`](file:///d:/projects-antigravity/FLINK-time/RELEASE_PACKAGE/4_CLIENT_PACKAGER_TOOL/) | **Client Packager Tool** | Utility (`UltraPackager.exe`) to compile custom, pre-configured `UltraAccount.exe` executables with embedded organization backend URLs. |
+- Google Sites or the direct Apps Script web app provides the browser UI.
+- One Apps Script deployment is the only API/backend.
+- Google Sheets stores master/workspace data.
+- Google Drive stores managed backups/reports.
+- Script Properties stores application secrets.
+- USER, ADMIN, and SUPER_ADMIN roles share the same authenticated backend and UI codebase.
+- Browser sessions are additionally bound to the server-observed Google Workspace email.
 
----
+## Deploy
 
-## 5-Minute Quick Start
+1. Create the Master Control Google Sheet.
+2. Open Extensions > Apps Script.
+3. Create the five `.gs` files and one HTML file from `apps-script/`.
+4. Enable the manifest and copy `apps-script/appsscript.json`.
+5. Run `initializeInstallation()` once from the Apps Script editor and retain the one-time setup key.
+6. Deploy as a Web App:
+   - Execute as: **Me**
+   - Access: **Anyone in your Google Workspace domain**
+7. Open the `/exec` URL and complete Setup Step 1 using the one-time key.
+8. Embed the same web-app URL into the appropriate Google Sites pages if desired.
 
-### 1. Deploy the Google Backend
-1. Create a new Google Sheet at [sheets.new](https://sheets.new) named `FLINK_Time_Master_Control`.
-2. Open **Extensions** > **Apps Script**.
-3. Copy all `.gs` and `.html` files from [`3_GOOGLE_BACKEND_SCRIPTS/`](file:///d:/projects-antigravity/FLINK-time/RELEASE_PACKAGE/3_GOOGLE_BACKEND_SCRIPTS/) into the editor.
-4. Enable the manifest in Project Settings and paste [`appsscript.json`](file:///d:/projects-antigravity/FLINK-time/RELEASE_PACKAGE/3_GOOGLE_BACKEND_SCRIPTS/appsscript.json).
-5. Select `initializeInstallation` from the function dropdown and click **Run**. Copy the generated one-time installation key from the execution result/log.
-6. Click **Deploy** > **New deployment** > **Web app** (`Execute as: Me`, `Who has access: Anyone`).
-7. Open the deployed URL and use the one-time installation key in Setup Step 1 to create the root Super Admin with a password you choose. The key is invalidated after successful creation.
-8. Copy the deployed Web App URL (ends in `/exec`).
+Do not deploy this production build as public `Anyone` access.
 
-### 2. Configure & Run
-- **For Employees**: In `1_EMPLOYEE_PORTABLE_APP/workspace.json`, paste your Web App URL into `"backend_url"`. Employees launch `UltraAccount.exe` or `Launch_Portable_Tracker.bat`.
-- **For Admins**: Use the modern web portal. The legacy standalone Super Admin Controller is quarantined until it is migrated to the authenticated modern API.
-- **For Google Sites**: Embed `<YOUR_WEB_APP_URL>` directly into your organization's Google Site.
+## Test
 
-Detailed instructions are available in [`RELEASE_PACKAGE/3_GOOGLE_BACKEND_SCRIPTS/SETUP_INSTRUCTIONS.txt`](file:///d:/projects-antigravity/FLINK-time/RELEASE_PACKAGE/3_GOOGLE_BACKEND_SCRIPTS/SETUP_INSTRUCTIONS.txt).
+```bash
+npm test
+```
+
+The GitHub Actions stabilization workflow runs the same regression suite for the stabilization pull request.

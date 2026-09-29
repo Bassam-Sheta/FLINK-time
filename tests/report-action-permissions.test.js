@@ -6,7 +6,7 @@ const path = require('node:path');
 
 const appPath = path.resolve(
   __dirname,
-  '../RELEASE_PACKAGE/3_GOOGLE_BACKEND_SCRIPTS/App.gs'
+  '../apps-script/Code.gs'
 );
 
 test('report action permissions expose only safe USER report endpoints', () => {

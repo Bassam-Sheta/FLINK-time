@@ -7,7 +7,7 @@ const path = require('node:path');
 
 const servicePath = path.resolve(
   __dirname,
-  '../RELEASE_PACKAGE/3_GOOGLE_BACKEND_SCRIPTS/TimerService.gs'
+  '../apps-script/Business.gs'
 );
 
 class AppError extends Error {

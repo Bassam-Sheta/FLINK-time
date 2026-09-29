@@ -6,11 +6,11 @@ const path = require('node:path');
 
 const policyPath = path.resolve(
   __dirname,
-  '../RELEASE_PACKAGE/3_GOOGLE_BACKEND_SCRIPTS/TrackingPolicyService.gs'
+  '../apps-script/Security.gs'
 );
 const masterDataPath = path.resolve(
   __dirname,
-  '../RELEASE_PACKAGE/3_GOOGLE_BACKEND_SCRIPTS/MasterDataServices.gs'
+  '../apps-script/Business.gs'
 );
 
 class AppError extends Error {

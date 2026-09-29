@@ -6,7 +6,7 @@ const path = require('node:path');
 
 const servicePath = path.resolve(
   __dirname,
-  '../RELEASE_PACKAGE/3_GOOGLE_BACKEND_SCRIPTS/AdminRequestService.gs'
+  '../apps-script/Admin.gs'
 );
 
 class AppError extends Error {

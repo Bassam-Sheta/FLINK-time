@@ -4,9 +4,9 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');
 
-const routerPath = path.resolve(__dirname, '../RELEASE_PACKAGE/3_GOOGLE_BACKEND_SCRIPTS/WorkspaceRouter.gs');
-const servicePath = path.resolve(__dirname, '../RELEASE_PACKAGE/3_GOOGLE_BACKEND_SCRIPTS/WorkspaceService.gs');
-const repoPath = path.resolve(__dirname, '../RELEASE_PACKAGE/3_GOOGLE_BACKEND_SCRIPTS/MasterRepository.gs');
+const routerPath = path.resolve(__dirname, '../apps-script/Data.gs');
+const servicePath = path.resolve(__dirname, '../apps-script/Data.gs');
+const repoPath = path.resolve(__dirname, '../apps-script/Data.gs');
 
 class AppError extends Error {
   constructor(code, message, statusCode = 400) {

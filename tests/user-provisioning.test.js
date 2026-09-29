@@ -6,7 +6,7 @@ const path = require('node:path');
 
 const servicePath = path.resolve(
   __dirname,
-  '../RELEASE_PACKAGE/3_GOOGLE_BACKEND_SCRIPTS/UserService.gs'
+  '../apps-script/Admin.gs'
 );
 
 class AppError extends Error {
@@ -108,7 +108,7 @@ test('new user is rolled back when workspace member provisioning fails', () => {
 test('account row is rolled back when credential creation fails', () => {
   const repoPath = path.resolve(
     __dirname,
-    '../RELEASE_PACKAGE/3_GOOGLE_BACKEND_SCRIPTS/MasterRepository.gs'
+    '../apps-script/Data.gs'
   );
   const calls = [];
 

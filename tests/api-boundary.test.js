@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const appPath = path.resolve(__dirname, '../RELEASE_PACKAGE/3_GOOGLE_BACKEND_SCRIPTS/App.gs');
+const appPath = path.resolve(__dirname, '../apps-script/Code.gs');
 
 class AppError extends Error {
   constructor(code, message, statusCode = 400, details = null) {

@@ -1,4 +1,612 @@
 /**
+ * FLINK Time — Consolidated application gateway, constants, validation, and API routing.
+ * Generated from the stabilized source modules; edit this file as the authoritative gateway/core.
+ */
+
+
+/* ===== Errors.gs ===== */
+/**
+ * FLINK Time & Workforce Platform — Error Definitions
+ */
+
+const ERROR_CODES = {
+  AUTH_REQUIRED: 'AUTH_REQUIRED',
+  UNAUTHORIZED: 'UNAUTHORIZED',
+  SESSION_EXPIRED: 'SESSION_EXPIRED',
+  ACCOUNT_LOCKED: 'ACCOUNT_LOCKED',
+  ACCOUNT_PASSIVE: 'ACCOUNT_PASSIVE',
+  PASSWORD_CHANGE_REQUIRED: 'PASSWORD_CHANGE_REQUIRED',
+  PERMISSION_DENIED: 'PERMISSION_DENIED',
+  WORKSPACE_DENIED: 'WORKSPACE_DENIED',
+  WORKSPACE_NOT_FOUND: 'WORKSPACE_NOT_FOUND',
+  VALIDATION_ERROR: 'VALIDATION_ERROR',
+  ACTIVE_TIMER_EXISTS: 'ACTIVE_TIMER_EXISTS',
+  TIMER_NOT_FOUND: 'TIMER_NOT_FOUND',
+  ENTRY_LOCKED: 'ENTRY_LOCKED',
+  CONFLICT: 'CONFLICT',
+  RATE_LIMITED: 'RATE_LIMITED',
+  SERVER_BUSY: 'SERVER_BUSY',
+  NOT_FOUND: 'NOT_FOUND',
+  ADMIN_LIMIT_EXCEEDED: 'ADMIN_LIMIT_EXCEEDED',
+  CRYPTO_FAILURE: 'CRYPTO_FAILURE',
+  INTERNAL_ERROR: 'INTERNAL_ERROR'
+};
+
+class AppError extends Error {
+  constructor(code, message, statusCode = 400, details = null) {
+    super(message);
+    this.name = 'AppError';
+    this.code = code;
+    this.statusCode = statusCode;
+    this.details = details;
+  }
+
+  toJSON() {
+    return {
+      ok: false,
+      error: {
+        code: this.code,
+        message: this.message,
+        statusCode: this.statusCode,
+        details: this.details
+      }
+    };
+  }
+}
+
+/* ===== Constants.gs ===== */
+/**
+ * FLINK Time & Workforce Platform — System Constants & Schema Specifications
+ * Obeying strict Google Workspace constraints:
+ * - Master Control Sheet Schema (18 Tabs)
+ * - Workspace Sheet Schema (20 Tabs)
+ * - 3-Role RBAC Model (SUPER_ADMIN, ADMIN, USER)
+ * - Admin Max 3 Active Workspaces
+ */
+
+const CONSTANTS = {
+  VERSION: '1.0.0',
+  SCHEMA_VERSION: 1,
+
+  ROLES: {
+    SUPER_ADMIN: 'SUPER_ADMIN',
+    ADMIN: 'ADMIN',
+    USER: 'USER'
+  },
+
+  ACCOUNT_STATUS: {
+    ACTIVE: 'ACTIVE',
+    PASSIVE: 'PASSIVE',
+    LOCKED: 'LOCKED',
+    ARCHIVED: 'ARCHIVED',
+    DELETED: 'DELETED'
+  },
+
+  WORKSPACE_STATUS: {
+    ACTIVE: 'ACTIVE',
+    SUSPENDED: 'SUSPENDED',
+    MAINTENANCE: 'MAINTENANCE',
+    ARCHIVED: 'ARCHIVED'
+  },
+
+  REQUEST_TYPES: {
+    NEW_USER: 'NEW_USER',
+    MAKE_PASSIVE: 'MAKE_PASSIVE',
+    PASSWORD_RESET: 'PASSWORD_RESET',
+    PROFILE_CHANGE: 'PROFILE_CHANGE',
+    OTHER_ADMIN_REQUEST: 'OTHER_ADMIN_REQUEST'
+  },
+
+  REQUEST_STATUS: {
+    PENDING: 'PENDING',
+    APPROVED: 'APPROVED',
+    REJECTED: 'REJECTED',
+    CANCELLED: 'CANCELLED',
+    EXECUTED: 'EXECUTED'
+  },
+
+  TIMESHEET_STATUS: {
+    OPEN: 'OPEN',
+    SUBMITTED: 'SUBMITTED',
+    APPROVED: 'APPROVED',
+    REJECTED: 'REJECTED',
+    LOCKED: 'LOCKED'
+  },
+
+  // Canonical timesheet state machine. LOCKED remains a legacy/storage value
+  // but is not a valid workflow transition target.
+  TIMESHEET_TRANSITIONS: {
+    OPEN: ['SUBMITTED'],
+    REJECTED: ['SUBMITTED'],
+    SUBMITTED: ['APPROVED', 'REJECTED'],
+    APPROVED: ['OPEN']
+  },
+
+  ENTRY_SOURCE: {
+    WEB: 'WEB',
+    PORTABLE_WINDOWS: 'PORTABLE_WINDOWS',
+    MANUAL: 'MANUAL',
+    OFFLINE_SYNC: 'OFFLINE_SYNC'
+  },
+
+  AUDIT_EVENTS: {
+    LOGIN_SUCCESS: 'LOGIN_SUCCESS',
+    LOGIN_FAIL: 'LOGIN_FAIL',
+    ACCOUNT_LOCK: 'ACCOUNT_LOCK',
+    LOGIN_THROTTLED: 'LOGIN_THROTTLED',
+    IDENTITY_MISMATCH: 'IDENTITY_MISMATCH',
+    PASSWORD_RESET: 'PASSWORD_RESET',
+    PASSWORD_CHANGED: 'PASSWORD_CHANGED',
+    USER_CREATED: 'USER_CREATED',
+    USER_PASSIVE: 'USER_PASSIVE',
+    USER_ACTIVATED: 'USER_ACTIVATED',
+    USER_DELETED: 'USER_DELETED',
+    WORKSPACE_CREATED: 'WORKSPACE_CREATED',
+    WORKSPACE_UPDATED: 'WORKSPACE_UPDATED',
+    ADMIN_ASSIGNED: 'ADMIN_ASSIGNED',
+    ADMIN_REMOVED: 'ADMIN_REMOVED',
+    REQUEST_SUBMITTED: 'REQUEST_SUBMITTED',
+    REQUEST_REVIEWED: 'REQUEST_REVIEWED',
+    REQUEST_EXECUTED: 'REQUEST_EXECUTED',
+    TIMER_STARTED: 'TIMER_STARTED',
+    TIMER_STOPPED: 'TIMER_STOPPED',
+    ENTRY_CREATED: 'ENTRY_CREATED',
+    ENTRY_UPDATED: 'ENTRY_UPDATED',
+    ENTRY_DELETED: 'ENTRY_DELETED',
+    TIMESHEET_SUBMITTED: 'TIMESHEET_SUBMITTED',
+    TIMESHEET_APPROVED: 'TIMESHEET_APPROVED',
+    TIMESHEET_REJECTED: 'TIMESHEET_REJECTED',
+    TIMESHEET_REOPENED: 'TIMESHEET_REOPENED',
+    PROJECT_CREATED: 'PROJECT_CREATED',
+    PROJECT_UPDATED: 'PROJECT_UPDATED',
+    USER_ASSIGNED: 'USER_ASSIGNED',
+    MFA_ENROLLED: 'MFA_ENROLLED',
+    MFA_VERIFIED: 'MFA_VERIFIED',
+    MFA_DISABLED: 'MFA_DISABLED',
+    ACCOUNT_UNLOCKED: 'ACCOUNT_UNLOCKED',
+    SETTINGS_CHANGED: 'SETTINGS_CHANGED',
+    EXPORT_CREATED: 'EXPORT_CREATED',
+    BACKUP_CREATED: 'BACKUP_CREATED',
+    RESTORE_EXECUTED: 'RESTORE_EXECUTED'
+  },
+
+  LIMITS: {
+    ADMIN_MAX_ACTIVE_WORKSPACES: 3,
+    MAX_FAILED_LOGIN_ATTEMPTS: 5,
+    LOCKOUT_DURATION_MINUTES: 15,
+    LOGIN_RETRY_DELAYS_SECONDS: [0, 2, 5, 15, 30],
+    SESSION_IDLE_TIMEOUT_HOURS: 8,
+    SESSION_ABSOLUTE_TIMEOUT_HOURS: 24,
+    SESSION_TOUCH_INTERVAL_MINUTES: 5,
+    MIN_PASSWORD_LENGTH: 12,
+    MAX_PASSWORD_LENGTH: 128,
+    MAX_SINGLE_ENTRY_HOURS: 24,
+    DASHBOARD_LIVE_WINDOW_SECONDS: 60,
+    SESSION_RETENTION_DAYS: 30
+  },
+
+  SECURITY: {
+    PBKDF2_ITERATIONS: 10000,
+    PBKDF2_KEY_BYTES: 32,
+    SALT_BYTES: 16,
+    TOKEN_BYTES: 32,
+    PEPPER_PROPERTY_KEY: 'FLINK_SECURITY_PEPPER',
+    DEFAULT_PEPPER: 'FLINK_TIME_PEPPER_SECURE_2026',
+    CHECKPOINT_PROPERTY_PREFIX: 'FLINK_AUDIT_CHECKPOINT_',
+    AUDIT_KEY_SUFFIX: '_FLINK_AUDIT_KEY',
+    SECRET_KEY_SUFFIX: '_FLINK_SECRET_KEY'
+  },
+
+  MASTER_TABS: {
+    SYSTEM: 'System',
+    ACCOUNTS: 'Accounts',
+    CREDENTIALS: 'Credentials',
+    WORKSPACES: 'Workspaces',
+    WORKSPACE_ACCESS: 'WorkspaceAccess',
+    REQUESTS: 'Requests',
+    SESSIONS: 'Sessions',
+    GLOBAL_SETTINGS: 'GlobalSettings',
+    SAVED_REPORTS: 'SavedReports',
+    SAVED_DASHBOARDS: 'SavedDashboards',
+    SCHEDULED_REPORTS: 'ScheduledReports',
+    SECURITY_EVENTS: 'SecurityEvents',
+    GLOBAL_AUDIT: 'GlobalAudit',
+    JOB_REGISTRY: 'JobRegistry',
+    JOB_RUNS: 'JobRuns',
+    MIGRATION_HISTORY: 'MigrationHistory',
+    BACKUP_REGISTRY: 'BackupRegistry',
+    SYSTEM_HEALTH_HISTORY: 'SystemHealthHistory'
+  },
+
+  WORKSPACE_TABS: {
+    WORKSPACE_INFO: 'WorkspaceInfo',
+    MEMBERS: 'Members',
+    CLIENTS: 'Clients',
+    PROJECTS: 'Projects',
+    TASKS: 'Tasks',
+    TAGS: 'Tags',
+    USER_PROJECT_ACCESS: 'UserProjectAccess',
+    ACTIVE_TIMERS: 'ActiveTimers',
+    TIME_ENTRIES: 'TimeEntries',
+    TIMESHEETS: 'Timesheets',
+    APPROVALS: 'Approvals',
+    COMMENTS: 'Comments',
+    DAILY_ROLLUPS: 'DailyRollups',
+    WEEKLY_ROLLUPS: 'WeeklyRollups',
+    MONTHLY_ROLLUPS: 'MonthlyRollups',
+    USER_ROLLUPS: 'UserRollups',
+    PROJECT_ROLLUPS: 'ProjectRollups',
+    ALERTS: 'Alerts',
+    WORKSPACE_SETTINGS: 'WorkspaceSettings',
+    AUDIT_LOG: 'AuditLog'
+  },
+
+  JOB_STATUS: {
+    QUEUED: 'QUEUED',
+    RUNNING: 'RUNNING',
+    COMPLETED: 'COMPLETED',
+    FAILED: 'FAILED',
+    RETRY: 'RETRY',
+    DEAD: 'DEAD'
+  },
+
+  CAPACITY: {
+    MAX_CELLS_PER_SHEET: 10000000,
+    ADVISORY_THRESHOLD_PCT: 60,
+    WARNING_THRESHOLD_PCT: 75,
+    CRITICAL_THRESHOLD_PCT: 85
+  }
+};
+
+/**
+ * Master Control Sheet Column Definitions (18 Tabs)
+ */
+const MASTER_SCHEMA = {
+  System: [
+    'SystemID', 'InstanceName', 'Version', 'SchemaVersion', 'InstalledAtUTC', 'UpdatedAtUTC', 'LastHealthCheckUTC', 'Status'
+  ],
+  Accounts: [
+    'UserID', 'Username', 'DisplayName', 'Role', 'Status',
+    'PrimaryWorkspaceID', 'Email', 'EmployeeCode', 'CreatedAt', 'CreatedBy',
+    'UpdatedAt', 'UpdatedBy', 'LastLoginAt', 'MustChangePassword', 'Version'
+  ],
+  Credentials: [
+    'UserID', 'PasswordHash', 'PasswordVersion', 'PasswordChangedAt',
+    'FailedLoginCount', 'LastFailedAt', 'LockUntil', 'ResetIssuedAt', 'ResetExpiresAt',
+    'TotpSecret', 'MfaEnabled', 'PendingTotpSecret', 'LastSuccessfulTotpStep'
+  ],
+  Workspaces: [
+    'WorkspaceID', 'WorkspaceCode', 'WorkspaceName', 'SpreadsheetID', 'DriveFolderID',
+    'Status', 'Timezone', 'SchemaVersion', 'CreatedAt', 'CreatedBy', 'ArchivedAt',
+    'PartitionPolicy', 'CurrentPartition', 'Version'
+  ],
+  WorkspaceAccess: [
+    'AccessID', 'UserID', 'WorkspaceID', 'Role', 'Active',
+    'AssignedAt', 'AssignedBy', 'RemovedAt', 'Version'
+  ],
+  Requests: [
+    'RequestID', 'RequestType', 'RequestedBy', 'WorkspaceID',
+    'TargetUserID', 'RequestedDataJSON', 'Reason', 'Status',
+    'RequestedAt', 'ReviewedBy', 'ReviewedAt', 'ReviewComment', 'ExecutedAt', 'Version'
+  ],
+  Sessions: [
+    'SessionID', 'UserID', 'TokenHash', 'ClientType', 'ClientLabel',
+    'CreatedAt', 'LastSeenAt', 'ExpiresAt', 'AbsoluteExpiresAt', 'Revoked', 'RevokedAt', 'RevokeReason'
+  ],
+  GlobalSettings: [
+    'SettingKey', 'SettingValue', 'Description', 'UpdatedAt', 'UpdatedBy'
+  ],
+  SavedReports: [
+    'ReportID', 'ReportName', 'ReportType', 'OwnerUserID', 'WorkspacesJSON',
+    'GroupingsJSON', 'FiltersJSON', 'ChartType', 'CreatedAt'
+  ],
+  SavedDashboards: [
+    'DashboardID', 'DashboardName', 'OwnerUserID', 'WidgetsJSON', 'CreatedAt', 'UpdatedAt'
+  ],
+  ScheduledReports: [
+    'ScheduleID', 'ReportID', 'Frequency', 'RecipientsJSON', 'Format',
+    'LastRunAt', 'Status', 'CreatedAt'
+  ],
+  SecurityEvents: [
+    'EventID', 'Timestamp', 'UserID', 'Username', 'EventType', 'Success', 'MetadataJSON'
+  ],
+  GlobalAudit: [
+    'AuditID', 'TimestampUTC', 'ActorUserID', 'ActorRole', 'WorkspaceID',
+    'EntityType', 'EntityID', 'Action', 'BeforeJSON', 'AfterJSON', 'Reason', 'CorrelationID', 'ClientType',
+    'PreviousHash', 'RecordHash'
+  ],
+  JobRegistry: [
+    'JobID', 'JobType', 'WorkspaceID', 'Status', 'Cursor', 'StartedAt', 'UpdatedAt', 'RetryCount', 'NextRunAt', 'LastError'
+  ],
+  JobRuns: [
+    'RunID', 'JobID', 'JobType', 'WorkspaceID', 'StartedAt', 'EndedAt', 'DurationMs', 'ItemsProcessed', 'Status', 'LogDetails'
+  ],
+  MigrationHistory: [
+    'MigrationID', 'FromVersion', 'ToVersion', 'ExecutedAt', 'ExecutedBy', 'Status', 'DetailsJSON'
+  ],
+  BackupRegistry: [
+    'BackupID', 'Scope', 'WorkspaceID', 'SourceFileID', 'BackupFileID', 'CreatedAt', 'Status', 'Verified', 'ChecksumMetadata'
+  ],
+  SystemHealthHistory: [
+    'HealthCheckID', 'TimestampUTC', 'OverallStatus', 'MasterDbStatus', 'WorkspacesStatus', 'ActiveTimersCount', 'CellCountApprox', 'QuotaStatus', 'DetailsJSON'
+  ]
+};
+
+/**
+ * Workspace Sheet Column Definitions (20 Tabs)
+ */
+const WORKSPACE_SCHEMA = {
+  WorkspaceInfo: [
+    'WorkspaceID', 'WorkspaceCode', 'WorkspaceName', 'Status', 'Timezone', 'SchemaVersion', 'CreatedAt'
+  ],
+  Members: [
+    'UserID', 'DisplayName', 'Status', 'JoinedAt', 'LeftAt',
+    'Department', 'Team', 'JobTitle', 'EmployeeCode'
+  ],
+  Clients: [
+    'ClientID', 'ClientName', 'Status', 'Notes', 'CreatedAt'
+  ],
+  Projects: [
+    'ProjectID', 'ClientID', 'ProjectName', 'Code', 'Status',
+    'BillableDefault', 'HourlyRate', 'CostRate', 'EstimateHours',
+    'BudgetAmount', 'StartDate', 'EndDate', 'ColorKey', 'Notes'
+  ],
+  Tasks: [
+    'TaskID', 'ProjectID', 'TaskName', 'Status', 'EstimateHours',
+    'BillableDefault', 'SortOrder'
+  ],
+  Tags: [
+    'TagID', 'TagName', 'Status', 'Category'
+  ],
+  UserProjectAccess: [
+    'UserID', 'ProjectID', 'CanTrack', 'AssignedAt'
+  ],
+  ActiveTimers: [
+    'TimerID', 'UserID', 'ProjectID', 'TaskID', 'Description',
+    'TagIDs', 'StartedAtUTC', 'StartedAtLocal', 'Billable', 'Source', 'LastHeartbeat'
+  ],
+  TimeEntries: [
+    'EntryID', 'UserID', 'ProjectID', 'TaskID', 'Description', 'Tags',
+    'StartUTC', 'EndUTC', 'DurationSeconds', 'Billable',
+    'HourlyRateSnapshot', 'CostRateSnapshot', 'EntrySource', 'ManualEntry',
+    'Status', 'ApprovalStatus', 'TimesheetID', 'Locked',
+    'CreatedAt', 'CreatedBy', 'UpdatedAt', 'UpdatedBy', 'DeletedAt', 'DeletedBy', 'Version'
+  ],
+  Timesheets: [
+    'TimesheetID', 'UserID', 'PeriodStart', 'PeriodEnd', 'TotalSeconds',
+    'Status', 'SubmittedAt', 'ReviewedBy', 'ReviewedAt', 'ReviewComment', 'LockedAt',
+    'EntrySnapshotJSON'
+  ],
+  Approvals: [
+    'ApprovalID', 'TimesheetID', 'UserID', 'Action', 'ActorUserID',
+    'ActorRole', 'TimestampUTC', 'Comment', 'SnapshotTotalSeconds'
+  ],
+  Comments: [
+    'CommentID', 'EntityType', 'EntityID', 'UserID', 'CommentText', 'CreatedAt'
+  ],
+  DailyRollups: [
+    'RollupDate', 'UserID', 'ProjectID', 'TotalSeconds', 'BillableSeconds',
+    'CostAmount', 'BillableAmount', 'EntryCount', 'LastCalculatedAt'
+  ],
+  WeeklyRollups: [
+    'WeekStart', 'WeekEnd', 'UserID', 'ProjectID', 'TotalSeconds',
+    'BillableSeconds', 'CostAmount', 'BillableAmount', 'EntryCount', 'LastCalculatedAt'
+  ],
+  MonthlyRollups: [
+    'MonthKey', 'UserID', 'ProjectID', 'TotalSeconds', 'BillableSeconds',
+    'CostAmount', 'BillableAmount', 'EntryCount', 'LastCalculatedAt'
+  ],
+  ProjectRollups: [
+    'ProjectID', 'TotalSeconds', 'BillableSeconds', 'RemainingHours',
+    'TotalCost', 'TotalRevenue', 'ContributorCount', 'LastCalculatedAt'
+  ],
+  UserRollups: [
+    'UserID', 'MonthKey', 'TrackedSeconds', 'TargetSeconds', 'UtilizationPct',
+    'OvertimeSeconds', 'MissingSeconds', 'LastCalculatedAt'
+  ],
+  Alerts: [
+    'AlertID', 'AlertType', 'Severity', 'TriggeredAt', 'Message', 'Resolved', 'ResolvedAt', 'ResolvedBy'
+  ],
+  WorkspaceSettings: [
+    'SettingKey', 'SettingValue', 'Description', 'UpdatedAt', 'UpdatedBy'
+  ],
+  AuditLog: [
+    'AuditID', 'TimestampUTC', 'ActorUserID', 'ActorRole', 'EntityType',
+    'EntityID', 'Action', 'BeforeJSON', 'AfterJSON', 'Reason', 'ClientType',
+    'PreviousHash', 'RecordHash'
+  ]
+};
+
+/* ===== Validation.gs ===== */
+/**
+ * FLINK Time & Workforce Platform — Input Validation & Sanitization
+ */
+
+const Validation = {
+  /**
+   * Spreadsheet Formula Injection Defense
+   * Neutralizes formula execution by prepending a single quote if the string starts with =, +, -, @, tab, or newline.
+   */
+  sanitizeCellValue(val) {
+    if (val === null || val === undefined) return '';
+    if (typeof val === 'number' || typeof val === 'boolean') return val;
+    const str = String(val);
+    if (/^[=+\-@\t\r\n]/.test(str)) {
+      return "'" + str;
+    }
+    return str;
+  },
+
+  /**
+   * Sanitizes all string values within an object or array
+   */
+  sanitizeRow(row) {
+    if (Array.isArray(row)) {
+      return row.map(v => Validation.sanitizeCellValue(v));
+    }
+    const clean = {};
+    for (const [k, v] of Object.entries(row)) {
+      clean[k] = Validation.sanitizeCellValue(v);
+    }
+    return clean;
+  },
+
+  validateUsername(username) {
+    if (!username || typeof username !== 'string') {
+      throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'Username is required and must be a string.');
+    }
+    const trimmed = username.trim().toLowerCase();
+    if (trimmed.length < 3 || trimmed.length > 50) {
+      throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'Username must be between 3 and 50 characters.');
+    }
+    if (!/^[a-z0-9_.\-]+$/.test(trimmed)) {
+      throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'Username may only contain letters, numbers, underscores, dashes, and periods.');
+    }
+    return trimmed;
+  },
+
+  validateEmail(email) {
+    if (!email || typeof email !== 'string') {
+      throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'Email is required.');
+    }
+    const normalized = email.trim().toLowerCase();
+    if (
+      normalized.length > 254 ||
+      !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized)
+    ) {
+      throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'A valid email address is required.');
+    }
+    return normalized;
+  },
+
+  validatePassword(password) {
+    if (!password || typeof password !== 'string') {
+      throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'Password is required.');
+    }
+    if (password.length < CONSTANTS.LIMITS.MIN_PASSWORD_LENGTH) {
+      throw new AppError(ERROR_CODES.VALIDATION_ERROR, `Password must be at least ${CONSTANTS.LIMITS.MIN_PASSWORD_LENGTH} characters long.`);
+    }
+    if (password.length > CONSTANTS.LIMITS.MAX_PASSWORD_LENGTH) {
+      throw new AppError(ERROR_CODES.VALIDATION_ERROR, `Password cannot exceed ${CONSTANTS.LIMITS.MAX_PASSWORD_LENGTH} characters.`);
+    }
+    // Complexity: require at least one uppercase, one lowercase, one digit, one special character
+    if (!/[A-Z]/.test(password)) {
+      throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'Password must contain at least one uppercase letter.');
+    }
+    if (!/[a-z]/.test(password)) {
+      throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'Password must contain at least one lowercase letter.');
+    }
+    if (!/[0-9]/.test(password)) {
+      throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'Password must contain at least one digit.');
+    }
+    if (!/[^A-Za-z0-9]/.test(password)) {
+      throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'Password must contain at least one special character.');
+    }
+    return password;
+  },
+
+  validateRole(role) {
+    if (!role || !Object.values(CONSTANTS.ROLES).includes(role)) {
+      throw new AppError(ERROR_CODES.VALIDATION_ERROR, `Invalid role. Allowed roles: ${Object.values(CONSTANTS.ROLES).join(', ')}`);
+    }
+    return role;
+  },
+
+  validateDateRange(startUtc, endUtc, allowFuture = false) {
+    const s = new Date(startUtc).getTime();
+    const e = new Date(endUtc).getTime();
+    if (isNaN(s) || isNaN(e)) {
+      throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'Invalid timestamp provided.');
+    }
+    if (e < s) {
+      throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'End time cannot be earlier than start time.');
+    }
+    // Anti-Cheat: Reject future-dated time logs (allowing 5 min clock skew tolerance)
+    const now = Date.now();
+    if (!allowFuture && e > (now + 5 * 60 * 1000)) {
+      throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'Time entries cannot be logged with future end dates.');
+    }
+    const durationSeconds = Math.round((e - s) / 1000);
+    const maxSeconds = CONSTANTS.LIMITS.MAX_SINGLE_ENTRY_HOURS * 3600;
+    if (durationSeconds > maxSeconds) {
+      throw new AppError(ERROR_CODES.VALIDATION_ERROR, `Time entry duration cannot exceed ${CONSTANTS.LIMITS.MAX_SINGLE_ENTRY_HOURS} hours.`);
+    }
+    return durationSeconds;
+  },
+
+  generateId(prefix = 'ID') {
+    // Use Utilities.getUuid() for better entropy than Math.random()
+    if (typeof Utilities !== 'undefined' && Utilities.getUuid) {
+      const uuid = Utilities.getUuid().replace(/-/g, '').substring(0, 12);
+      return `${prefix}-${uuid}`.toUpperCase();
+    }
+    // Fallback for testing environments without Apps Script Utilities
+    const randomHex = () => Math.floor((1 + Math.random()) * 0x10000).toString(16).substring(1);
+    const ts = Date.now().toString(36);
+    return `${prefix}-${ts}-${randomHex()}${randomHex()}`.toUpperCase();
+  },
+
+  assertRequired(obj, fields = []) {
+    if (!obj || typeof obj !== 'object') {
+      throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'Request payload missing or invalid.');
+    }
+    for (const f of fields) {
+      if (obj[f] === undefined || obj[f] === null || obj[f] === '') {
+        throw new AppError(ERROR_CODES.VALIDATION_ERROR, `Missing required field: ${f}`);
+      }
+    }
+  },
+
+  /**
+   * Optimistic Concurrency Control (Record Versioning)
+   * Section 43: Prevents silent overwrites by asserting expected version equals record current version.
+   */
+  assertRecordVersion(record, expectedVersion) {
+    if (expectedVersion === undefined || expectedVersion === null) return;
+    const currentVer = parseInt(record.Version || 1, 10);
+    const expVer = parseInt(expectedVersion, 10);
+    if (currentVer !== expVer) {
+      throw new AppError(
+        ERROR_CODES.CONFLICT,
+        `Record was modified by another user (expected v${expVer}, current v${currentVer}). Please refresh and try again.`,
+        409
+      );
+    }
+  },
+
+  /**
+   * Action Idempotency Cache
+   * Section 49: Avoids duplicate execution on browser network retry.
+   */
+  _idempotencyCache: new Map(),
+
+  getIdempotencyResult(actionId) {
+    if (!actionId) return null;
+    if (this._idempotencyCache.has(actionId)) {
+      return this._idempotencyCache.get(actionId);
+    }
+    if (typeof CacheService !== 'undefined' && CacheService.getScriptCache) {
+      try {
+        const cached = CacheService.getScriptCache().get(`IDEMP_${actionId}`);
+        if (cached) return JSON.parse(cached);
+      } catch (e) {}
+    }
+    return null;
+  },
+
+  setIdempotencyResult(actionId, result) {
+    if (!actionId) return;
+    this._idempotencyCache.set(actionId, result);
+    if (typeof CacheService !== 'undefined' && CacheService.getScriptCache) {
+      try {
+        CacheService.getScriptCache().put(`IDEMP_${actionId}`, JSON.stringify(result), 3600);
+      } catch (e) {}
+    }
+  }
+};
+
+/* ===== App.gs ===== */
+/**
  * FLINK Time & Workforce Platform — Main Application Dispatcher & API Controller
  * Serves Google Apps Script Web App (doGet / doPost), embeds into Google Sites,
  * and routes API actions with LockService concurrency guards and unified error handling.
@@ -17,7 +625,7 @@ function doGet(e) {
 
   // Otherwise serve the Google Workspace-Native Web Application UI
   try {
-    const template = HtmlService.createTemplateFromFile('index');
+    const template = HtmlService.createTemplateFromFile('App');
     const output = template.evaluate();
     output.setTitle('FLINK Time & Workforce Platform');
     output.setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL); // Allows embedding inside Google Sites
@@ -642,17 +1250,12 @@ const App = {
 
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
-    ACTION_PERMISSIONS,
-    PUBLIC_ACTIONS,
-    GET_SAFE_ACTIONS,
-    isHttpMethodAllowed,
-    App,
-    doGet,
-    doPost,
-    handleApiRequest,
-    handleClientRequest,
-    executeApiRequest,
-    dispatchAction,
-    buildJsonResponse
+    ERROR_CODES, AppError,
+    CONSTANTS, MASTER_SCHEMA, WORKSPACE_SCHEMA,
+    Validation,
+    ACTION_PERMISSIONS, PUBLIC_ACTIONS, GET_SAFE_ACTIONS,
+    isHttpMethodAllowed, App, doGet, doPost,
+    handleApiRequest, handleClientRequest, executeApiRequest,
+    dispatchAction, buildJsonResponse
   };
 }

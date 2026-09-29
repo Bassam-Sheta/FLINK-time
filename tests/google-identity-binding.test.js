@@ -6,11 +6,11 @@ const path = require('node:path');
 
 const identityPath = path.resolve(
   __dirname,
-  '../RELEASE_PACKAGE/3_GOOGLE_BACKEND_SCRIPTS/IdentityService.gs'
+  '../apps-script/Security.gs'
 );
 const sessionPath = path.resolve(
   __dirname,
-  '../RELEASE_PACKAGE/3_GOOGLE_BACKEND_SCRIPTS/SessionService.gs'
+  '../apps-script/Security.gs'
 );
 
 class AppError extends Error {

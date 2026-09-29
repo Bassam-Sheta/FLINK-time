@@ -4,7 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');
 
-const servicePath = path.resolve(__dirname, '../RELEASE_PACKAGE/3_GOOGLE_BACKEND_SCRIPTS/AuthService.gs');
+const servicePath = path.resolve(__dirname, '../apps-script/Security.gs');
 
 class AppError extends Error {
   constructor(code, message, statusCode = 400) {

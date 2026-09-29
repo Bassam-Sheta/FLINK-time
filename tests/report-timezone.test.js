@@ -6,11 +6,11 @@ const path = require('node:path');
 
 const reportPath = path.resolve(
   __dirname,
-  '../RELEASE_PACKAGE/3_GOOGLE_BACKEND_SCRIPTS/ReportService.gs'
+  '../apps-script/Business.gs'
 );
 const timezonePath = path.resolve(
   __dirname,
-  '../RELEASE_PACKAGE/3_GOOGLE_BACKEND_SCRIPTS/TimezoneService.gs'
+  '../apps-script/Data.gs'
 );
 
 class AppError extends Error {

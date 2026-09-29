@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const app = fs.readFileSync(
-  path.resolve(__dirname, '../RELEASE_PACKAGE/3_GOOGLE_BACKEND_SCRIPTS/App.gs'),
+  path.resolve(__dirname, '../apps-script/Code.gs'),
   'utf8'
 );
 
