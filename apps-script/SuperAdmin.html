@@ -906,8 +906,30 @@
       };
     }
 
-    // workspaceOverride may be '' intentionally for manager all-workspace reads.
-    async function apiCall(action, payload = {}, workspaceOverride = undefined) {
+    const PRIVILEGED_STEP_UP_ACTIONS = new Set([
+      'workspaces.create',
+      'workspaces.assignAdmin',
+      'workspaces.removeAdmin',
+      'workspaces.deletePermanent',
+      'users.create',
+      'users.update',
+      'users.makePassive',
+      'users.activate',
+      'users.resetPassword',
+      'users.unlock',
+      'users.forceLogout',
+      'requests.review',
+      'system.repair',
+      'settings.save',
+      'sessions.revoke',
+      'backups.create',
+      'backups.restoreApply'
+    ]);
+    let privilegedStepUpToken = '';
+    let privilegedStepUpExpiresAt = 0;
+
+    // Low-level transport used by normal API calls and the step-up exchange itself.
+    async function rawApiCall(action, payload = {}, workspaceOverride = undefined) {
       const body = {
         action,
         sessionToken: state.token,
@@ -928,7 +950,6 @@
         });
       }
 
-      // HTTP fetch fallback for standalone testing
       const res = await fetch('', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -937,6 +958,63 @@
       const data = await res.json();
       if (!data.ok) throw data.error;
       return data.data;
+    }
+
+    async function ensurePrivilegedStepUp() {
+      if (!state.user || state.user.role !== 'SUPER_ADMIN') return '';
+      if (!state.token) throw new Error('Your session has ended. Sign in again.');
+
+      if (
+        privilegedStepUpToken &&
+        Number.isFinite(privilegedStepUpExpiresAt) &&
+        Date.now() < privilegedStepUpExpiresAt - 5000
+      ) {
+        return privilegedStepUpToken;
+      }
+
+      const currentPassword = prompt(
+        'Security verification: re-enter your Super Admin password.'
+      );
+      if (!currentPassword) {
+        throw new Error('Super Admin reauthentication was cancelled.');
+      }
+
+      const totpCode = prompt(
+        'Enter a fresh 6-digit code from your authenticator app. If you just used the current code to sign in, wait for the next code.'
+      );
+      if (!totpCode) {
+        throw new Error('Super Admin MFA verification was cancelled.');
+      }
+
+      const result = await rawApiCall('auth.stepUp', {
+        currentPassword,
+        totpCode: String(totpCode).trim()
+      });
+
+      if (!result || !result.sessionToken || !result.stepUpToken) {
+        throw new Error('Super Admin reauthentication did not return a valid security grant.');
+      }
+
+      state.token = result.sessionToken;
+      sessionStorage.setItem('flink_session_token', state.token);
+      privilegedStepUpToken = result.stepUpToken;
+      privilegedStepUpExpiresAt = new Date(result.stepUpExpiresAt || 0).getTime();
+      return privilegedStepUpToken;
+    }
+
+    // workspaceOverride may be '' intentionally for manager all-workspace reads.
+    async function apiCall(action, payload = {}, workspaceOverride = undefined) {
+      let requestPayload = payload || {};
+      if (
+        state.user &&
+        state.user.role === 'SUPER_ADMIN' &&
+        PRIVILEGED_STEP_UP_ACTIONS.has(action)
+      ) {
+        requestPayload = Object.assign({}, requestPayload, {
+          stepUpToken: await ensurePrivilegedStepUp()
+        });
+      }
+      return rawApiCall(action, requestPayload, workspaceOverride);
     }
 
     // App Initialization
