@@ -1,11 +1,6 @@
 /**
  * FLINK Time & Workforce Platform
  * FINAL SINGLE-FILE GOOGLE APPS SCRIPT BACKEND
- *
- * UI entry points:
- *   ?view=user       -> User.html
- *   ?view=admin      -> Admin.html
- *   ?view=superadmin -> SuperAdmin.html
  */
 
 /**
@@ -19,7 +14,7 @@
  * FLINK Time & Workforce Platform — Error Definitions
  */
 
-var ERROR_CODES = (typeof global !== 'undefined' && global.ERROR_CODES) || {
+var ERROR_CODES = {
   AUTH_REQUIRED: 'AUTH_REQUIRED',
   UNAUTHORIZED: 'UNAUTHORIZED',
   SESSION_EXPIRED: 'SESSION_EXPIRED',
@@ -74,7 +69,7 @@ var AppError = (typeof global !== 'undefined' && global.AppError) || class AppEr
  * - Admin Max 3 Active Workspaces
  */
 
-var CONSTANTS = (typeof global !== 'undefined' && global.CONSTANTS) || {
+var CONSTANTS = {
   VERSION: '1.0.0',
   SCHEMA_VERSION: 1,
 
@@ -271,7 +266,7 @@ var CONSTANTS = (typeof global !== 'undefined' && global.CONSTANTS) || {
 /**
  * Master Control Sheet Column Definitions (18 Tabs)
  */
-var MASTER_SCHEMA = (typeof global !== 'undefined' && global.MASTER_SCHEMA) || {
+var MASTER_SCHEMA = {
   System: [
     'SystemID', 'InstanceName', 'Version', 'SchemaVersion', 'InstalledAtUTC', 'UpdatedAtUTC', 'LastHealthCheckUTC', 'Status'
   ],
@@ -345,7 +340,7 @@ var MASTER_SCHEMA = (typeof global !== 'undefined' && global.MASTER_SCHEMA) || {
 /**
  * Workspace Sheet Column Definitions (20 Tabs)
  */
-var WORKSPACE_SCHEMA = (typeof global !== 'undefined' && global.WORKSPACE_SCHEMA) || {
+var WORKSPACE_SCHEMA = {
   WorkspaceInfo: [
     'WorkspaceID', 'WorkspaceCode', 'WorkspaceName', 'Status', 'Timezone', 'SchemaVersion', 'CreatedAt'
   ],
@@ -432,7 +427,7 @@ var WORKSPACE_SCHEMA = (typeof global !== 'undefined' && global.WORKSPACE_SCHEMA
  * FLINK Time & Workforce Platform — Input Validation & Sanitization
  */
 
-var Validation = (typeof global !== 'undefined' && global.Validation) || {
+var Validation = {
   /**
    * Spreadsheet Formula Injection Defense
    * Neutralizes formula execution by prepending a single quote if the string starts with =, +, -, @, tab, or newline.
@@ -614,6 +609,38 @@ var Validation = (typeof global !== 'undefined' && global.Validation) || {
     }
   }
 };
+
+
+/* Node regression harness may inject partial dependency/config mocks.
+ * Production Apps Script has no global object, so these overlays are inert there.
+ */
+function __mergeConfigForTests_(base, override) {
+  if (!override || typeof override !== 'object') return base;
+  Object.keys(override).forEach(key => {
+    const incoming = override[key];
+    if (
+      incoming &&
+      typeof incoming === 'object' &&
+      !Array.isArray(incoming) &&
+      base[key] &&
+      typeof base[key] === 'object' &&
+      !Array.isArray(base[key])
+    ) {
+      __mergeConfigForTests_(base[key], incoming);
+    } else {
+      base[key] = incoming;
+    }
+  });
+  return base;
+}
+
+if (typeof global !== 'undefined') {
+  if (global.ERROR_CODES) __mergeConfigForTests_(ERROR_CODES, global.ERROR_CODES);
+  if (global.CONSTANTS) __mergeConfigForTests_(CONSTANTS, global.CONSTANTS);
+  if (global.MASTER_SCHEMA) __mergeConfigForTests_(MASTER_SCHEMA, global.MASTER_SCHEMA);
+  if (global.WORKSPACE_SCHEMA) __mergeConfigForTests_(WORKSPACE_SCHEMA, global.WORKSPACE_SCHEMA);
+  if (global.Validation) __mergeConfigForTests_(Validation, global.Validation);
+}
 
 /* ===== App.gs ===== */
 /**
