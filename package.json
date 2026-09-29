@@ -4,9 +4,13 @@
   "version": "0.1.0",
   "description": "Regression tests for the FLINK Time Google Apps Script backend.",
   "scripts": {
-    "test": "node --test tests/*.test.js"
+    "test": "node --test tests/*.test.js",
+    "test:human": "playwright test tests/browser/user-human.spec.js --project=chromium"
   },
   "engines": {
     "node": ">=20"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.63.0"
   }
 }
