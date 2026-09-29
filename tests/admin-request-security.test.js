@@ -58,7 +58,8 @@ function loadService(overrides = {}) {
     },
     generateId() { return 'REQ-1'; },
     sanitizeCellValue(v) { return String(v); },
-    sanitizeRow(v) { return v; }
+    sanitizeRow(v) { return v; },
+    validateEmail(v) { return String(v).toLowerCase(); }
   };
   global.AuthorizationService = {
     assertRole() {},
@@ -121,7 +122,7 @@ test('Admin NEW_USER request cannot request ADMIN role', () => {
         requestType: 'NEW_USER',
         workspaceId: 'W1',
         reason: 'new admin',
-        requestedData: { username: 'candidate', displayName: 'Candidate', role: 'ADMIN' }
+        requestedData: { username: 'candidate', displayName: 'Candidate', email: 'candidate@example.com', role: 'ADMIN' }
       }
     ),
     err => err instanceof AppError &&
