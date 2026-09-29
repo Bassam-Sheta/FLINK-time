@@ -181,7 +181,7 @@ var CONSTANTS = {
     LOCKOUT_DURATION_MINUTES: 15,
     LOGIN_RETRY_DELAYS_SECONDS: [0, 2, 5, 15, 30],
     LOGIN_CALLER_ATTEMPTS_PER_MINUTE: 30,
-    LOGIN_GLOBAL_ATTEMPTS_PER_MINUTE: 200,
+    LOGIN_GLOBAL_ATTEMPTS_PER_MINUTE: 1000,
     SESSION_IDLE_TIMEOUT_HOURS: 8,
     SESSION_ABSOLUTE_TIMEOUT_HOURS: 24,
     SESSION_TOUCH_INTERVAL_MINUTES: 5,
@@ -191,6 +191,7 @@ var CONSTANTS = {
     INITIAL_PASSWORD_TTL_HOURS: 24,
     SETUP_KEY_TTL_MINUTES: 15,
     MFA_ENROLLMENT_TTL_MINUTES: 10,
+    STEP_UP_TTL_MINUTES: 5,
     MAX_SINGLE_ENTRY_HOURS: 24,
     DASHBOARD_LIVE_WINDOW_SECONDS: 60,
     SESSION_RETENTION_DAYS: 30
@@ -828,6 +829,7 @@ const ACTION_PERMISSIONS = {
 
   // User Authentication, MFA & Profile
   'auth.validateSession': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN, CONSTANTS.ROLES.ADMIN, CONSTANTS.ROLES.USER], isWrite: false },
+  'auth.stepUp': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN], isWrite: true },
   'auth.logout': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN, CONSTANTS.ROLES.ADMIN, CONSTANTS.ROLES.USER], isWrite: true },
   'auth.changePassword': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN, CONSTANTS.ROLES.ADMIN, CONSTANTS.ROLES.USER], isWrite: true },
   'auth.enrollMfa': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN, CONSTANTS.ROLES.ADMIN, CONSTANTS.ROLES.USER], isWrite: true },
@@ -929,6 +931,26 @@ const ACTION_PERMISSIONS = {
   'audit.verifyChain': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN], isWrite: false }
 };
 
+const PRIVILEGED_STEP_UP_ACTIONS = new Set([
+  'workspaces.create',
+  'workspaces.assignAdmin',
+  'workspaces.removeAdmin',
+  'workspaces.deletePermanent',
+  'users.create',
+  'users.update',
+  'users.makePassive',
+  'users.activate',
+  'users.resetPassword',
+  'users.unlock',
+  'users.forceLogout',
+  'requests.review',
+  'system.repair',
+  'settings.save',
+  'sessions.revoke',
+  'backups.create',
+  'backups.restoreApply'
+]);
+
 /**
  * Explicit unauthenticated boundary. Any new public action must be added here
  * and to ACTION_PERMISSIONS with authRequired:false, or CI will fail.
@@ -1001,7 +1023,7 @@ function executeApiRequest_(action, requestData, httpMethod = 'POST') {
     const result = dispatchAction_(action, requestData);
     return { ok: true, data: result };
   } catch (err) {
-    if (err instanceof AppError) {
+    if (err instanceof AppError && Number(err.statusCode || 400) < 500) {
       return err.toJSON();
     }
     const correlationId = Validation.generateId('ERR');
@@ -1104,9 +1126,25 @@ function dispatchAction_(action, data) {
     AuthorizationService.assertWorkspaceAccess(authContext, wsId);
   }
 
+  if (
+    authContext.role === CONSTANTS.ROLES.SUPER_ADMIN &&
+    PRIVILEGED_STEP_UP_ACTIONS.has(action)
+  ) {
+    AuthService.assertStepUp(authContext, payload.stepUpToken || '');
+    AuditService.requirePrivilegedActionAudit(authContext, action, wsId || '');
+  }
+
   switch (action) {
     case 'auth.validateSession':
       return { user: authContext.user, role: authContext.role };
+
+    case 'auth.stepUp':
+      return AuthService.stepUp(
+        authContext,
+        token,
+        payload.currentPassword,
+        payload.totpCode
+      );
 
     case 'auth.logout':
       return AuthService.logout(token);
@@ -1302,9 +1340,26 @@ function dispatchAction_(action, data) {
       return SetupService.processStep(9, payload, authContext);
 
     /* ---------------- SETTINGS & CONFIGURATION ---------------- */
-    case 'settings.get':
+    case 'settings.get': {
       AuthorizationService.assertRole(authContext, [CONSTANTS.ROLES.SUPER_ADMIN, CONSTANTS.ROLES.ADMIN]);
-      return MasterRepository.getAllGlobalSettings();
+      const allSettings = MasterRepository.getAllGlobalSettingsStrict();
+      if (authContext.role === CONSTANTS.ROLES.SUPER_ADMIN) return allSettings;
+
+      const allowedWorkspaceIds = MasterRepository
+        .getWorkspaceAccessForUser(authContext.userId)
+        .map(access => String(access.WorkspaceID || ''));
+      const filtered = {};
+      for (const [key, value] of Object.entries(allSettings)) {
+        if (!String(key).startsWith('WS_')) {
+          filtered[key] = value;
+          continue;
+        }
+        if (allowedWorkspaceIds.some(id => id && String(key).startsWith(`WS_${id}_`))) {
+          filtered[key] = value;
+        }
+      }
+      return filtered;
+    }
 
     case 'settings.save': {
       AuthorizationService.assertRole(authContext, [CONSTANTS.ROLES.SUPER_ADMIN]);
@@ -1358,15 +1413,30 @@ function dispatchAction_(action, data) {
         affected: TimeEntryService.bulkAction(authContext, wsId, payload.entryIds, payload.actionType, payload.params)
       };
 
-    case 'workspaces.deletePermanent':
+    case 'workspaces.deletePermanent': {
       AuthorizationService.assertRole(authContext, [CONSTANTS.ROLES.SUPER_ADMIN]);
       Validation.assertRequired(payload, ['workspaceId', 'workspaceName', 'adminPassword']);
+      const targetWorkspace = MasterRepository.getWorkspace(payload.workspaceId);
+      if (!targetWorkspace) {
+        throw new AppError(ERROR_CODES.NOT_FOUND, `Workspace ${payload.workspaceId} not found.`, 404);
+      }
+      if (
+        String(payload.workspaceName || '').trim() !==
+        String(targetWorkspace.WorkspaceName || '').trim()
+      ) {
+        throw new AppError(
+          ERROR_CODES.VALIDATION_ERROR,
+          'Workspace name confirmation does not match the server record.',
+          400
+        );
+      }
       const credRows = MasterRepository.getTableData(CONSTANTS.MASTER_TABS.CREDENTIALS).rows;
       const userCred = credRows.find(c => c.UserID === authContext.userId);
       if (!userCred || !SecurityService.verifyPassword(payload.adminPassword, userCred.PasswordHash)) {
         throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'Invalid Super Admin password confirmation.', 401);
       }
       return MasterRepository.deleteWorkspacePermanent(payload.workspaceId);
+    }
 
     /* ---------------- BACKUP & RESTORE ---------------- */
     case 'backups.create':
@@ -2452,6 +2522,7 @@ var SessionService = (typeof global !== 'undefined' && global.SessionService) ||
 var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
   _mfaChallengeMemory: {},
   _mfaEnrollmentMemory: {},
+  _stepUpMemory: {},
 
   _mfaChallengePropertyKey(userId) {
     return 'FLINK_MFA_CHALLENGE_' + String(userId || '').replace(/[^A-Za-z0-9_-]/g, '');
@@ -2542,6 +2613,38 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
     }
   },
 
+  _stepUpPropertyKey(sessionId) {
+    return 'FLINK_STEP_UP_' + String(sessionId || '').replace(/[^A-Za-z0-9_-]/g, '');
+  },
+
+  _storeStepUp(sessionId, record) {
+    const serialized = JSON.stringify(record || {});
+    if (typeof PropertiesService !== 'undefined' && PropertiesService.getScriptProperties) {
+      PropertiesService.getScriptProperties().setProperty(this._stepUpPropertyKey(sessionId), serialized);
+    } else {
+      this._stepUpMemory[sessionId] = serialized;
+    }
+  },
+
+  _getStepUp(sessionId) {
+    let raw = '';
+    if (typeof PropertiesService !== 'undefined' && PropertiesService.getScriptProperties) {
+      raw = PropertiesService.getScriptProperties().getProperty(this._stepUpPropertyKey(sessionId)) || '';
+    } else {
+      raw = this._stepUpMemory[sessionId] || '';
+    }
+    if (!raw) return null;
+    try { return JSON.parse(raw); } catch (e) { return null; }
+  },
+
+  _deleteStepUp(sessionId) {
+    if (typeof PropertiesService !== 'undefined' && PropertiesService.getScriptProperties) {
+      PropertiesService.getScriptProperties().deleteProperty(this._stepUpPropertyKey(sessionId));
+    } else {
+      delete this._stepUpMemory[sessionId];
+    }
+  },
+
   _withLoginStateLock(fn) {
     if (
       typeof LockService === 'undefined' ||
@@ -2586,15 +2689,24 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
 
       const updateCounters = () => {
         const callerCount = (parseInt(cache.get(callerKey), 10) || 0) + 1;
-        const globalCount = (parseInt(cache.get(globalKey), 10) || 0) + 1;
         cache.put(callerKey, String(callerCount), 120);
-        cache.put(globalKey, String(globalCount), 120);
 
         if (
           callerCount >
-            (CONSTANTS.LIMITS.LOGIN_CALLER_ATTEMPTS_PER_MINUTE || 30) ||
+            (CONSTANTS.LIMITS.LOGIN_CALLER_ATTEMPTS_PER_MINUTE || 30)
+        ) {
+          throw new AppError(
+            ERROR_CODES.AUTH_REQUIRED,
+            'Invalid username or password.',
+            401
+          );
+        }
+
+        const globalCount = (parseInt(cache.get(globalKey), 10) || 0) + 1;
+        cache.put(globalKey, String(globalCount), 120);
+        if (
           globalCount >
-            (CONSTANTS.LIMITS.LOGIN_GLOBAL_ATTEMPTS_PER_MINUTE || 200)
+            (CONSTANTS.LIMITS.LOGIN_GLOBAL_ATTEMPTS_PER_MINUTE || 1000)
         ) {
           throw new AppError(
             ERROR_CODES.AUTH_REQUIRED,
@@ -2926,8 +3038,9 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
       });
     }
 
-    // Clear password-stage failures atomically, and ensure the credential that
-    // was verified has not been replaced/reset concurrently.
+    // Re-read the authentication state atomically. MFA-enabled accounts are
+    // not fully authenticated until the second factor succeeds, so failure
+    // counters must not be cleared at the password-only stage.
     this._withLoginStateLock(() => {
       if (MasterRepository._invalidateTable) {
         MasterRepository._invalidateTable(CONSTANTS.MASTER_TABS.CREDENTIALS);
@@ -2944,12 +3057,7 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
         throw invalidAuth();
       }
 
-      MasterRepository.updateCredentials(account.UserID, {
-        FailedLoginCount: 0,
-        LastFailedAt: '',
-        LockUntil: ''
-      });
-      cred = { ...latestCred, FailedLoginCount: 0, LastFailedAt: '', LockUntil: '' };
+      cred = latestCred;
       account = latestAccount;
     });
 
@@ -2987,6 +3095,12 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
         clientType: normalizedClientType
       };
     }
+
+    MasterRepository.updateCredentials(account.UserID, {
+      FailedLoginCount: 0,
+      LastFailedAt: '',
+      LockUntil: ''
+    });
 
     MasterRepository.updateAccount(account.UserID, {
       LastLoginAt: new Date().toISOString()
@@ -3290,6 +3404,145 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
   },
 
   /**
+   * Fresh password + TOTP verification for high-risk Super Admin actions.
+   * Rotates the session and binds a short-lived step-up token to the new SessionID.
+   */
+  stepUp(authContext, rawSessionToken, currentPassword, totpCode = '') {
+    AuthorizationService.assertRole(authContext, [CONSTANTS.ROLES.SUPER_ADMIN]);
+    if (!authContext.session || !authContext.session.SessionID) {
+      throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'A current authenticated session is required.', 401);
+    }
+
+    const cred = MasterRepository.getCredentials(authContext.userId);
+    if (!cred || !SecurityService.verifyPassword(currentPassword, cred.PasswordHash)) {
+      MasterRepository.logSecurityEvent({
+        UserID: authContext.userId,
+        Username: authContext.user ? authContext.user.Username : '',
+        EventType: 'STEP_UP_FAILED',
+        Success: false,
+        metadata: { reason: 'Invalid current password' }
+      });
+      throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'Fresh Super Admin reauthentication failed.', 401);
+    }
+
+    const mfaEnabled = cred.MfaEnabled === true || cred.MfaEnabled === 'TRUE';
+    if (!mfaEnabled || !cred.TotpSecret) {
+      throw new AppError(
+        ERROR_CODES.AUTH_REQUIRED,
+        'Super Admin MFA must be enabled before high-risk administrative actions can be performed.',
+        401
+      );
+    }
+
+    const verification = SecurityService.verifyTotpWithStep(cred.TotpSecret, totpCode);
+    const previousStep = parseInt(cred.LastSuccessfulTotpStep, 10);
+    if (
+      !verification.valid ||
+      (!isNaN(previousStep) && verification.timeStep <= previousStep)
+    ) {
+      MasterRepository.logSecurityEvent({
+        UserID: authContext.userId,
+        Username: authContext.user ? authContext.user.Username : '',
+        EventType: 'STEP_UP_FAILED',
+        Success: false,
+        metadata: { reason: 'Invalid or replayed MFA code' }
+      });
+      throw new AppError(
+        ERROR_CODES.AUTH_REQUIRED,
+        'Fresh Super Admin MFA verification failed. Use the next authenticator code if the current code was just used.',
+        401
+      );
+    }
+
+    MasterRepository.updateCredentials(authContext.userId, {
+      LastSuccessfulTotpStep: verification.timeStep
+    });
+
+    const replacement = SessionService.createSession(
+      authContext.userId,
+      authContext.session.ClientType || 'WEB',
+      authContext.session.ClientLabel || ''
+    );
+    const stepUpToken = 'STP_' + SecurityService.generateRandomHex(32);
+    const stepUpExpiresAtMs =
+      Date.now() + (CONSTANTS.LIMITS.STEP_UP_TTL_MINUTES || 5) * 60 * 1000;
+    this._storeStepUp(replacement.sessionId, {
+      userId: authContext.userId,
+      sessionId: replacement.sessionId,
+      tokenHash: SecurityService.hashToken(stepUpToken),
+      expiresAtMs: stepUpExpiresAtMs
+    });
+
+    const auditOk = MasterRepository.logGlobalAudit({
+      ActorUserID: authContext.userId,
+      ActorRole: authContext.role,
+      WorkspaceID: 'MASTER',
+      EntityType: 'USER_SECURITY',
+      EntityID: authContext.userId,
+      Action: 'STEP_UP_AUTHENTICATED',
+      Reason: 'Fresh Super Admin password and MFA verification succeeded'
+    });
+    if (!auditOk) {
+      this._deleteStepUp(replacement.sessionId);
+      SessionService.revokeSession(replacement.sessionToken);
+      throw new AppError(
+        ERROR_CODES.CRYPTO_FAILURE,
+        'Security audit trail is unavailable. Step-up authentication was not activated.',
+        503
+      );
+    }
+
+    SessionService.revokeSession(rawSessionToken);
+    MasterRepository.logSecurityEvent({
+      UserID: authContext.userId,
+      Username: authContext.user ? authContext.user.Username : '',
+      EventType: 'STEP_UP_SUCCESS',
+      Success: true,
+      metadata: { expiresAtMs: stepUpExpiresAtMs }
+    });
+
+    return {
+      ok: true,
+      sessionToken: replacement.sessionToken,
+      expiresAt: replacement.expiresAt,
+      stepUpToken,
+      stepUpExpiresAt: new Date(stepUpExpiresAtMs).toISOString()
+    };
+  },
+
+  assertStepUp(authContext, stepUpToken) {
+    AuthorizationService.assertRole(authContext, [CONSTANTS.ROLES.SUPER_ADMIN]);
+    if (!authContext.session || !authContext.session.SessionID || !stepUpToken) {
+      throw new AppError(
+        ERROR_CODES.AUTH_REQUIRED,
+        'Fresh Super Admin reauthentication is required for this action.',
+        401
+      );
+    }
+
+    const record = this._getStepUp(authContext.session.SessionID);
+    if (
+      !record ||
+      record.userId !== authContext.userId ||
+      record.sessionId !== authContext.session.SessionID ||
+      Number(record.expiresAtMs || 0) < Date.now() ||
+      !record.tokenHash ||
+      !SecurityService.constantTimeEquals(
+        record.tokenHash,
+        SecurityService.hashToken(String(stepUpToken))
+      )
+    ) {
+      this._deleteStepUp(authContext.session.SessionID);
+      throw new AppError(
+        ERROR_CODES.AUTH_REQUIRED,
+        'Fresh Super Admin reauthentication is required for this action.',
+        401
+      );
+    }
+    return true;
+  },
+
+  /**
    * Enrolls or replaces TOTP MFA only after fresh credential verification.
    * Pending enrollment is bound to the current authenticated session and expires.
    */
@@ -3437,6 +3690,13 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
     AuthorizationService.assertRole(superAdminContext, [CONSTANTS.ROLES.SUPER_ADMIN]);
     const targetAccount = MasterRepository.findAccountById(targetUserId);
     if (!targetAccount) throw new AppError(ERROR_CODES.NOT_FOUND, `User ${targetUserId} not found.`);
+    if (targetAccount.Role === CONSTANTS.ROLES.SUPER_ADMIN) {
+      throw new AppError(
+        ERROR_CODES.PERMISSION_DENIED,
+        'MFA cannot be disabled for the root Super Admin through the web application.',
+        403
+      );
+    }
 
     const adminCred = MasterRepository.getCredentials(superAdminContext.userId);
     if (!adminCred || !SecurityService.verifyPassword(adminPassword, adminCred.PasswordHash)) {
@@ -3665,13 +3925,13 @@ var TrackingPolicyService = (typeof global !== 'undefined' && global.TrackingPol
   },
 
   _getBooleanSetting(key, defaultValue) {
-    const raw = MasterRepository.getGlobalSetting(key, '');
+    const raw = MasterRepository.getGlobalSettingStrict(key, '');
     if (raw === '' || raw === null || raw === undefined) return defaultValue;
     return this._toBoolean(raw, defaultValue);
   },
 
   getPolicy(workspaceId) {
-    const workspaceManual = MasterRepository.getGlobalSetting(`WS_${workspaceId}_ALLOW_MANUAL`, '');
+    const workspaceManual = MasterRepository.getGlobalSettingStrict(`WS_${workspaceId}_ALLOW_MANUAL`, '');
     const globalManual = this._getBooleanSetting('RULE_ALLOW_MANUAL', true);
 
     return {
@@ -3682,7 +3942,7 @@ var TrackingPolicyService = (typeof global !== 'undefined' && global.TrackingPol
       allowManual: workspaceManual === '' ? globalManual : this._toBoolean(workspaceManual, globalManual),
       pastEntryEditDays: Math.max(
         0,
-        parseInt(MasterRepository.getGlobalSetting('PAST_ENTRY_EDIT_DAYS', '7'), 10) || 0
+        parseInt(MasterRepository.getGlobalSettingStrict('PAST_ENTRY_EDIT_DAYS', '7'), 10) || 0
       )
     };
   },
@@ -4370,6 +4630,21 @@ var MasterRepository = (typeof global !== 'undefined' && global.MasterRepository
     } catch (e) {
       return {};
     }
+  },
+
+  getAllGlobalSettingsStrict() {
+    const { rows } = this.getTableData(CONSTANTS.MASTER_TABS.GLOBAL_SETTINGS);
+    const settings = {};
+    for (const r of rows) {
+      if (r.SettingKey) settings[r.SettingKey] = r.SettingValue;
+    }
+    return settings;
+  },
+
+  getGlobalSettingStrict(key, defaultValue = '') {
+    const { rows } = this.getTableData(CONSTANTS.MASTER_TABS.GLOBAL_SETTINGS);
+    const row = rows.find(r => r.SettingKey === key);
+    return row ? row.SettingValue : defaultValue;
   },
 
   getGlobalSetting(key, defaultValue = '') {
@@ -9681,15 +9956,35 @@ var UserService = (typeof global !== 'undefined' && global.UserService) || {
       const existing = MasterRepository.findAccountById(targetUserId);
       if (!existing) throw new AppError(ERROR_CODES.NOT_FOUND, `User ${targetUserId} not found.`);
 
+      const isRootSuperAdmin = existing.Role === CONSTANTS.ROLES.SUPER_ADMIN;
       const allowedUpdates = {};
       if (updates.displayName) allowedUpdates.DisplayName = Validation.sanitizeCellValue(updates.displayName.trim());
       if (updates.email !== undefined) {
-        allowedUpdates.Email = Validation.validateEmail(updates.email);
+        const nextEmail = Validation.validateEmail(updates.email);
+        if (
+          isRootSuperAdmin &&
+          IdentityService.normalizeEmail(nextEmail) !==
+            IdentityService.normalizeEmail(existing.Email || '')
+        ) {
+          throw new AppError(
+            ERROR_CODES.PERMISSION_DENIED,
+            'The root Super Admin Google Workspace identity cannot be changed through generic user CRUD.',
+            403
+          );
+        }
+        allowedUpdates.Email = nextEmail;
       }
 
       if (updates.role) {
         const requestedRole = Validation.validateRole(updates.role);
         if (requestedRole !== existing.Role) {
+          if (isRootSuperAdmin) {
+            throw new AppError(
+              ERROR_CODES.PERMISSION_DENIED,
+              'The root Super Admin role cannot be demoted through generic user CRUD.',
+              403
+            );
+          }
           if (requestedRole === CONSTANTS.ROLES.SUPER_ADMIN) {
             throw new AppError(
               ERROR_CODES.PERMISSION_DENIED,
@@ -9768,6 +10063,13 @@ var UserService = (typeof global !== 'undefined' && global.UserService) || {
     try {
       const account = MasterRepository.findAccountById(targetUserId);
       if (!account) throw new AppError(ERROR_CODES.NOT_FOUND, `User ${targetUserId} not found.`);
+      if (account.Role === CONSTANTS.ROLES.SUPER_ADMIN) {
+        throw new AppError(
+          ERROR_CODES.PERMISSION_DENIED,
+          'The root Super Admin account cannot be deactivated.',
+          403
+        );
+      }
 
       // Revoke sessions first. Any concurrent timer start is blocked by this same ScriptLock.
       SessionService.revokeAllUserSessions(targetUserId);
@@ -10383,6 +10685,17 @@ var SetupService = (typeof global !== 'undefined' && global.SetupService) || {
    */
   processStep(stepNumber, payload, authContext = null) {
     const step = parseInt(stepNumber, 10);
+
+    if (step >= 2 && step <= 8) {
+      const setupFlag = MasterRepository.getGlobalSetting('SETUP_COMPLETE', 'false');
+      if (setupFlag === true || setupFlag === 'true') {
+        throw new AppError(
+          ERROR_CODES.CONFLICT,
+          'Setup wizard configuration steps are closed after installation. Use the normal administration APIs.',
+          409
+        );
+      }
+    }
 
     switch (step) {
       case 1:
