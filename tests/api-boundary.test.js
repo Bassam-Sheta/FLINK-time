@@ -19,30 +19,46 @@ class AppError extends Error {
   }
 }
 
-global.CONSTANTS = {
-  ROLES: { SUPER_ADMIN: 'SUPER_ADMIN', ADMIN: 'ADMIN', USER: 'USER' }
-};
-global.ERROR_CODES = {
-  NOT_FOUND: 'NOT_FOUND',
-  VALIDATION_ERROR: 'VALIDATION_ERROR',
-  INTERNAL_ERROR: 'INTERNAL_ERROR',
-  PASSWORD_CHANGE_REQUIRED: 'PASSWORD_CHANGE_REQUIRED',
-  UNAUTHORIZED: 'UNAUTHORIZED'
-};
-global.AppError = AppError;
+function baseGlobals() {
+  global.CONSTANTS = {
+    ROLES: { SUPER_ADMIN: 'SUPER_ADMIN', ADMIN: 'ADMIN', USER: 'USER' }
+  };
+  global.ERROR_CODES = {
+    NOT_FOUND: 'NOT_FOUND',
+    VALIDATION_ERROR: 'VALIDATION_ERROR',
+    INTERNAL_ERROR: 'INTERNAL_ERROR',
+    PASSWORD_CHANGE_REQUIRED: 'PASSWORD_CHANGE_REQUIRED',
+    UNAUTHORIZED: 'UNAUTHORIZED'
+  };
+  global.AppError = AppError;
+}
 
-delete require.cache[require.resolve(appPath)];
+function loadFresh(extra = {}) {
+  baseGlobals();
+  delete global.SessionService;
+  delete global.AuthService;
+  delete global.SetupService;
+  Object.assign(global, extra);
+  delete require.cache[require.resolve(appPath)];
+  return require(appPath);
+}
+
+const base = loadFresh();
 const {
   ACTION_PERMISSIONS,
   PUBLIC_ACTIONS,
   GET_SAFE_ACTIONS,
-  isHttpMethodAllowed,
-  dispatchAction
-} = require(appPath);
+  isHttpMethodAllowed
+} = base;
 
 test('permission matrix and dispatcher action inventory stay in exact parity', () => {
   const source = fs.readFileSync(appPath, 'utf8');
-  const caseActions = [...source.matchAll(/case\s+'([^']+)'\s*:/g)].map(m => m[1]);
+  const start = source.indexOf('function dispatchAction(');
+  const end = source.indexOf('\n/**\n * Builds ContentService JSON HTTP response', start);
+  assert.ok(start >= 0 && end > start, 'dispatchAction source boundaries must exist');
+  const dispatcherSource = source.slice(start, end);
+
+  const caseActions = [...dispatcherSource.matchAll(/case\s+'([^']+)'\s*:/g)].map(m => m[1]);
   const handled = new Set([...caseActions, ...PUBLIC_ACTIONS]);
   const declared = Object.keys(ACTION_PERMISSIONS);
 
@@ -84,9 +100,9 @@ test('API GET allowlist is explicit and keeps authenticated tokens out of URLs',
 });
 
 test('endpoints with hidden writes are classified as mutations', () => {
-  assert.equal(ACTION_PERMISSIONS['reports.exportCsv'].isWrite, true, 'CSV export writes an audit event');
-  assert.equal(ACTION_PERMISSIONS['system.health'].isWrite, true, 'health step may create backup/setup state');
-  assert.equal(ACTION_PERMISSIONS['integrity.audit'].isWrite, true, 'integrity audit writes health history');
+  assert.equal(ACTION_PERMISSIONS['reports.exportCsv'].isWrite, true);
+  assert.equal(ACTION_PERMISSIONS['system.health'].isWrite, true);
+  assert.equal(ACTION_PERMISSIONS['integrity.audit'].isWrite, true);
 });
 
 test('public action allowlist exactly matches authRequired:false declarations', () => {
@@ -108,70 +124,75 @@ test('only setup.completeStep may use the controlled unauthenticated step-1 exce
 
 test('public actions bypass session validation, while every other action fails closed without a session', () => {
   let sessionCalls = 0;
-  global.SessionService = {
-    validateSession() {
-      sessionCalls += 1;
-      throw new Error('NO_SESSION');
+  const mod = loadFresh({
+    SessionService: {
+      validateSession() {
+        sessionCalls += 1;
+        throw new Error('NO_SESSION');
+      }
+    },
+    AuthService: {
+      login() { return { route: 'login' }; },
+      verifyMfa() { return { route: 'mfa' }; }
+    },
+    SetupService: {
+      getSetupStatus() { return { route: 'setup-status' }; },
+      processStep() { return { route: 'setup-step' }; }
     }
-  };
-  global.AuthService = {
-    login() { return { route: 'login' }; },
-    verifyMfa() { return { route: 'mfa' }; }
-  };
-  global.SetupService = {
-    getSetupStatus() { return { route: 'setup-status' }; },
-    processStep() { return { route: 'setup-step' }; }
-  };
+  });
 
-  assert.deepEqual(dispatchAction('auth.login', { username: 'u', password: 'p' }), { route: 'login' });
-  assert.deepEqual(dispatchAction('auth.verifyMfa', { mfaChallengeToken: 'c', code: '123456' }), { route: 'mfa' });
-  assert.deepEqual(dispatchAction('setup.status', {}), { route: 'setup-status' });
-  assert.equal(sessionCalls, 0, 'public actions must not touch SessionService');
+  assert.deepEqual(mod.dispatchAction('auth.login', { username: 'u', password: 'p' }), { route: 'login' });
+  assert.deepEqual(mod.dispatchAction('auth.verifyMfa', { mfaChallengeToken: 'c', code: '123456' }), { route: 'mfa' });
+  assert.deepEqual(mod.dispatchAction('setup.status', {}), { route: 'setup-status' });
+  assert.equal(sessionCalls, 0);
 
-  for (const [action, perm] of Object.entries(ACTION_PERMISSIONS)) {
+  for (const [action, perm] of Object.entries(mod.ACTION_PERMISSIONS)) {
     if (!perm.authRequired) continue;
-    assert.throws(
-      () => dispatchAction(action, {}),
-      /NO_SESSION/,
-      action + ' must require a valid session when no explicit bootstrap exception applies'
-    );
+    assert.throws(() => mod.dispatchAction(action, {}), /NO_SESSION/, action);
   }
 });
 
 test('unauthenticated setup step 1 is controlled by permission metadata, not a hard-coded bypass', () => {
   let sessionCalls = 0;
   let setupCalls = 0;
-  global.SessionService = {
-    validateSession() {
-      sessionCalls += 1;
-      throw new Error('NO_SESSION');
+  const mod = loadFresh({
+    SessionService: {
+      validateSession() {
+        sessionCalls += 1;
+        throw new Error('NO_SESSION');
+      }
+    },
+    SetupService: {
+      processStep(step, payload, authContext) {
+        setupCalls += 1;
+        assert.equal(step, 1);
+        assert.equal(authContext, null);
+        return { ok: true, bootstrap: true };
+      },
+      getSetupStatus() { return {}; }
+    },
+    AuthService: {
+      login() { return {}; },
+      verifyMfa() { return {}; }
     }
-  };
-  global.SetupService = {
-    processStep(step, payload, authContext) {
-      setupCalls += 1;
-      assert.equal(step, 1);
-      assert.equal(authContext, null);
-      return { ok: true, bootstrap: true };
-    }
-  };
+  });
 
   assert.deepEqual(
-    dispatchAction('setup.completeStep', { step: 1, setupKey: 'one-time-key' }),
+    mod.dispatchAction('setup.completeStep', { step: 1, setupKey: 'one-time-key' }),
     { ok: true, bootstrap: true }
   );
   assert.equal(setupCalls, 1);
   assert.equal(sessionCalls, 0);
 
-  const original = ACTION_PERMISSIONS['setup.completeStep'].allowUnauthStep1;
-  ACTION_PERMISSIONS['setup.completeStep'].allowUnauthStep1 = false;
+  const original = mod.ACTION_PERMISSIONS['setup.completeStep'].allowUnauthStep1;
+  mod.ACTION_PERMISSIONS['setup.completeStep'].allowUnauthStep1 = false;
   try {
     assert.throws(
-      () => dispatchAction('setup.completeStep', { step: 1, setupKey: 'one-time-key' }),
+      () => mod.dispatchAction('setup.completeStep', { step: 1, setupKey: 'one-time-key' }),
       /NO_SESSION/
     );
     assert.equal(sessionCalls, 1);
   } finally {
-    ACTION_PERMISSIONS['setup.completeStep'].allowUnauthStep1 = original;
+    mod.ACTION_PERMISSIONS['setup.completeStep'].allowUnauthStep1 = original;
   }
 });
