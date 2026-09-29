@@ -210,6 +210,7 @@ test('legacy WEB session without bound ClientLabel fails closed', () => {
 test('IdentityService rejects unsupported caller-supplied authentication channels', () => {
   global.AppError = AppError;
   global.ERROR_CODES = { AUTH_REQUIRED:'AUTH_REQUIRED' };
+  delete global.IdentityService;
   global.Session = {
     getActiveUser() {
       return { getEmail() { return 'worker@example.com'; } };
