@@ -25,7 +25,8 @@ test('production manifest is domain-restricted while retaining deployer executio
       'https://www.googleapis.com/auth/userinfo.email'
     )
   );
-  assert.match(setup, /Google Workspace identity/i);
+  assert.match(setup, /IDENTITY-BINDING REQUIREMENT/i);
+  assert.match(setup, /server-observed Google Workspace email/i);
 });
 
 test('timer UX has five-second cooldown, Today entries, and live KPI refresh', () => {
