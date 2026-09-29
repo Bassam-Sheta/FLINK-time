@@ -88,6 +88,9 @@ function fixture(options = {}) {
     findAccountByUsername(name) {
       return options.unknownUser || name !== 'worker' ? null : account;
     },
+    findAccountById(id) {
+      return id === account.UserID ? account : null;
+    },
     getCredentials() { return cred; },
     updateCredentials(_id, patch) { Object.assign(cred, patch); },
     updateAccount(_id, patch) { Object.assign(account, patch); },
