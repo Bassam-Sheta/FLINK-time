@@ -41,7 +41,10 @@ const UserService = {
    */
   createUser(superAdminContext, userPayload) {
     AuthorizationService.assertRole(superAdminContext, [CONSTANTS.ROLES.SUPER_ADMIN]);
-    Validation.assertRequired(userPayload, ['username', 'displayName', 'role']);
+    Validation.assertRequired(
+      userPayload,
+      ['username', 'displayName', 'role', 'email']
+    );
 
     const lock = LockService.getScriptLock();
     lock.waitLock(10000);
@@ -56,7 +59,7 @@ const UserService = {
         );
       }
       const displayName = Validation.sanitizeCellValue(userPayload.displayName.trim());
-      const email = userPayload.email ? Validation.sanitizeCellValue(userPayload.email.trim()) : '';
+      const email = Validation.validateEmail(userPayload.email);
       const primaryWorkspaceId = userPayload.primaryWorkspaceId || '';
 
       // Verify username uniqueness inside lock
@@ -212,7 +215,9 @@ const UserService = {
 
       const allowedUpdates = {};
       if (updates.displayName) allowedUpdates.DisplayName = Validation.sanitizeCellValue(updates.displayName.trim());
-      if (updates.email !== undefined) allowedUpdates.Email = Validation.sanitizeCellValue(updates.email.trim());
+      if (updates.email !== undefined) {
+        allowedUpdates.Email = Validation.validateEmail(updates.email);
+      }
 
       if (updates.role) {
         const requestedRole = Validation.validateRole(updates.role);
