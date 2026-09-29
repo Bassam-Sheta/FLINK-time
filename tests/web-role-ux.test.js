@@ -38,6 +38,17 @@ test('three portal files are bound to distinct embed modes', () => {
   assert.match(code, /superadmin:\s*'SuperAdmin'/);
 });
 
+test('all browser portals support password + MFA challenge login', () => {
+  for (const portal of [user, admin, superAdmin]) {
+    assert.match(portal, /id="passwordLoginForm"/);
+    assert.match(portal, /id="mfaLoginForm"/);
+    assert.match(portal, /id="mfaCode"/);
+    assert.match(portal, /function handleMfaVerification/);
+    assert.match(portal, /auth\.verifyMfa/);
+    assert.match(portal, /mfaChallengeToken/);
+  }
+});
+
 test('USER portal exposes Timer, My Time, Reports, Account and timer safeguards', () => {
   for (const label of ['Timer','My Time','Reports','Account']) {
     assert.match(user, new RegExp("label: '" + label + "'"));
@@ -52,6 +63,11 @@ test('USER portal exposes Timer, My Time, Reports, Account and timer safeguards'
   assert.match(user, /entries\.update/);
   assert.match(user, /entries\.delete/);
   assert.match(user, /function openPasswordChangeModal/);
+  assert.match(user, /id="userWorkspaceSelect"/);
+  assert.match(user, /function changeUserWorkspace/);
+  assert.match(user, /dashboard\.radar/);
+  assert.match(user, /id="appNotice"/);
+  assert.match(user, /function showAppNotice/);
 });
 
 test('ADMIN portal exposes Manager, Reports, Account and manager operations', () => {
