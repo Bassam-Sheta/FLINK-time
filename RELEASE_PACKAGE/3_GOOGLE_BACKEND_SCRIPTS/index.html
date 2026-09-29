@@ -639,6 +639,24 @@
           </table>
         </div>
       </div>
+
+      <div class="card" style="margin-top:1.25rem;">
+        <div class="card-header">
+          <div>
+            <div class="card-title">My Time History</div>
+            <div class="card-subtitle">Your own entries. Open and unlocked entries can be corrected or deleted.</div>
+          </div>
+          <button class="btn btn-secondary btn-sm" onclick="loadMyTimeHistory()">Refresh</button>
+        </div>
+        <div class="table-responsive">
+          <table>
+            <thead>
+              <tr><th>Date</th><th>Project</th><th>Description</th><th>Duration</th><th>Status</th><th>Actions</th></tr>
+            </thead>
+            <tbody id="myTimeHistoryBody"></tbody>
+          </table>
+        </div>
+      </div>
     </div>
 
     <!-- 5. ADMIN / SUPER ADMIN DASHBOARD -->
@@ -732,7 +750,24 @@
       <div id="saSubtabContent"></div>
     </div>
 
-    <!-- 7. REPORTS VIEW -->
+    <!-- 7. ACCOUNT VIEW -->
+    <div id="accountView" class="hidden">
+      <div class="card" style="max-width:760px;">
+        <div class="card-header">
+          <div>
+            <div class="card-title">My Account</div>
+            <div class="card-subtitle">Identity, security, and session controls</div>
+          </div>
+        </div>
+        <div class="grid-2" id="accountDetails"></div>
+        <div style="display:flex; gap:0.75rem; margin-top:1.5rem;">
+          <button class="btn" onclick="openPasswordChangeModal()">Change Password</button>
+          <button class="btn btn-secondary" onclick="logout()">Sign Out</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 8. REPORTS VIEW -->
     <div id="reportsView" class="hidden">
       <div class="card">
         <div class="card-header">
@@ -1437,6 +1472,256 @@
         await loadTimesheet();
       } catch (err) {
         alert(err.message || 'Failed to submit timesheet.');
+      }
+    }
+
+    /* ------------------- MY TIME & ACCOUNT ------------------- */
+    async function loadMyTimeHistory() {
+      if (!state.currentWorkspace || !state.user) return;
+      const tbody = document.getElementById('myTimeHistoryBody');
+      if (!tbody) return;
+      try {
+        const entries = await apiCall(
+          'entries.list',
+          { filters: { userId: state.user.userId } },
+          state.currentWorkspace
+        );
+        state.myTimeEntries = Array.isArray(entries) ? entries : [];
+        tbody.replaceChildren();
+
+        [...state.myTimeEntries]
+          .sort((a,b) => String(b.startUtc || '').localeCompare(String(a.startUtc || '')))
+          .forEach(entry => {
+            const tr = document.createElement('tr');
+            const project = (state.projects || []).find(
+              p => p.ProjectID === entry.projectId
+            );
+            const values = [
+              String(entry.startUtc || '').substring(0,10),
+              project ? project.ProjectName : (entry.projectId || 'General'),
+              entry.description || '-',
+              formatSecs(Number(entry.durationSeconds || 0)),
+              entry.approvalStatus || entry.status || 'OPEN'
+            ];
+            values.forEach(value => {
+              const td = document.createElement('td');
+              td.textContent = String(value);
+              tr.appendChild(td);
+            });
+
+            const actionCell = document.createElement('td');
+            const editable =
+              !entry.locked &&
+              !['SUBMITTED','APPROVED'].includes(
+                String(entry.approvalStatus || '').toUpperCase()
+              );
+            if (editable) {
+              const edit = document.createElement('button');
+              edit.className = 'btn btn-secondary btn-sm';
+              edit.textContent = 'Edit';
+              edit.onclick = () => openEditTimeEntry(entry.entryId);
+              const del = document.createElement('button');
+              del.className = 'btn btn-danger btn-sm';
+              del.textContent = 'Delete';
+              del.style.marginLeft = '0.4rem';
+              del.onclick = () => deleteMyTimeEntry(entry.entryId);
+              actionCell.append(edit, del);
+            } else {
+              actionCell.textContent = 'Locked';
+            }
+            tr.appendChild(actionCell);
+            tbody.appendChild(tr);
+          });
+      } catch (e) {
+        console.error('Failed to load My Time history', e);
+      }
+    }
+
+    function openEditTimeEntry(entryId) {
+      const entry = (state.myTimeEntries || []).find(
+        item => item.entryId === entryId
+      );
+      if (!entry) return alert('Entry is not available. Refresh My Time.');
+
+      const modal = document.getElementById('modalContainer');
+      modal.replaceChildren();
+      modal.dataset.entryId = String(entry.entryId);
+      modal.dataset.expectedVersion = String(entry.version);
+
+      const backdrop = document.createElement('div');
+      backdrop.className = 'modal-backdrop';
+      const box = document.createElement('div');
+      box.className = 'modal';
+
+      const title = document.createElement('h3');
+      title.textContent = 'Edit Time Entry';
+
+      const descLabel = document.createElement('label');
+      descLabel.textContent = 'Description';
+      const desc = document.createElement('input');
+      desc.id = 'editTimeDescription';
+      desc.type = 'text';
+      desc.value = entry.description || '';
+
+      const billableLabel = document.createElement('label');
+      billableLabel.style.display = 'block';
+      billableLabel.style.marginTop = '0.75rem';
+      const billable = document.createElement('input');
+      billable.type = 'checkbox';
+      billable.id = 'editTimeBillable';
+      billable.checked = !!entry.billable;
+      billableLabel.append(billable, document.createTextNode(' Billable'));
+
+      const actions = document.createElement('div');
+      actions.style.display = 'flex';
+      actions.style.gap = '0.75rem';
+      actions.style.justifyContent = 'flex-end';
+      actions.style.marginTop = '1.25rem';
+
+      const cancel = document.createElement('button');
+      cancel.className = 'btn btn-secondary';
+      cancel.textContent = 'Cancel';
+      cancel.onclick = closeModal;
+      const save = document.createElement('button');
+      save.className = 'btn';
+      save.textContent = 'Save';
+      save.onclick = submitEditTimeEntry;
+
+      actions.append(cancel, save);
+      box.append(title, descLabel, desc, billableLabel, actions);
+      backdrop.appendChild(box);
+      modal.appendChild(backdrop);
+    }
+
+    async function submitEditTimeEntry() {
+      const modal = document.getElementById('modalContainer');
+      const entryId = modal.dataset.entryId || '';
+      const expectedVersion = Number(modal.dataset.expectedVersion || 0);
+      try {
+        await apiCall('entries.update', {
+          entryId,
+          expectedVersion,
+          updates: {
+            description: document.getElementById('editTimeDescription').value,
+            billable: document.getElementById('editTimeBillable').checked
+          }
+        });
+        closeModal();
+        await loadMyTimeHistory();
+        await loadRecentEntries();
+        await loadTimesheet();
+      } catch (e) {
+        alert(e.message || 'Failed to update time entry.');
+      }
+    }
+
+    async function deleteMyTimeEntry(entryId) {
+      const entry = (state.myTimeEntries || []).find(
+        item => item.entryId === entryId
+      );
+      if (!entry || !confirm('Delete this time entry?')) return;
+      try {
+        await apiCall('entries.delete', {
+          entryId,
+          expectedVersion: entry.version
+        });
+        await loadMyTimeHistory();
+        await loadRecentEntries();
+        await loadTimesheet();
+      } catch (e) {
+        alert(e.message || 'Failed to delete time entry.');
+      }
+    }
+
+    function renderAccountView() {
+      const container = document.getElementById('accountDetails');
+      container.replaceChildren();
+      const fields = [
+        ['Display Name', state.user.displayName || ''],
+        ['Username', state.user.username || ''],
+        ['Google Workspace Email', state.user.email || ''],
+        ['Role', state.user.role || ''],
+        ['Active Workspace',
+          (state.workspaces.find(ws => ws.WorkspaceID === state.currentWorkspace) || {}).WorkspaceName ||
+          state.currentWorkspace || '']
+      ];
+      fields.forEach(([labelText,value]) => {
+        const wrap = document.createElement('div');
+        wrap.style.marginBottom = '1rem';
+        const label = document.createElement('div');
+        label.className = 'kpi-label';
+        label.textContent = labelText;
+        const valueEl = document.createElement('div');
+        valueEl.style.fontWeight = '700';
+        valueEl.textContent = String(value);
+        wrap.append(label, valueEl);
+        container.appendChild(wrap);
+      });
+    }
+
+    function openPasswordChangeModal() {
+      const modal = document.getElementById('modalContainer');
+      modal.replaceChildren();
+      const backdrop = document.createElement('div');
+      backdrop.className = 'modal-backdrop';
+      const box = document.createElement('div');
+      box.className = 'modal';
+
+      const title = document.createElement('h3');
+      title.textContent = 'Change Password';
+      const oldLabel = document.createElement('label');
+      oldLabel.textContent = 'Current Password';
+      const oldInput = document.createElement('input');
+      oldInput.id = 'accountOldPassword';
+      oldInput.type = 'password';
+      oldInput.autocomplete = 'current-password';
+
+      const newLabel = document.createElement('label');
+      newLabel.style.marginTop = '0.75rem';
+      newLabel.textContent = 'New Password';
+      const newInput = document.createElement('input');
+      newInput.id = 'accountNewPassword';
+      newInput.type = 'password';
+      newInput.autocomplete = 'new-password';
+
+      const actions = document.createElement('div');
+      actions.style.display = 'flex';
+      actions.style.gap = '0.75rem';
+      actions.style.justifyContent = 'flex-end';
+      actions.style.marginTop = '1.25rem';
+      const cancel = document.createElement('button');
+      cancel.className = 'btn btn-secondary';
+      cancel.textContent = 'Cancel';
+      cancel.onclick = closeModal;
+      const save = document.createElement('button');
+      save.className = 'btn';
+      save.textContent = 'Change Password';
+      save.onclick = submitPasswordChange;
+      actions.append(cancel, save);
+      box.append(title, oldLabel, oldInput, newLabel, newInput, actions);
+      backdrop.appendChild(box);
+      modal.appendChild(backdrop);
+    }
+
+    async function submitPasswordChange() {
+      const oldPassword = document.getElementById('accountOldPassword').value;
+      const newPassword = document.getElementById('accountNewPassword').value;
+      try {
+        const result = await apiCall('auth.changePassword', {
+          oldPassword,
+          newPassword
+        });
+        state.token = result.sessionToken;
+        sessionStorage.setItem('flink_session_token', state.token);
+        closeModal();
+        alert('Password changed successfully.');
+        if (!document.getElementById('accountView').classList.contains('hidden')) {
+          renderAccountView();
+        } else {
+          initApp();
+        }
+      } catch (e) {
+        alert(e.message || 'Password change failed.');
       }
     }
 
