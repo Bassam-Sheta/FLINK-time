@@ -5,23 +5,95 @@
  */
 
 const ReportService = {
+  _prepareReportFilters(authContext, workspaceId, params = {}, allowedRoles = null) {
+    AuthorizationService.assertWorkspaceAccess(authContext, workspaceId);
+    if (allowedRoles) {
+      AuthorizationService.assertRole(authContext, allowedRoles);
+    }
+
+    const filters = { ...((params && params.filters) || {}) };
+
+    if (authContext.role === CONSTANTS.ROLES.USER) {
+      // USER scope is always server-forced to self.
+      filters.userId = authContext.userId;
+    } else if (
+      authContext.role === CONSTANTS.ROLES.ADMIN &&
+      filters.userId
+    ) {
+      // An Admin may report on any member of an assigned workspace, but a
+      // cross-workspace user ID is not accepted merely because it was supplied
+      // as a client filter.
+      const member = SheetRepository.getMember(workspaceId, filters.userId);
+      if (!member) {
+        throw new AppError(
+          ERROR_CODES.WORKSPACE_DENIED,
+          'The requested report user does not belong to this workspace.',
+          403
+        );
+      }
+    }
+
+    return filters;
+  },
+
+  _toSummaryNodeDTO(node, includeFinancial) {
+    if (!node) return null;
+    const dto = {
+      key: node.key,
+      groupField: node.groupField,
+      totalSeconds: parseInt(node.totalSeconds, 10) || 0,
+      billableSeconds: parseInt(node.billableSeconds, 10) || 0,
+      totalHours: +(Number(node.totalHours) || 0).toFixed(2),
+      billableHours: +(Number(node.billableHours) || 0).toFixed(2)
+    };
+    if (node.entryCount !== undefined) {
+      dto.entryCount = parseInt(node.entryCount, 10) || 0;
+    }
+    if (Array.isArray(node.groups)) {
+      dto.groups = node.groups.map(child =>
+        this._toSummaryNodeDTO(child, includeFinancial)
+      );
+    }
+    if (includeFinancial) {
+      dto.costCents = parseInt(node.costCents, 10) || 0;
+      dto.revenueCents = parseInt(node.revenueCents, 10) || 0;
+      dto.cost = +(Number(node.cost) || 0).toFixed(2);
+      dto.revenue = +(Number(node.revenue) || 0).toFixed(2);
+    }
+    return dto;
+  },
+
+  _toSummaryOverallDTO(tree, includeFinancial) {
+    const dto = {
+      totalSeconds: parseInt(tree.totalSeconds, 10) || 0,
+      billableSeconds: parseInt(tree.billableSeconds, 10) || 0,
+      totalHours: +(Number(tree.totalHours) || 0).toFixed(2),
+      billableHours: +(Number(tree.billableHours) || 0).toFixed(2)
+    };
+    if (includeFinancial) {
+      dto.costCents = parseInt(tree.costCents, 10) || 0;
+      dto.revenueCents = parseInt(tree.revenueCents, 10) || 0;
+      dto.cost = +(Number(tree.cost) || 0).toFixed(2);
+      dto.revenue = +(Number(tree.revenue) || 0).toFixed(2);
+    }
+    return dto;
+  },
+
   /**
    * Summary Report: Up to 3 levels of nested grouping
    * Example groupings: ['user', 'project', 'task'], ['client', 'project', 'user']
    */
   getSummaryReport(authContext, workspaceId, params = {}) {
-    AuthorizationService.assertWorkspaceAccess(authContext, workspaceId);
-
     const groupings = Array.isArray(params.groupings) && params.groupings.length > 0
       ? params.groupings.slice(0, 3)
       : ['project', 'user'];
 
     const isRegularUser = authContext.role === CONSTANTS.ROLES.USER;
-    const filters = { ...(params.filters || {}) };
-    if (isRegularUser) {
-      // USER reports are always self-scoped regardless of client-supplied filters.
-      filters.userId = authContext.userId;
-    }
+    const filters = this._prepareReportFilters(
+      authContext,
+      workspaceId,
+      params
+    );
 
     const entries = SheetRepository.listTimeEntries(workspaceId, filters);
 
@@ -137,38 +209,17 @@ const ReportService = {
 
     const tree = buildGroupTree(entries, 0);
 
-    // Financial rates/cost/revenue are management-only data.
-    if (isRegularUser) {
-      const stripFinancialFields = node => {
-        if (!node || typeof node !== 'object') return;
-        delete node.costCents;
-        delete node.revenueCents;
-        delete node.cost;
-        delete node.revenue;
-        (node.groups || []).forEach(stripFinancialFields);
-      };
-      stripFinancialFields(tree);
-    }
-
-    const overall = {
-      totalSeconds: tree.totalSeconds,
-      billableSeconds: tree.billableSeconds,
-      totalHours: tree.totalHours,
-      billableHours: tree.billableHours
-    };
-    if (!isRegularUser) {
-      overall.costCents = tree.costCents;
-      overall.revenueCents = tree.revenueCents;
-      overall.cost = tree.cost;
-      overall.revenue = tree.revenue;
-    }
-
+    // Explicit response DTO whitelist. USER responses never inherit new
+    // internal financial fields accidentally when the calculation model evolves.
+    const includeFinancial = !isRegularUser;
     return {
       workspaceId,
-      groupings,
+      groupings: [...groupings],
       totalEntries: entries.length,
-      overall,
-      tree: tree.groups || []
+      overall: this._toSummaryOverallDTO(tree, includeFinancial),
+      tree: (tree.groups || []).map(node =>
+        this._toSummaryNodeDTO(node, includeFinancial)
+      )
     };
   },
 
@@ -176,13 +227,11 @@ const ReportService = {
    * Detailed Report: Flattened row-by-row time records with filter criteria
    */
   getDetailedReport(authContext, workspaceId, params = {}) {
-    AuthorizationService.assertWorkspaceAccess(authContext, workspaceId);
-
-    const filters = { ...(params.filters || {}) };
-    if (authContext.role === CONSTANTS.ROLES.USER) {
-      // Ignore any attempt by a USER client to request another user's records.
-      filters.userId = authContext.userId;
-    }
+    const filters = this._prepareReportFilters(
+      authContext,
+      workspaceId,
+      params
+    );
     const entries = SheetRepository.listTimeEntries(workspaceId, filters);
 
     // Resolve entities for human-readable labels
@@ -237,9 +286,13 @@ const ReportService = {
    * Summarizes daily first/last punch, target vs tracked hours, missing, and overtime.
    */
   getAttendanceReport(authContext, workspaceId, params = {}) {
-    AuthorizationService.assertWorkspaceAccess(authContext, workspaceId);
-
-    const entries = SheetRepository.listTimeEntries(workspaceId, params.filters || {});
+    const filters = this._prepareReportFilters(
+      authContext,
+      workspaceId,
+      params,
+      [CONSTANTS.ROLES.SUPER_ADMIN, CONSTANTS.ROLES.ADMIN]
+    );
+    const entries = SheetRepository.listTimeEntries(workspaceId, filters);
     const members = SheetRepository.listMembers(workspaceId);
     const userMap = {};
     members.forEach(m => { userMap[m.UserID] = m.DisplayName; });
@@ -310,9 +363,13 @@ const ReportService = {
    * Flags suspicious patterns: timers > 12h, large manual entries, overlaps.
    */
   getExceptionsReport(authContext, workspaceId, params = {}) {
-    AuthorizationService.assertWorkspaceAccess(authContext, workspaceId);
-
-    const entries = SheetRepository.listTimeEntries(workspaceId, params.filters || {});
+    const filters = this._prepareReportFilters(
+      authContext,
+      workspaceId,
+      params,
+      [CONSTANTS.ROLES.SUPER_ADMIN, CONSTANTS.ROLES.ADMIN]
+    );
+    const entries = SheetRepository.listTimeEntries(workspaceId, filters);
     const members = SheetRepository.listMembers(workspaceId);
     const userMap = {};
     members.forEach(m => { userMap[m.UserID] = m.DisplayName; });
