@@ -127,12 +127,12 @@ test('restore candidate rollups must reconcile to active raw entries', () => {
     WEEKLY_ROLLUPS: 'WeeklyRollups',
     MONTHLY_ROLLUPS: 'MonthlyRollups'
   };
-  global.WORKSPACE_SCHEMA = {
+  Object.assign(global.WORKSPACE_SCHEMA, {
     TimeEntries: ['EntryID', 'Status', 'DurationSeconds'],
     DailyRollups: ['RollupDate', 'TotalSeconds'],
     WeeklyRollups: ['WeekStart', 'TotalSeconds'],
     MonthlyRollups: ['MonthKey', 'TotalSeconds']
-  };
+  });
 
   const sheets = {
     TimeEntries: fakeSheet(
@@ -161,12 +161,12 @@ test('restore candidate with stale rollups is rejected before activation', () =>
     WEEKLY_ROLLUPS: 'WeeklyRollups',
     MONTHLY_ROLLUPS: 'MonthlyRollups'
   };
-  global.WORKSPACE_SCHEMA = {
+  Object.assign(global.WORKSPACE_SCHEMA, {
     TimeEntries: ['EntryID', 'Status', 'DurationSeconds'],
     DailyRollups: ['RollupDate', 'TotalSeconds'],
     WeeklyRollups: ['WeekStart', 'TotalSeconds'],
     MonthlyRollups: ['MonthKey', 'TotalSeconds']
-  };
+  });
 
   const sheets = {
     TimeEntries: fakeSheet(WORKSPACE_SCHEMA.TimeEntries, [['E1', 'ACTIVE', 3600]]),
