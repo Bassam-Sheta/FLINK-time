@@ -1096,7 +1096,39 @@
       state.timerInterval = setInterval(update, 1000);
     }
 
+    function applyTimerCooldown() {
+      state.timerCooldownUntil = Date.now() + 5000;
+      const btn = document.getElementById('timerToggleBtn');
+      btn.disabled = true;
+      window.setTimeout(() => {
+        if (!state.timerRequestInFlight && Date.now() >= state.timerCooldownUntil) {
+          btn.disabled = false;
+        }
+      }, 5000);
+    }
+
+    function finishTimerRequest() {
+      state.timerRequestInFlight = false;
+      const btn = document.getElementById('timerToggleBtn');
+      const remaining = state.timerCooldownUntil - Date.now();
+      if (remaining <= 0) {
+        btn.disabled = false;
+      } else {
+        window.setTimeout(() => {
+          if (!state.timerRequestInFlight) btn.disabled = false;
+        }, remaining);
+      }
+    }
+
     async function toggleTimer() {
+      if (
+        state.timerRequestInFlight ||
+        Date.now() < state.timerCooldownUntil
+      ) {
+        return;
+      }
+      state.timerRequestInFlight = true;
+      applyTimerCooldown();
       const btn = document.getElementById('timerToggleBtn');
       if (state.activeTimer) {
         const operationId =
@@ -1120,6 +1152,8 @@
           // Keep the same operationId. A network retry must represent the same
           // logical stop request rather than creating a second operation.
           alert(err.message || 'Failed to stop timer.');
+        } finally {
+          finishTimerRequest();
         }
       } else {
         const projectId = document.getElementById('timerProjectSelect').value;
@@ -1157,53 +1191,68 @@
         } catch (err) {
           // Keep the operationId for the next retry.
           alert(err.message || 'Failed to start timer.');
+        } finally {
+          finishTimerRequest();
         }
       }
     }
 
     async function loadRecentEntries() {
-      if (!state.currentWorkspace) return;
+      if (!state.currentWorkspace || !state.user) return;
       try {
-        const entries = await apiCall('entries.list');
+        const [overview, report] = await Promise.all([
+          apiCall('dashboard.overview', {}, state.currentWorkspace),
+          apiCall('reports.detailed', {
+            filters: { userId: state.user.userId }
+          }, state.currentWorkspace)
+        ]);
+
+        document.getElementById('userTodayHours').textContent =
+          Number(overview.todayTrackedHours || 0).toFixed(2) + ' h';
+        document.getElementById('userWeekHours').textContent =
+          Number(overview.weekTrackedHours || 0).toFixed(2) + ' h';
+        const currentWs = state.workspaces.find(
+          ws => ws.WorkspaceID === state.currentWorkspace
+        );
+        document.getElementById('userActiveWsName').textContent =
+          currentWs ? currentWs.WorkspaceName : state.currentWorkspace;
+
+        const today = overview.currentBusinessDate || '';
+        const entries = (report.entries || [])
+          .filter(entry => !today || entry.businessDate === today)
+          .sort((a,b) => String(b.startUTC || '').localeCompare(String(a.startUTC || '')));
+
         const tbody = document.getElementById('userRecentEntriesBody');
         tbody.replaceChildren();
 
-        entries.slice(-10).reverse().forEach(entry => {
+        entries.forEach(entry => {
           const tr = document.createElement('tr');
           const values = [
-            entry.ProjectID || entry.projectId || 'General',
-            entry.TaskID || entry.taskId || '-',
-            entry.Description || entry.description || '-',
-            String(entry.StartUTC || entry.startUtc || '').substring(11, 19),
-            String(entry.EndUTC || entry.endUtc || '').substring(11, 19),
-            formatSecs(Number(entry.DurationSeconds || entry.durationSeconds || 0))
+            entry.projectName || 'General',
+            entry.taskName || '-',
+            entry.description || '-',
+            entry.startLocal || entry.startUTC || '',
+            entry.endLocal || entry.endUTC || '',
+            entry.durationFormatted || formatSecs(Number(entry.durationSeconds || 0))
           ];
-
           values.forEach((value, index) => {
             const td = document.createElement('td');
-            if (index === 0) {
-              const strong = document.createElement('strong');
-              strong.textContent = String(value);
-              td.appendChild(strong);
-            } else {
-              td.textContent = String(value);
-            }
+            td.textContent = String(value);
+            if (index === 0) td.style.fontWeight = '700';
             if (index >= 3) td.style.fontFamily = 'var(--font-mono)';
             tr.appendChild(td);
           });
-
-          const status = String(entry.ApprovalStatus || entry.approvalStatus || 'OPEN');
           const statusCell = document.createElement('td');
           const badge = document.createElement('span');
-          badge.className = 'badge badge-' + status.toLowerCase().replace(/[^a-z0-9_-]/g, '');
+          const status = String(entry.approvalStatus || 'OPEN');
+          badge.className = 'badge badge-' + safeClassToken(status);
           badge.textContent = status;
           statusCell.appendChild(badge);
           tr.appendChild(statusCell);
-
           tbody.appendChild(tr);
         });
       } catch (e) {
-        console.error('Failed to load recent entries', e);
+        console.error('Failed to load today entries', e);
       }
     }
 
@@ -1297,6 +1346,7 @@
         closeModal();
         await loadRecentEntries();
         await loadTimesheet();
+        await loadMyTimeHistory();
       } catch (e) {
         alert(e.message || 'Failed to create manual entry.');
       }
