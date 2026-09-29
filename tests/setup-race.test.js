@@ -48,6 +48,9 @@ function fixture({ lockThrows = false } = {}) {
     validatePassword(value) { return value; },
     generateId() { return 'USR-ROOT'; }
   };
+  global.IdentityService = {
+    getCurrentGoogleEmail() { return 'root@example.com'; }
+  };
   global.SecurityService = {
     hashToken(value) {
       return value === 'one-time-key' ? 'SETUP-HASH' : 'BAD-HASH';
