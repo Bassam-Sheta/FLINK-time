@@ -42,6 +42,7 @@ test('new user is rolled back when workspace member provisioning fails', () => {
     validateRole(v) { return v; },
     validatePassword(v) { return v; },
     sanitizeCellValue(v) { return v; },
+    validateEmail(v) { return String(v).toLowerCase(); },
     generateId(prefix) {
       if (prefix === 'USR') return 'USR-NEW';
       return prefix + '-1';
@@ -85,6 +86,7 @@ test('new user is rolled back when workspace member provisioning fails', () => {
       {
         username: 'newuser',
         displayName: 'New User',
+        email: 'newuser@example.com',
         role: 'USER',
         primaryWorkspaceId: 'W1',
         temporaryPassword: 'Password123!'
@@ -184,6 +186,7 @@ test('new user is rolled back when workspace ACL assignment fails', () => {
     validateRole(v){ return v; },
     validatePassword(v){ return v; },
     sanitizeCellValue(v){ return v; },
+    validateEmail(v){ return String(v).toLowerCase(); },
     generateId(prefix){ return prefix === 'USR' ? 'USR-NEW' : prefix + '-1'; }
   };
   global.SecurityService = {
@@ -259,6 +262,7 @@ test('successful user provisioning commits account, ACL, member, then audit', ()
     validateRole(v){ return v; },
     validatePassword(v){ return v; },
     sanitizeCellValue(v){ return v; },
+    validateEmail(v){ return String(v).toLowerCase(); },
     generateId(prefix){ return prefix === 'USR' ? 'USR-NEW' : prefix + '-1'; }
   };
   global.SecurityService = {
@@ -290,6 +294,7 @@ test('successful user provisioning commits account, ACL, member, then audit', ()
     {
       username:'newuser',
       displayName:'New User',
+      email:'newuser@example.com',
       role:'USER',
       primaryWorkspaceId:'W1',
       temporaryPassword:'Password123!'
