@@ -185,6 +185,10 @@ var CONSTANTS = {
     SESSION_TOUCH_INTERVAL_MINUTES: 5,
     MIN_PASSWORD_LENGTH: 12,
     MAX_PASSWORD_LENGTH: 128,
+    RESET_PASSWORD_TTL_MINUTES: 60,
+    INITIAL_PASSWORD_TTL_HOURS: 24,
+    SETUP_KEY_TTL_MINUTES: 15,
+    MFA_ENROLLMENT_TTL_MINUTES: 10,
     MAX_SINGLE_ENTRY_HOURS: 24,
     DASHBOARD_LIVE_WINDOW_SECONDS: 60,
     SESSION_RETENTION_DAYS: 30
@@ -683,11 +687,21 @@ function doGet(e) {
       superadmin: 'FLINK Time — Super Admin'
     };
     output.setTitle(titles[view]);
-    output.setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL); // Allows embedding inside Google Sites
+    output.setXFrameOptionsMode(
+      view === 'user'
+        ? HtmlService.XFrameOptionsMode.ALLOWALL
+        : HtmlService.XFrameOptionsMode.DEFAULT
+    );
     output.addMetaTag('viewport', 'width=device-width, initial-scale=1');
     return output;
   } catch (err) {
-    return ContentService.createTextOutput('FLINK Platform Portal: ' + err.message)
+    const correlationId = Validation.generateId('ERR');
+    console.error(
+      correlationId + ' portal rendering error: ' +
+      (err && err.stack ? err.stack : String(err))
+    );
+    return ContentService
+      .createTextOutput('FLINK Platform Portal could not be loaded. Reference: ' + correlationId)
       .setMimeType(ContentService.MimeType.TEXT);
   }
 }
@@ -904,12 +918,18 @@ function executeApiRequest_(action, requestData, httpMethod = 'POST') {
     if (err instanceof AppError) {
       return err.toJSON();
     }
+    const correlationId = Validation.generateId('ERR');
+    console.error(
+      correlationId + ' unexpected API error: ' +
+      (err && err.stack ? err.stack : String(err))
+    );
     return {
       ok: false,
       error: {
         code: ERROR_CODES.INTERNAL_ERROR,
-        message: err && err.message ? err.message : 'An unexpected internal error occurred.',
-        statusCode: 500
+        message: 'An unexpected internal error occurred. Reference: ' + correlationId,
+        statusCode: 500,
+        correlationId
       }
     };
   }
@@ -1009,13 +1029,22 @@ function dispatchAction_(action, data) {
       return AuthService.changePassword(token, payload.oldPassword, payload.newPassword);
 
     case 'auth.enrollMfa':
-      return AuthService.enrollMfa(authContext);
+      return AuthService.enrollMfa(
+        authContext,
+        payload.currentPassword,
+        payload.currentMfaCode
+      );
 
     case 'auth.confirmMfa':
       return AuthService.confirmMfa(authContext, payload.code);
 
     case 'auth.disableMfa':
-      return AuthService.disableMfa(authContext, payload.targetUserId);
+      return AuthService.disableMfa(
+        authContext,
+        payload.targetUserId,
+        payload.adminPassword,
+        payload.adminTotpCode
+      );
 
     case 'users.assignWorkspace':
       return WorkspaceService.assignUserToWorkspace(authContext, payload.targetUserId, payload.workspaceId || wsId);
@@ -1264,9 +1293,18 @@ function dispatchAction_(action, data) {
       AuthorizationService.assertRole(authContext, [CONSTANTS.ROLES.SUPER_ADMIN]);
       return JobService.dispatchRollups();
 
-    case 'jobs.capacity':
+    case 'jobs.capacity': {
       AuthorizationService.assertRole(authContext, [CONSTANTS.ROLES.SUPER_ADMIN, CONSTANTS.ROLES.ADMIN]);
-      return JobService.getCapacityMetrics(payload.workspaceId || wsId);
+      const requestedCapacityWorkspace = payload.workspaceId || wsId || '';
+      if (authContext.role === CONSTANTS.ROLES.ADMIN) {
+        if (!requestedCapacityWorkspace) {
+          throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'workspaceId is required for Admin capacity requests.', 400);
+        }
+        AuthorizationService.assertWorkspaceAccess(authContext, requestedCapacityWorkspace);
+        return JobService.getCapacityMetrics(requestedCapacityWorkspace);
+      }
+      return JobService.getCapacityMetrics(requestedCapacityWorkspace || null);
+    }
 
     /* ---------------- INTEGRITY & AUDIT ---------------- */
     case 'integrity.audit':
@@ -1357,7 +1395,11 @@ var IdentityService = (typeof global !== 'undefined' && global.IdentityService) 
   assertAccountIdentity(account, clientType = 'WEB') {
     const normalizedClient = String(clientType || 'WEB').toUpperCase();
     if (normalizedClient !== 'WEB' && normalizedClient !== 'SETUP_WIZARD') {
-      return '';
+      throw new AppError(
+        ERROR_CODES.AUTH_REQUIRED,
+        'Unsupported authentication channel.',
+        401
+      );
     }
 
     const actualEmail = this.getCurrentGoogleEmail(true);
@@ -1459,6 +1501,10 @@ var SecurityService = (typeof global !== 'undefined' && global.SecurityService) 
    * Generates an opaque, cryptographically unpredictable 256-bit session token
    * Derived via HMAC-SHA256 with high-entropy server secret (pepper)
    */
+  generateTemporaryPassword() {
+    return 'Flk-' + this.generateRandomHex(16) + '!9aA';
+  },
+
   generateSessionToken() {
     const nodeCrypto = this._getCrypto();
     const rawEntropy = (nodeCrypto && nodeCrypto.randomBytes)
@@ -2020,6 +2066,17 @@ var SessionService = (typeof global !== 'undefined' && global.SessionService) ||
     let verifiedClientLabel = String(clientLabel || '').trim();
 
     if (
+      normalizedClientType !== 'WEB' &&
+      normalizedClientType !== 'SETUP_WIZARD'
+    ) {
+      throw new AppError(
+        ERROR_CODES.AUTH_REQUIRED,
+        'Unsupported authentication channel.',
+        401
+      );
+    }
+
+    if (
       normalizedClientType === 'WEB' ||
       normalizedClientType === 'SETUP_WIZARD'
     ) {
@@ -2156,6 +2213,22 @@ var SessionService = (typeof global !== 'undefined' && global.SessionService) ||
 
     const normalizedClientType = String(session.ClientType || '').toUpperCase();
     if (
+      normalizedClientType !== 'WEB' &&
+      normalizedClientType !== 'SETUP_WIZARD'
+    ) {
+      MasterRepository.updateSession(session.SessionID, {
+        Revoked: true,
+        RevokedAt: new Date().toISOString(),
+        RevokeReason: 'UNSUPPORTED_CLIENT_TYPE'
+      });
+      throw new AppError(
+        ERROR_CODES.AUTH_REQUIRED,
+        'Session authentication channel is no longer supported. Please sign in again.',
+        401
+      );
+    }
+
+    if (
       normalizedClientType === 'WEB' ||
       normalizedClientType === 'SETUP_WIZARD'
     ) {
@@ -2243,6 +2316,7 @@ var SessionService = (typeof global !== 'undefined' && global.SessionService) ||
 
 var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
   _mfaChallengeMemory: {},
+  _mfaEnrollmentMemory: {},
 
   _mfaChallengePropertyKey(userId) {
     return 'FLINK_MFA_CHALLENGE_' + String(userId || '').replace(/[^A-Za-z0-9_-]/g, '');
@@ -2294,6 +2368,45 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
     }
   },
 
+  _mfaEnrollmentPropertyKey(userId) {
+    return 'FLINK_MFA_ENROLLMENT_' + String(userId || '').replace(/[^A-Za-z0-9_-]/g, '');
+  },
+
+  _storeMfaEnrollment(userId, record) {
+    const serialized = JSON.stringify(record || {});
+    if (typeof PropertiesService !== 'undefined' && PropertiesService.getScriptProperties) {
+      PropertiesService.getScriptProperties().setProperty(
+        this._mfaEnrollmentPropertyKey(userId),
+        serialized
+      );
+    } else {
+      this._mfaEnrollmentMemory[userId] = serialized;
+    }
+  },
+
+  _getMfaEnrollment(userId) {
+    let raw = '';
+    if (typeof PropertiesService !== 'undefined' && PropertiesService.getScriptProperties) {
+      raw = PropertiesService.getScriptProperties().getProperty(
+        this._mfaEnrollmentPropertyKey(userId)
+      ) || '';
+    } else {
+      raw = this._mfaEnrollmentMemory[userId] || '';
+    }
+    if (!raw) return null;
+    try { return JSON.parse(raw); } catch (e) { return null; }
+  },
+
+  _deleteMfaEnrollment(userId) {
+    if (typeof PropertiesService !== 'undefined' && PropertiesService.getScriptProperties) {
+      PropertiesService.getScriptProperties().deleteProperty(
+        this._mfaEnrollmentPropertyKey(userId)
+      );
+    } else {
+      delete this._mfaEnrollmentMemory[userId];
+    }
+  },
+
   /**
    * Authenticates user with username and password
    */
@@ -2309,6 +2422,12 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
     }
 
     const normalizedClientType = String(clientType || 'WEB').toUpperCase();
+    if (
+      normalizedClientType !== 'WEB' &&
+      normalizedClientType !== 'SETUP_WIZARD'
+    ) {
+      throw invalidAuth();
+    }
     const cleanUsername = String(username).trim().toLowerCase();
 
     // WEB authentication is always bound to the server-observed Google account.
@@ -2365,6 +2484,27 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
     }
 
     const now = Date.now();
+    const resetExpiresAtMs = cred.ResetExpiresAt
+      ? new Date(cred.ResetExpiresAt).getTime()
+      : NaN;
+    const mustChangePassword =
+      account.MustChangePassword === true ||
+      account.MustChangePassword === 'TRUE';
+    if (
+      mustChangePassword &&
+      Number.isFinite(resetExpiresAtMs) &&
+      resetExpiresAtMs <= now
+    ) {
+      MasterRepository.logSecurityEvent({
+        UserID: account.UserID,
+        Username: account.Username,
+        EventType: CONSTANTS.AUDIT_EVENTS.LOGIN_FAIL,
+        Success: false,
+        metadata: { reason: 'Temporary password expired' }
+      });
+      throw invalidAuth();
+    }
+
     const lockUntilMs = cred.LockUntil
       ? new Date(cred.LockUntil).getTime()
       : NaN;
@@ -2664,6 +2804,17 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
     }
 
     const normalizedClientType = String(clientType || 'WEB').toUpperCase();
+    if (
+      normalizedClientType !== 'WEB' &&
+      normalizedClientType !== 'SETUP_WIZARD'
+    ) {
+      this._deleteMfaChallenge(userId);
+      throw new AppError(
+        ERROR_CODES.AUTH_REQUIRED,
+        'Invalid authentication challenge. Please log in again.',
+        401
+      );
+    }
     let googleEmail = '';
     try {
       googleEmail = IdentityService.assertAccountIdentity(
@@ -2840,33 +2991,95 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
   },
 
   /**
-   * Enrolls authenticated user in TOTP MFA
+   * Enrolls or replaces TOTP MFA only after fresh credential verification.
+   * Pending enrollment is bound to the current authenticated session and expires.
    */
-  enrollMfa(authContext) {
+  enrollMfa(authContext, currentPassword, currentMfaCode = '') {
+    if (!authContext || !authContext.userId || !authContext.session || !authContext.session.SessionID) {
+      throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'A current authenticated session is required.', 401);
+    }
+    const cred = MasterRepository.getCredentials(authContext.userId);
+    if (!cred || !SecurityService.verifyPassword(currentPassword, cred.PasswordHash)) {
+      throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'Fresh password verification is required before changing MFA.', 401);
+    }
+
+    const replacing =
+      cred.MfaEnabled === true ||
+      cred.MfaEnabled === 'TRUE';
+
+    if (replacing) {
+      if (!currentMfaCode || !cred.TotpSecret) {
+        throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'The existing authenticator code is required before replacing MFA.', 401);
+      }
+      const currentVerification = SecurityService.verifyTotpWithStep(
+        cred.TotpSecret,
+        currentMfaCode
+      );
+      const previousStep = parseInt(cred.LastSuccessfulTotpStep, 10);
+      if (
+        !currentVerification.valid ||
+        (!isNaN(previousStep) && currentVerification.timeStep <= previousStep)
+      ) {
+        throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'Existing MFA verification failed.', 401);
+      }
+      MasterRepository.updateCredentials(authContext.userId, {
+        LastSuccessfulTotpStep: currentVerification.timeStep
+      });
+    }
+
     const rawSecret = SecurityService.generateTotpSecret();
     const encryptedSecret = SecurityService.encryptSecret(rawSecret);
+    const expiresAtMs =
+      Date.now() +
+      (CONSTANTS.LIMITS.MFA_ENROLLMENT_TTL_MINUTES || 10) * 60 * 1000;
 
     MasterRepository.updateCredentials(authContext.userId, {
       PendingTotpSecret: encryptedSecret
     });
+    this._storeMfaEnrollment(authContext.userId, {
+      sessionId: authContext.session.SessionID,
+      expiresAtMs,
+      replacing
+    });
 
-    const uri = `otpauth://totp/FLINK:${authContext.user.username}?secret=${rawSecret}&issuer=FLINK`;
+    const username =
+      authContext.username ||
+      (authContext.user && (authContext.user.Username || authContext.user.username)) ||
+      'user';
+    const uri = `otpauth://totp/FLINK:${username}?secret=${rawSecret}&issuer=FLINK`;
     return {
       secret: rawSecret,
       qrUri: uri,
+      expiresAt: new Date(expiresAtMs).toISOString(),
+      replacing,
       message: 'Scan the QR code or enter the secret in your authenticator app, then confirm with a 6-digit code.'
     };
   },
 
   /**
-   * Confirms TOTP MFA enrollment
+   * Confirms TOTP MFA enrollment. Enrollment is one-time, session-bound, and short-lived.
    */
   confirmMfa(authContext, code) {
     const lock = LockService.getScriptLock();
     lock.waitLock(10000);
     try {
+      if (!authContext || !authContext.session || !authContext.session.SessionID) {
+        throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'A current authenticated session is required.', 401);
+      }
+      const enrollment = this._getMfaEnrollment(authContext.userId);
+      if (
+        !enrollment ||
+        enrollment.sessionId !== authContext.session.SessionID ||
+        Number(enrollment.expiresAtMs || 0) < Date.now()
+      ) {
+        this._deleteMfaEnrollment(authContext.userId);
+        MasterRepository.updateCredentials(authContext.userId, { PendingTotpSecret: '' });
+        throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'MFA enrollment is invalid, expired, or belongs to another session.', 401);
+      }
+
       const cred = MasterRepository.getCredentials(authContext.userId);
       if (!cred || !cred.PendingTotpSecret) {
+        this._deleteMfaEnrollment(authContext.userId);
         throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'No pending MFA enrollment found. Call enrollMfa first.');
       }
 
@@ -2879,10 +3092,19 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
         TotpSecret: cred.PendingTotpSecret,
         MfaEnabled: true,
         PendingTotpSecret: '',
-        // Treat the enrollment code as consumed so it cannot immediately be
-        // replayed as the first login MFA code in the same 30-second step.
         LastSuccessfulTotpStep: verification.timeStep
       });
+      this._deleteMfaEnrollment(authContext.userId);
+
+      let replacementSession = null;
+      if (enrollment.replacing === true) {
+        SessionService.revokeAllUserSessions(authContext.userId);
+        replacementSession = SessionService.createSession(
+          authContext.userId,
+          authContext.session.ClientType || 'WEB',
+          authContext.session.ClientLabel || ''
+        );
+      }
 
       MasterRepository.logGlobalAudit({
         ActorUserID: authContext.userId,
@@ -2890,10 +3112,20 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
         EntityType: 'USER_SECURITY',
         EntityID: authContext.userId,
         Action: CONSTANTS.AUDIT_EVENTS.MFA_ENROLLED,
-        Reason: 'TOTP Multi-factor authentication successfully enabled'
+        Reason: enrollment.replacing === true
+          ? 'TOTP multi-factor authentication replaced after fresh reauthentication'
+          : 'TOTP multi-factor authentication successfully enabled'
       });
 
-      return { ok: true, message: 'Two-factor authentication successfully enabled.' };
+      return {
+        ok: true,
+        replaced: enrollment.replacing === true,
+        sessionToken: replacementSession ? replacementSession.sessionToken : undefined,
+        expiresAt: replacementSession ? replacementSession.expiresAt : undefined,
+        message: enrollment.replacing === true
+          ? 'Two-factor authentication replaced successfully. Other sessions were revoked.'
+          : 'Two-factor authentication successfully enabled.'
+      };
     } finally {
       lock.releaseLock();
     }
@@ -2902,10 +3134,28 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
   /**
    * Disables MFA for a user (Super Admin only or user password confirmation)
    */
-  disableMfa(superAdminContext, targetUserId) {
+  disableMfa(superAdminContext, targetUserId, adminPassword, adminTotpCode = '') {
     AuthorizationService.assertRole(superAdminContext, [CONSTANTS.ROLES.SUPER_ADMIN]);
     const targetAccount = MasterRepository.findAccountById(targetUserId);
     if (!targetAccount) throw new AppError(ERROR_CODES.NOT_FOUND, `User ${targetUserId} not found.`);
+
+    const adminCred = MasterRepository.getCredentials(superAdminContext.userId);
+    if (!adminCred || !SecurityService.verifyPassword(adminPassword, adminCred.PasswordHash)) {
+      throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'Fresh Super Admin password verification is required.', 401);
+    }
+    if (adminCred.MfaEnabled === true || adminCred.MfaEnabled === 'TRUE') {
+      const verification = SecurityService.verifyTotpWithStep(adminCred.TotpSecret, adminTotpCode);
+      const previousStep = parseInt(adminCred.LastSuccessfulTotpStep, 10);
+      if (
+        !verification.valid ||
+        (!isNaN(previousStep) && verification.timeStep <= previousStep)
+      ) {
+        throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'Fresh Super Admin MFA verification is required.', 401);
+      }
+      MasterRepository.updateCredentials(superAdminContext.userId, {
+        LastSuccessfulTotpStep: verification.timeStep
+      });
+    }
 
     MasterRepository.updateCredentials(targetUserId, {
       TotpSecret: '',
@@ -2914,16 +3164,20 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
       LastSuccessfulTotpStep: ''
     });
 
+    this._deleteMfaChallenge(targetUserId);
+    this._deleteMfaEnrollment(targetUserId);
+    SessionService.revokeAllUserSessions(targetUserId);
+
     MasterRepository.logGlobalAudit({
       ActorUserID: superAdminContext.userId,
       ActorRole: superAdminContext.role,
       EntityType: 'USER_SECURITY',
       EntityID: targetUserId,
       Action: CONSTANTS.AUDIT_EVENTS.MFA_DISABLED,
-      Reason: 'Two-factor authentication disabled by Super Admin'
+      Reason: 'Two-factor authentication disabled by Super Admin after fresh reauthentication'
     });
 
-    return { ok: true, message: `MFA disabled for user ${targetAccount.Username}.` };
+    return { ok: true, message: `MFA disabled for user ${targetAccount.Username}. Active sessions were revoked.` };
   },
 
   /**
@@ -2955,7 +3209,9 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
       MasterRepository.updateCredentials(authContext.userId, {
         PasswordHash: newHash,
         PasswordVersion: (parseInt(cred.PasswordVersion, 10) || 1) + 1,
-        PasswordChangedAt: new Date().toISOString()
+        PasswordChangedAt: new Date().toISOString(),
+        ResetIssuedAt: '',
+        ResetExpiresAt: ''
       });
 
       MasterRepository.updateAccount(authContext.userId, {
@@ -2967,6 +3223,7 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
       // Invalidate all active sessions and any outstanding MFA login challenge.
       SessionService.revokeAllUserSessions(authContext.userId);
       this._deleteMfaChallenge(authContext.userId);
+      this._deleteMfaEnrollment(authContext.userId);
       const replacementClientType =
         authContext.session && authContext.session.ClientType
           ? authContext.session.ClientType
@@ -3032,6 +3289,11 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
         );
       }
       const newHash = SecurityService.hashPassword(temporaryPassword);
+      const resetIssuedAt = new Date();
+      const resetExpiresAt = new Date(
+        resetIssuedAt.getTime() +
+        (CONSTANTS.LIMITS.RESET_PASSWORD_TTL_MINUTES || 60) * 60 * 1000
+      );
       const nextStatus =
         targetAccount.Status === CONSTANTS.ACCOUNT_STATUS.LOCKED
           ? CONSTANTS.ACCOUNT_STATUS.ACTIVE
@@ -3042,7 +3304,9 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
         PasswordVersion: (parseInt(targetCred ? targetCred.PasswordVersion : 0, 10) || 1) + 1,
         PasswordChangedAt: new Date().toISOString(),
         FailedLoginCount: 0,
-        LockUntil: ''
+        LockUntil: '',
+        ResetIssuedAt: resetIssuedAt.toISOString(),
+        ResetExpiresAt: resetExpiresAt.toISOString()
       });
 
       MasterRepository.updateAccount(targetUserId, {
@@ -8922,7 +9186,7 @@ var UserService = (typeof global !== 'undefined' && global.UserService) || {
       }
 
       const userId = Validation.generateId('USR');
-      const temporaryPassword = userPayload.temporaryPassword || userPayload.password || ('Flk-' + SecurityService.generateRandomHex(8) + '!9');
+      const temporaryPassword = userPayload.temporaryPassword || userPayload.password || SecurityService.generateTemporaryPassword();
       Validation.validatePassword(temporaryPassword);
 
       if (primaryWorkspaceId) {
@@ -8940,7 +9204,12 @@ var UserService = (typeof global !== 'undefined' && global.UserService) || {
       }
 
       const passwordHash = SecurityService.hashPassword(temporaryPassword);
-      const now = new Date().toISOString();
+      const nowDate = new Date();
+      const now = nowDate.toISOString();
+      const initialPasswordExpiresAt = new Date(
+        nowDate.getTime() +
+        (CONSTANTS.LIMITS.INITIAL_PASSWORD_TTL_HOURS || 24) * 60 * 60 * 1000
+      ).toISOString();
 
       const accountRecord = {
         UserID: userId,
@@ -8964,7 +9233,9 @@ var UserService = (typeof global !== 'undefined' && global.UserService) || {
         PasswordVersion: 1,
         PasswordChangedAt: now,
         FailedLoginCount: 0,
-        LockUntil: ''
+        LockUntil: '',
+        ResetIssuedAt: now,
+        ResetExpiresAt: initialPasswordExpiresAt
       };
 
       MasterRepository.createAccount(accountRecord, credentialRecord);
@@ -9653,7 +9924,7 @@ var AdminRequestService = (typeof global !== 'undefined' && global.AdminRequestS
             req.Reason
           );
         } else {
-          const tempPassword = 'Flk-' + SecurityService.generateRandomHex(4) + '!9';
+          const tempPassword = SecurityService.generateTemporaryPassword();
           executionResult = AuthService.resetPasswordByAdmin(
             superAdminContext,
             req.TargetUserID,
@@ -9841,8 +10112,7 @@ var SetupService = (typeof global !== 'undefined' && global.SetupService) || {
 
     // Caller already holds the script-wide installation lock. Do not reacquire
     // the same lock here; Apps Script locks are not a re-entrant transaction.
-    // Ensure schema/pepper exist before reading master tables.
-    MigrationService.bootstrapMasterSheet();
+    // Validate the owner-issued installation key before performing any schema mutation.
 
     if (typeof PropertiesService === 'undefined' || !PropertiesService.getScriptProperties) {
       throw new AppError(ERROR_CODES.INTERNAL_ERROR, 'Script Properties are unavailable.');
@@ -9856,10 +10126,29 @@ var SetupService = (typeof global !== 'undefined' && global.SetupService) || {
         401
       );
     }
+    const setupKeyCreatedAt = new Date(
+      props.getProperty('FLINK_SETUP_KEY_CREATED_AT') || ''
+    ).getTime();
+    const setupKeyTtlMs =
+      (CONSTANTS.LIMITS.SETUP_KEY_TTL_MINUTES || 15) * 60 * 1000;
+    if (
+      !Number.isFinite(setupKeyCreatedAt) ||
+      Date.now() - setupKeyCreatedAt > setupKeyTtlMs ||
+      Date.now() < setupKeyCreatedAt - 60 * 1000
+    ) {
+      props.deleteProperty('FLINK_SETUP_KEY_HASH');
+      props.deleteProperty('FLINK_SETUP_KEY_CREATED_AT');
+      throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'Installation key expired. Generate a new key from the Apps Script editor.', 401);
+    }
+
     const suppliedSetupKeyHash = SecurityService.hashToken(String(payload.setupKey).trim());
     if (!SecurityService.constantTimeEquals(suppliedSetupKeyHash, expectedSetupKeyHash)) {
       throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'Invalid one-time installation key.', 401);
     }
+
+    // The setup key is valid and fresh. It is now safe to initialize schema/pepper.
+    MigrationService.bootstrapMasterSheet();
+
     if (payload.password !== payload.confirmPassword) {
       throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'Passwords do not match.');
     }
@@ -12417,7 +12706,6 @@ function initializeInstallation_() {
   props.setProperty('FLINK_SETUP_KEY_HASH', SecurityService.hashToken(setupKey));
   props.setProperty('FLINK_SETUP_KEY_CREATED_AT', new Date().toISOString());
 
-  console.log('FLINK one-time setup key: ' + setupKey);
   return {
     ok: true,
     setupKey,
