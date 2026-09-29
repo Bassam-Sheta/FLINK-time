@@ -214,6 +214,61 @@ const TimesheetService = {
   },
 
   /**
+   * Manager/Super Admin queue view for one authorized workspace.
+   */
+  listTimesheetsForManager(authContext, workspaceId, statusFilter = null) {
+    AuthorizationService.assertWorkspaceAccess(authContext, workspaceId);
+    AuthorizationService.assertRole(authContext, [
+      CONSTANTS.ROLES.SUPER_ADMIN,
+      CONSTANTS.ROLES.ADMIN
+    ]);
+
+    const normalizedStatus = statusFilter
+      ? String(statusFilter).toUpperCase()
+      : '';
+    if (
+      normalizedStatus &&
+      !Object.values(CONSTANTS.TIMESHEET_STATUS).includes(normalizedStatus)
+    ) {
+      throw new AppError(
+        ERROR_CODES.VALIDATION_ERROR,
+        `Invalid timesheet status filter: ${normalizedStatus}.`,
+        400
+      );
+    }
+
+    const rows = SheetRepository.listTimesheets(
+      workspaceId,
+      normalizedStatus ? { status: normalizedStatus } : {}
+    );
+    const members = SheetRepository.listMembers(workspaceId);
+    const names = {};
+    members.forEach(member => {
+      names[member.UserID] = member.DisplayName || member.UserID;
+    });
+
+    return rows
+      .map(ts => ({
+        timesheetId: ts.TimesheetID,
+        userId: ts.UserID,
+        userName: names[ts.UserID] || ts.UserID,
+        periodStart: ts.PeriodStart,
+        periodEnd: ts.PeriodEnd,
+        totalSeconds: parseInt(ts.TotalSeconds, 10) || 0,
+        status: ts.Status,
+        submittedAt: ts.SubmittedAt || '',
+        reviewedBy: ts.ReviewedBy || '',
+        reviewedAt: ts.ReviewedAt || '',
+        reviewComment: ts.ReviewComment || ''
+      }))
+      .sort((a, b) =>
+        String(b.submittedAt || b.periodEnd || '').localeCompare(
+          String(a.submittedAt || a.periodEnd || '')
+        )
+      );
+  },
+
+  /**
    * Submits a weekly timesheet for review with atomic state transition under LockService
    */
   submitTimesheet(authContext, workspaceId, payload) {
