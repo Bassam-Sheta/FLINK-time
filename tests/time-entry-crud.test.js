@@ -141,7 +141,8 @@ function fixture(options = {}) {
       records += 1;
       if (options.rollupCreateFails) throw new Error('rollup failed');
     },
-    rebuildRollups() { rebuilds += 1; }
+    rebuildRollups() { rebuilds += 1; },
+    reconcileMutation() { rebuilds += 1; }
   };
   global.SheetRepository = {
     getEntry(_ws,id) { return id === stored.EntryID ? { ...stored } : null; },
