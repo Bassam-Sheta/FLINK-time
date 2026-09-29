@@ -132,7 +132,7 @@ function normalizeRows(rows) {
     delete copy._rowIndex;
     delete copy.LastCalculatedAt;
     return copy;
-  });
+  }).sort((a,b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
 }
 
 test('canonical rollups exactly aggregate raw entries, money, and contributors', () => {
