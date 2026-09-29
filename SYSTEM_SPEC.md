@@ -42,6 +42,7 @@ Super Admin control center, Manager workspace, Reports, Account, first-run setup
 Client-side portal separation is a usability layer only. Server-side `ACTION_PERMISSIONS`, session validation, workspace ACLs, and role checks remain the security authority.
 
 ## Authentication
+- Browser RPC allowlist: only `handleClientRequest` is the application RPC bridge; internal routing/dispatcher/setup/trigger functions end in `_` and are not callable through `google.script.run`.
 - Google Workspace domain-restricted web app.
 - Server-observed Google Workspace email must match the FLINK account email.
 - Password hashing, failed-login throttling/lockout, session idle/absolute expiry, password-version invalidation, forced password change, and MFA rules remain in `Code.gs`.
