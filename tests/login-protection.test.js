@@ -56,7 +56,11 @@ function fixture(options = {}) {
       MAX_FAILED_LOGIN_ATTEMPTS:5,
       LOCKOUT_DURATION_MINUTES:15,
       LOGIN_RETRY_DELAYS_SECONDS:
-        options.retryDelays || [0,2,5,15,30]
+        options.retryDelays || [0,2,5,15,30],
+      LOGIN_CALLER_ATTEMPTS_PER_MINUTE:
+        options.callerLimit || 30,
+      LOGIN_GLOBAL_ATTEMPTS_PER_MINUTE:
+        options.globalLimit || 200
     },
     AUDIT_EVENTS:{
       LOGIN_FAIL:'LOGIN_FAIL',
@@ -266,9 +270,11 @@ test('failed-login update re-reads the latest counter before incrementing', () =
 });
 
 test('caller login rate limit rejects before another password hash verification', () => {
-  const fx = fixture({ correctPassword:true });
-  global.CONSTANTS.LIMITS.LOGIN_CALLER_ATTEMPTS_PER_MINUTE = 2;
-  global.CONSTANTS.LIMITS.LOGIN_GLOBAL_ATTEMPTS_PER_MINUTE = 100;
+  const fx = fixture({
+    correctPassword:true,
+    callerLimit:2,
+    globalLimit:100
+  });
 
   const cacheValues = new Map();
   global.CacheService = {
