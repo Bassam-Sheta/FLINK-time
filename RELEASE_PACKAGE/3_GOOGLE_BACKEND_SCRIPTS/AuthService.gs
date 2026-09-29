@@ -11,10 +11,11 @@ const AuthService = {
     return 'FLINK_MFA_CHALLENGE_' + String(userId || '').replace(/[^A-Za-z0-9_-]/g, '');
   },
 
-  _storeMfaChallenge(userId, challengeToken, expiresAtMs) {
+  _storeMfaChallenge(userId, challengeToken, expiresAtMs, googleEmail = '') {
     const record = JSON.stringify({
       tokenHash: SecurityService.hashToken(challengeToken),
-      expiresAtMs: Number(expiresAtMs)
+      expiresAtMs: Number(expiresAtMs),
+      googleEmail: IdentityService.normalizeEmail(googleEmail)
     });
 
     if (typeof PropertiesService !== 'undefined' && PropertiesService.getScriptProperties) {
@@ -60,117 +61,254 @@ const AuthService = {
    * Authenticates user with username and password
    */
   login(username, password, clientType = 'WEB') {
+    const invalidAuth = () => new AppError(
+      ERROR_CODES.AUTH_REQUIRED,
+      'Invalid username or password.',
+      401
+    );
+
     if (!username || !password) {
-      throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'Username and password are required.', 401);
+      throw invalidAuth();
     }
 
+    const normalizedClientType = String(clientType || 'WEB').toUpperCase();
     const cleanUsername = String(username).trim().toLowerCase();
+
+    // WEB authentication is always bound to the server-observed Google account.
+    // This is deliberately resolved before FLINK credential validation so the
+    // browser cannot self-assert an email in the request body.
+    let googleEmail = '';
+    if (normalizedClientType === 'WEB' || normalizedClientType === 'SETUP_WIZARD') {
+      googleEmail = IdentityService.getCurrentGoogleEmail(true);
+    }
+
     const account = MasterRepository.findAccountByUsername(cleanUsername);
-
-    // Generic error to mitigate username enumeration
-    const invalidAuthError = new AppError(ERROR_CODES.AUTH_REQUIRED, 'Invalid username or password.', 401);
-
     if (!account) {
       MasterRepository.logSecurityEvent({
         Username: cleanUsername,
         EventType: CONSTANTS.AUDIT_EVENTS.LOGIN_FAIL,
         Success: false,
-        metadata: { reason: 'User not found' }
+        metadata: {
+          reason: 'User not found',
+          googleIdentity: googleEmail || ''
+        }
       });
-      throw invalidAuthError;
+      throw invalidAuth();
+    }
+
+    try {
+      googleEmail = IdentityService.assertAccountIdentity(
+        account,
+        normalizedClientType
+      ) || googleEmail;
+    } catch (identityErr) {
+      MasterRepository.logSecurityEvent({
+        UserID: account.UserID,
+        Username: account.Username,
+        EventType: CONSTANTS.AUDIT_EVENTS.IDENTITY_MISMATCH,
+        Success: false,
+        metadata: {
+          reason: 'Google Workspace identity mismatch',
+          observedGoogleIdentity: googleEmail || ''
+        }
+      });
+      throw invalidAuth();
     }
 
     const cred = MasterRepository.getCredentials(account.UserID);
     if (!cred) {
-      throw invalidAuthError;
+      MasterRepository.logSecurityEvent({
+        UserID: account.UserID,
+        Username: account.Username,
+        EventType: CONSTANTS.AUDIT_EVENTS.LOGIN_FAIL,
+        Success: false,
+        metadata: { reason: 'Credentials row missing' }
+      });
+      throw invalidAuth();
     }
 
     const now = Date.now();
+    const lockUntilMs = cred.LockUntil
+      ? new Date(cred.LockUntil).getTime()
+      : NaN;
 
-    // Check account lockout status
-    if (account.Status === CONSTANTS.ACCOUNT_STATUS.LOCKED || (cred.LockUntil && new Date(cred.LockUntil).getTime() > now)) {
-      const lockUntil = new Date(cred.LockUntil).getTime();
-      if (now < lockUntil) {
-        const remainingMinutes = Math.ceil((lockUntil - now) / 60000);
-        throw new AppError(
-          ERROR_CODES.ACCOUNT_LOCKED,
-          `Account is locked due to multiple failed login attempts. Try again in ${remainingMinutes} minutes.`,
-          403
-        );
-      } else {
-        // Auto-unlock after timeout expires
-        MasterRepository.updateAccount(account.UserID, { Status: CONSTANTS.ACCOUNT_STATUS.ACTIVE });
-        MasterRepository.updateCredentials(account.UserID, { FailedLoginCount: 0, LockUntil: '' });
-      }
+    // A timed lock can auto-expire. A LOCKED account without a valid LockUntil
+    // is treated as an administrative lock and never auto-unlocks here.
+    if (
+      Number.isFinite(lockUntilMs) &&
+      lockUntilMs <= now &&
+      account.Status === CONSTANTS.ACCOUNT_STATUS.LOCKED
+    ) {
+      MasterRepository.updateAccount(account.UserID, {
+        Status: CONSTANTS.ACCOUNT_STATUS.ACTIVE
+      });
+      MasterRepository.updateCredentials(account.UserID, {
+        FailedLoginCount: 0,
+        LastFailedAt: '',
+        LockUntil: ''
+      });
+      account.Status = CONSTANTS.ACCOUNT_STATUS.ACTIVE;
+      cred.FailedLoginCount = 0;
+      cred.LastFailedAt = '';
+      cred.LockUntil = '';
     }
 
-    // Check passive/archived status
+    if (
+      account.Status === CONSTANTS.ACCOUNT_STATUS.LOCKED ||
+      (Number.isFinite(lockUntilMs) && lockUntilMs > now)
+    ) {
+      MasterRepository.logSecurityEvent({
+        UserID: account.UserID,
+        Username: account.Username,
+        EventType: CONSTANTS.AUDIT_EVENTS.LOGIN_FAIL,
+        Success: false,
+        metadata: {
+          reason: 'Attempt while account locked',
+          lockUntil: cred.LockUntil || ''
+        }
+      });
+      throw invalidAuth();
+    }
+
     if (account.Status !== CONSTANTS.ACCOUNT_STATUS.ACTIVE) {
-      throw new AppError(ERROR_CODES.ACCOUNT_PASSIVE, 'This account is inactive or has been deactivated.', 403);
+      MasterRepository.logSecurityEvent({
+        UserID: account.UserID,
+        Username: account.Username,
+        EventType: CONSTANTS.AUDIT_EVENTS.LOGIN_FAIL,
+        Success: false,
+        metadata: {
+          reason: 'Inactive account',
+          accountStatus: account.Status
+        }
+      });
+      throw invalidAuth();
     }
 
-    // Verify password hash
-    const isValid = SecurityService.verifyPassword(password, cred.PasswordHash);
+    // Graduated retry throttle after failed password attempts. No sleep is used;
+    // Apps Script execution time is preserved and the caller must retry later.
+    const failedCount = parseInt(cred.FailedLoginCount, 10) || 0;
+    const retrySchedule = Array.isArray(CONSTANTS.LIMITS.LOGIN_RETRY_DELAYS_SECONDS)
+      ? CONSTANTS.LIMITS.LOGIN_RETRY_DELAYS_SECONDS
+      : [0, 2, 5, 15, 30];
+    const delaySeconds = retrySchedule[
+      Math.min(failedCount, retrySchedule.length - 1)
+    ] || 0;
+    const lastFailedMs = cred.LastFailedAt
+      ? new Date(cred.LastFailedAt).getTime()
+      : NaN;
+
+    if (
+      failedCount > 0 &&
+      delaySeconds > 0 &&
+      Number.isFinite(lastFailedMs) &&
+      now < lastFailedMs + delaySeconds * 1000
+    ) {
+      MasterRepository.logSecurityEvent({
+        UserID: account.UserID,
+        Username: account.Username,
+        EventType: CONSTANTS.AUDIT_EVENTS.LOGIN_THROTTLED,
+        Success: false,
+        metadata: {
+          failedAttempts: failedCount,
+          delaySeconds,
+          retryAfterMs: Math.max(
+            0,
+            lastFailedMs + delaySeconds * 1000 - now
+          )
+        }
+      });
+      throw invalidAuth();
+    }
+
+    const isValid = SecurityService.verifyPassword(
+      password,
+      cred.PasswordHash
+    );
 
     if (!isValid) {
-      const newFailedCount = (parseInt(cred.FailedLoginCount, 10) || 0) + 1;
-      const updates = { FailedLoginCount: newFailedCount };
+      const newFailedCount = failedCount + 1;
+      const failedAt = new Date(now).toISOString();
+      const updates = {
+        FailedLoginCount: newFailedCount,
+        LastFailedAt: failedAt
+      };
 
       if (newFailedCount >= CONSTANTS.LIMITS.MAX_FAILED_LOGIN_ATTEMPTS) {
-        const lockUntil = new Date(now + CONSTANTS.LIMITS.LOCKOUT_DURATION_MINUTES * 60 * 1000).toISOString();
+        const lockUntil = new Date(
+          now +
+          CONSTANTS.LIMITS.LOCKOUT_DURATION_MINUTES * 60 * 1000
+        ).toISOString();
         updates.LockUntil = lockUntil;
-        MasterRepository.updateAccount(account.UserID, { Status: CONSTANTS.ACCOUNT_STATUS.LOCKED });
+        MasterRepository.updateAccount(account.UserID, {
+          Status: CONSTANTS.ACCOUNT_STATUS.LOCKED
+        });
 
         MasterRepository.logSecurityEvent({
           UserID: account.UserID,
           Username: account.Username,
           EventType: CONSTANTS.AUDIT_EVENTS.ACCOUNT_LOCK,
           Success: false,
-          metadata: { failedAttempts: newFailedCount, lockUntil }
+          metadata: {
+            failedAttempts: newFailedCount,
+            lockUntil
+          }
         });
       }
 
       MasterRepository.updateCredentials(account.UserID, updates);
-
       MasterRepository.logSecurityEvent({
         UserID: account.UserID,
         Username: account.Username,
         EventType: CONSTANTS.AUDIT_EVENTS.LOGIN_FAIL,
         Success: false,
-        metadata: { failedAttempts: newFailedCount }
+        metadata: {
+          reason: 'Invalid password',
+          failedAttempts: newFailedCount
+        }
       });
 
-      throw invalidAuthError;
+      throw invalidAuth();
     }
 
-    // A correct password clears password-stage failures, but MFA-enabled
-    // accounts are not considered logged in until the second factor succeeds.
+    // Password-stage failures are cleared only after a valid password.
     MasterRepository.updateCredentials(account.UserID, {
       FailedLoginCount: 0,
+      LastFailedAt: '',
       LockUntil: ''
     });
 
     if (cred.MfaEnabled === true || cred.MfaEnabled === 'TRUE') {
       const timestamp = Date.now();
       const sig = SecurityService
-        .hashToken(`${account.UserID}|${timestamp}|${SecurityService.getPepper()}`)
+        .hashToken(
+          `${account.UserID}|${timestamp}|${SecurityService.getPepper()}`
+        )
         .substring(0, 16);
-      const mfaChallengeToken = `MFA_${account.UserID}_${timestamp}_${sig}`;
-      this._storeMfaChallenge(account.UserID, mfaChallengeToken, timestamp + 5 * 60 * 1000);
+      const mfaChallengeToken =
+        `MFA_${account.UserID}_${timestamp}_${sig}`;
+      this._storeMfaChallenge(
+        account.UserID,
+        mfaChallengeToken,
+        timestamp + 5 * 60 * 1000,
+        googleEmail
+      );
 
       MasterRepository.logSecurityEvent({
         UserID: account.UserID,
         Username: account.Username,
         EventType: 'MFA_CHALLENGE_ISSUED',
         Success: true,
-        metadata: { clientType }
+        metadata: {
+          clientType: normalizedClientType,
+          googleIdentity: googleEmail || ''
+        }
       });
 
       return {
         mfaRequired: true,
         mfaChallengeToken,
         userId: account.UserID,
-        clientType
+        clientType: normalizedClientType
       };
     }
 
@@ -183,12 +321,19 @@ const AuthService = {
       Username: account.Username,
       EventType: CONSTANTS.AUDIT_EVENTS.LOGIN_SUCCESS,
       Success: true,
-      metadata: { clientType, mfa: false }
+      metadata: {
+        clientType: normalizedClientType,
+        mfa: false,
+        googleIdentity: googleEmail || ''
+      }
     });
 
-    const sessionData = SessionService.createSession(account.UserID, clientType);
+    const sessionData = SessionService.createSession(
+      account.UserID,
+      normalizedClientType,
+      googleEmail
+    );
 
-    // Get assigned workspaces
     const accesses = MasterRepository.getWorkspaceAccessForUser(account.UserID);
     const assignedWorkspaces = accesses.map(a => a.WorkspaceID);
 
@@ -201,9 +346,15 @@ const AuthService = {
         displayName: account.DisplayName,
         role: account.Role,
         status: account.Status,
-        primaryWorkspaceId: account.PrimaryWorkspaceID || assignedWorkspaces[0] || '',
-        assignedWorkspaces: assignedWorkspaces,
-        mustChangePassword: account.MustChangePassword === true || account.MustChangePassword === 'TRUE'
+        email: account.Email || '',
+        primaryWorkspaceId:
+          account.PrimaryWorkspaceID ||
+          assignedWorkspaces[0] ||
+          '',
+        assignedWorkspaces,
+        mustChangePassword:
+          account.MustChangePassword === true ||
+          account.MustChangePassword === 'TRUE'
       }
     };
   },
