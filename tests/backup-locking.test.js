@@ -57,7 +57,12 @@ function loadService(lockBehavior = {}) {
   };
 
   delete require.cache[require.resolve(servicePath)];
-  return require(servicePath).BackupService;
+  const mod = require(servicePath);
+  // Keep post-load fixture mutations attached to the exact objects used by
+  // the unified Code.gs module.
+  global.CONSTANTS = mod.CONSTANTS;
+  global.WORKSPACE_SCHEMA = mod.WORKSPACE_SCHEMA;
+  return mod.BackupService;
 }
 
 test('public backup acquires and releases ScriptLock around snapshot work', () => {
