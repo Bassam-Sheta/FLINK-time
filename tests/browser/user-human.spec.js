@@ -58,7 +58,7 @@ test('returning employee completes a real browser workday flow', async ({ page }
   await page.getByRole('button', { name: 'Account' }).click();
   await expect(page.locator('#accountDetails')).toContainText('employee@example.test');
 
-  await page.getByRole('button', { name: 'Sign Out' }).click();
+  await page.locator('#accountView').getByRole('button', { name: 'Sign Out' }).click();
   await expect.poll(async () =>
     page.evaluate(() => window.__mockState.loggedOut)
   ).toBe(true);
