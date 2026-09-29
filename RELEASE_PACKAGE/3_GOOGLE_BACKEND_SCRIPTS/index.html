@@ -3288,7 +3288,7 @@
       if (period === 'THIS_WEEK' || period === 'LAST_WEEK') {
         const anchor = new Date(now.getTime() - (period === 'LAST_WEEK' ? 7 * 86400000 : 0));
         const week = await apiCall('timesheet.getWeekly', {
-          weekStartDate: anchor.toISOString().substring(0, 10)
+          weekStartDate: anchor.toISOString()
         });
         return { startDate: week.periodStart, endDate: week.periodEnd };
       }
@@ -3847,7 +3847,7 @@
 
     /* Fallback subtab handlers */
     function renderSaTimeAdmin() { renderSaReportBuilder(); }
-    function renderSaApprovals() { navigate('timesheet'); }
+    function renderSaApprovals() { navigate('mytime'); }
     function renderSaProjects() {
       const container = document.getElementById('saSubtabContent');
       container.innerHTML = `
