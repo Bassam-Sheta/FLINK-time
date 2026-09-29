@@ -252,22 +252,18 @@ const TimeEntryService = {
 
       const updated = SheetRepository.updateTimeEntry(workspaceId, entryId, allowed);
 
-      const affectsRollups =
-        allowed.ProjectID !== undefined ||
-        allowed.Billable !== undefined ||
-        allowed.StartUTC !== undefined ||
-        allowed.EndUTC !== undefined ||
-        allowed.DurationSeconds !== undefined ||
-        allowed.HourlyRateSnapshot !== undefined ||
-        allowed.CostRateSnapshot !== undefined;
-
       // Explicit flush in Google Apps Script to guarantee write persistence before reconciliation.
       if (typeof SpreadsheetApp !== 'undefined' && SpreadsheetApp.flush) {
         try { SpreadsheetApp.flush(); } catch (fErr) {}
       }
 
-      if (affectsRollups && typeof RollupService !== 'undefined' && RollupService.rebuildRollups) {
-        RollupService.rebuildRollups(workspaceId);
+      if (typeof RollupService !== 'undefined' && RollupService.reconcileMutation) {
+        RollupService.reconcileMutation(
+          workspaceId,
+          entry,
+          updated,
+          'UPDATE'
+        );
       }
 
       SheetRepository.logWorkspaceAudit(workspaceId, {
@@ -373,7 +369,7 @@ const TimeEntryService = {
       }
 
       const now = new Date().toISOString();
-      SheetRepository.updateTimeEntry(workspaceId, entryId, {
+      const deletedEntry = SheetRepository.updateTimeEntry(workspaceId, entryId, {
         Status: 'DELETED',
         DeletedAt: now,
         DeletedBy: authContext.userId,
@@ -386,8 +382,13 @@ const TimeEntryService = {
         try { SpreadsheetApp.flush(); } catch (fErr) {}
       }
 
-      if (typeof RollupService !== 'undefined' && RollupService.rebuildRollups) {
-        RollupService.rebuildRollups(workspaceId);
+      if (typeof RollupService !== 'undefined' && RollupService.reconcileMutation) {
+        RollupService.reconcileMutation(
+          workspaceId,
+          entry,
+          deletedEntry,
+          'DELETE'
+        );
       }
 
       SheetRepository.logWorkspaceAudit(workspaceId, {
@@ -648,11 +649,20 @@ const TimeEntryService = {
       }
 
       if (
-        (normalizedAction === 'DELETE' || normalizedAction === 'CHANGE_PROJECT') &&
         typeof RollupService !== 'undefined' &&
-        RollupService.rebuildRollups
+        RollupService.rebuildRollups &&
+        (normalizedAction === 'DELETE' || normalizedAction === 'CHANGE_PROJECT')
       ) {
-        RollupService.rebuildRollups(workspaceId);
+        const requiresRebuild = plans.some(plan =>
+          !RollupService.mutationAffectsRollups ||
+          RollupService.mutationAffectsRollups(
+            plan.entry,
+            { ...plan.entry, ...plan.updates }
+          )
+        );
+        if (requiresRebuild) {
+          RollupService.rebuildRollups(workspaceId);
+        }
       }
 
       return entries.length;
