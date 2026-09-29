@@ -96,6 +96,14 @@ test('SUPER_ADMIN portal exposes Admin Console and owns first-run setup', () => 
   assert.match(superAdmin, /id="newUserEmail"/);
 });
 
+test('all portals await server logout before clearing the browser session', () => {
+  for (const portal of [user, admin, superAdmin]) {
+    assert.match(portal, /async function logout\(\)/);
+    assert.match(portal, /await apiCall\('auth\.logout'\)/);
+    assert.match(portal, /sessionStorage\.removeItem\('flink_session_token'\)/);
+  }
+});
+
 test('portal role gates are explicit while server-side RBAC remains in Code.gs', () => {
   assert.match(user, /embedRoleAllowed/);
   assert.match(admin, /\['ADMIN', 'SUPER_ADMIN'\]/);
