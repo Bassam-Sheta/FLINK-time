@@ -589,8 +589,8 @@
       <div class="card">
         <div class="card-header">
           <div>
-            <div class="card-title">Recent Time Entries</div>
-            <div class="card-subtitle">Last 10 entries for active workspace</div>
+            <div class="card-title">Today's Time Entries</div>
+            <div class="card-subtitle">Current workspace business date</div>
           </div>
           <button class="btn btn-secondary btn-sm" onclick="openManualEntryModal()">+ Manual Entry</button>
         </div>
@@ -781,6 +781,11 @@
       timerInterval: null,
       pendingTimerStartOperationId: '',
       pendingTimerStopOperationId: '',
+      timerCooldownUntil: 0,
+      timerRequestInFlight: false,
+      myTimeEntries: [],
+      managerWorkspaceFilter: '',
+      managerTab: 'overview',
       currentTimesheetPeriod: null,
       setupStatus: null
     };
@@ -822,12 +827,30 @@
       container.appendChild(div);
     }
 
-    // Client-side API caller
-    async function apiCall(action, payload = {}) {
+    function normalizeUser(raw, roleFallback = '') {
+      raw = raw || {};
+      return {
+        userId: raw.userId || raw.UserID || '',
+        username: raw.username || raw.Username || '',
+        displayName: raw.displayName || raw.DisplayName || '',
+        email: raw.email || raw.Email || '',
+        role: raw.role || raw.Role || roleFallback || '',
+        status: raw.status || raw.Status || '',
+        primaryWorkspaceId: raw.primaryWorkspaceId || raw.PrimaryWorkspaceID || '',
+        assignedWorkspaces: raw.assignedWorkspaces || raw.AssignedWorkspaceIDs || [],
+        mustChangePassword:
+          raw.mustChangePassword === true || raw.MustChangePassword === true ||
+          raw.mustChangePassword === 'TRUE' || raw.MustChangePassword === 'TRUE'
+      };
+    }
+
+    // workspaceOverride may be '' intentionally for manager all-workspace reads.
+    async function apiCall(action, payload = {}, workspaceOverride = undefined) {
       const body = {
         action,
         sessionToken: state.token,
-        workspaceId: state.currentWorkspace,
+        workspaceId:
+          workspaceOverride === undefined ? state.currentWorkspace : workspaceOverride,
         payload
       };
 
@@ -870,7 +893,7 @@
       if (state.token) {
         try {
           const res = await apiCall('auth.validateSession');
-          state.user = res.user;
+          state.user = normalizeUser(res.user, res.role);
           initApp();
         } catch (e) {
           sessionStorage.removeItem('flink_session_token');
@@ -897,11 +920,14 @@
 
       try {
         const res = await apiCall('auth.login', { username, password, clientType: 'WEB' });
+        if (res.mfaRequired) {
+          throw new Error('Two-factor verification is required before this browser session can continue.');
+        }
         state.token = res.sessionToken;
-        state.user = res.user;
+        state.user = normalizeUser(res.user);
         sessionStorage.setItem('flink_session_token', res.sessionToken);
 
-        if (res.user.mustChangePassword) {
+        if (state.user.mustChangePassword) {
           openPasswordChangeModal();
         } else {
           initApp();
@@ -938,23 +964,25 @@
 
     function buildNavigation() {
       const nav = document.getElementById('navLinks');
-      nav.innerHTML = '';
-      const links = [{ id: 'timer', label: 'Timer' }, { id: 'timesheet', label: 'Timesheets' }];
-
+      nav.replaceChildren();
+      const links = [
+        { id: 'timer', label: 'Timer' },
+        { id: 'mytime', label: 'My Time' },
+        { id: 'reports', label: 'Reports' },
+        { id: 'account', label: 'Account' }
+      ];
       if (state.user.role === 'ADMIN' || state.user.role === 'SUPER_ADMIN') {
-        links.push({ id: 'admin', label: 'Dashboard' });
+        links.splice(2, 0, { id: 'admin', label: 'Manager' });
       }
       if (state.user.role === 'SUPER_ADMIN') {
-        links.push({ id: 'superadmin', label: 'Admin Console' });
+        links.splice(3, 0, { id: 'superadmin', label: 'Admin Console' });
       }
-      links.push({ id: 'reports', label: 'Reports' });
-
-      links.forEach(l => {
+      links.forEach(link => {
         const btn = document.createElement('button');
         btn.className = 'nav-btn';
-        btn.id = 'navBtn_' + l.id;
-        btn.innerText = l.label;
-        btn.onclick = () => navigate(l.id);
+        btn.id = 'navBtn_' + link.id;
+        btn.textContent = link.label;
+        btn.onclick = () => navigate(link.id);
         nav.appendChild(btn);
       });
     }
@@ -964,7 +992,7 @@
       const activeBtn = document.getElementById('navBtn_' + viewId);
       if (activeBtn) activeBtn.classList.add('active');
 
-      ['timerView', 'timesheetView', 'adminDashboardView', 'superAdminView', 'reportsView'].forEach(id => {
+      ['timerView', 'timesheetView', 'adminDashboardView', 'superAdminView', 'reportsView', 'accountView'].forEach(id => {
         const el = document.getElementById(id);
         if (el) el.classList.add('hidden');
       });
@@ -973,18 +1001,22 @@
         document.getElementById('timerView').classList.remove('hidden');
         recoverActiveTimer();
         loadRecentEntries();
-      } else if (viewId === 'timesheet') {
+      } else if (viewId === 'mytime') {
         document.getElementById('timesheetView').classList.remove('hidden');
         loadTimesheet();
+        loadMyTimeHistory();
       } else if (viewId === 'admin') {
         document.getElementById('adminDashboardView').classList.remove('hidden');
-        loadAdminDashboard();
+        loadManagerDashboard();
       } else if (viewId === 'superadmin') {
         document.getElementById('superAdminView').classList.remove('hidden');
         switchSaSubtab('overview');
       } else if (viewId === 'reports') {
         document.getElementById('reportsView').classList.remove('hidden');
         loadReportsView();
+      } else if (viewId === 'account') {
+        document.getElementById('accountView').classList.remove('hidden');
+        renderAccountView();
       }
     }
 
