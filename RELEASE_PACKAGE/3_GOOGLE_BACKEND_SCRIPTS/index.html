@@ -1701,47 +1701,490 @@
     }
 
     /* ------------------- ADMIN DASHBOARD ------------------- */
-    async function loadAdminDashboard() {
-      try {
-        const overview = await apiCall('dashboard.overview');
-        document.getElementById('adminWorkingNowCount').innerText = overview.activeTimersCount;
-        document.getElementById('adminTodayTeamHours').innerText = overview.todayTrackedHours + ' h';
-        document.getElementById('adminWeekHours').innerText = (overview.weekTrackedHours || 0) + ' h';
-        document.getElementById('adminPendingApprovalsCount').innerText = overview.pendingApprovalsCount;
-        document.getElementById('adminPendingRequestsCount').innerText = overview.pendingRequestsCount;
-
-        const radarBody = document.getElementById('adminLiveRadarBody');
-        radarBody.replaceChildren();
-
-        (overview.workingNow || []).forEach(item => {
-          const tr = document.createElement('tr');
-          const values = [
-            item.userName || '',
-            item.workspaceName || '',
-            item.projectName || '',
-            String(item.startedAtUTC || '').substring(11, 19),
-            formatSecs(Number(item.elapsedSeconds || 0)),
-            item.description || '-'
-          ];
-
-          values.forEach((value, index) => {
-            const td = document.createElement('td');
-            if (index === 0) {
-              const strong = document.createElement('strong');
-              strong.textContent = String(value);
-              td.appendChild(strong);
-            } else {
-              td.textContent = String(value);
-            }
-            if (index === 3 || index === 4) td.style.fontFamily = 'var(--font-mono)';
-            if (index === 4) td.style.color = '#34D399';
-            tr.appendChild(td);
-          });
-
-          radarBody.appendChild(tr);
+    /* ------------------- MANAGER / ADMIN WORKSPACE ------------------- */
+    function managerTargets() {
+      if (state.managerWorkspaceFilter) {
+        return (state.workspaces || []).filter(function(ws) {
+          return ws.WorkspaceID === state.managerWorkspaceFilter;
         });
+      }
+      return (state.workspaces || []).slice();
+    }
+
+    function managerContentCard(title, subtitle) {
+      const container = document.getElementById('managerContent');
+      container.replaceChildren();
+      const card = document.createElement('div');
+      card.className = 'card';
+      const heading = document.createElement('div');
+      heading.className = 'card-title';
+      heading.textContent = title || '';
+      card.appendChild(heading);
+      if (subtitle) {
+        const sub = document.createElement('div');
+        sub.className = 'card-subtitle';
+        sub.textContent = subtitle;
+        card.appendChild(sub);
+      }
+      container.appendChild(card);
+      return { container: container, card: card };
+    }
+
+    function managerTable(headers, rows) {
+      const wrapper = document.createElement('div');
+      wrapper.className = 'table-responsive';
+      const table = document.createElement('table');
+      const thead = document.createElement('thead');
+      const hr = document.createElement('tr');
+      headers.forEach(function(header) {
+        const th = document.createElement('th');
+        th.textContent = header;
+        hr.appendChild(th);
+      });
+      thead.appendChild(hr);
+      table.appendChild(thead);
+
+      const tbody = document.createElement('tbody');
+      rows.forEach(function(row) {
+        const tr = document.createElement('tr');
+        row.forEach(function(value) {
+          const td = document.createElement('td');
+          if (value instanceof Node) td.appendChild(value);
+          else td.textContent = String(value === undefined || value === null ? '' : value);
+          tr.appendChild(td);
+        });
+        tbody.appendChild(tr);
+      });
+      table.appendChild(tbody);
+      wrapper.appendChild(table);
+      return wrapper;
+    }
+
+    async function loadManagerDashboard() {
+      if (!state.user || !['ADMIN','SUPER_ADMIN'].includes(state.user.role)) return;
+      const select = document.getElementById('managerWorkspaceSelect');
+      select.replaceChildren(new Option('All My Workspaces', ''));
+      (state.workspaces || []).forEach(function(ws) {
+        select.add(new Option(
+          String(ws.WorkspaceName || ws.WorkspaceID),
+          String(ws.WorkspaceID)
+        ));
+      });
+      select.value = state.managerWorkspaceFilter || '';
+      await switchManagerTab(state.managerTab || 'overview');
+    }
+
+    async function onManagerWorkspaceChange() {
+      state.managerWorkspaceFilter =
+        document.getElementById('managerWorkspaceSelect').value || '';
+      await switchManagerTab(state.managerTab || 'overview');
+    }
+
+    async function switchManagerTab(tabId) {
+      state.managerTab = tabId;
+      document.querySelectorAll('#managerTabs .nav-btn').forEach(function(btn) {
+        btn.classList.remove('active');
+      });
+      const active = document.getElementById('mgrTab_' + tabId);
+      if (active) active.classList.add('active');
+
+      if (tabId === 'overview') return renderManagerOverview();
+      if (tabId === 'workspaces') return renderManagerWorkspaces();
+      if (tabId === 'live') return renderManagerLive();
+      if (tabId === 'timesheets') return renderManagerTimesheets(false);
+      if (tabId === 'approvals') return renderManagerTimesheets(true);
+      if (tabId === 'reports') return renderManagerReports();
+      if (tabId === 'users') return renderManagerUsers();
+      if (tabId === 'requests') return renderManagerRequests();
+      if (tabId === 'alerts') return renderManagerAlerts();
+    }
+
+    async function renderManagerOverview() {
+      const ui = managerContentCard('Overview', 'Loading manager KPIs...');
+      try {
+        const overview = await apiCall(
+          'dashboard.overview',
+          {},
+          state.managerWorkspaceFilter
+        );
+        ui.card.replaceChildren();
+        const grid = document.createElement('div');
+        grid.className = 'grid-5';
+        [
+          ['Working Now', overview.activeTimersCount || 0],
+          ['Hours Today', Number(overview.todayTrackedHours || 0).toFixed(2) + ' h'],
+          ['Hours This Week', Number(overview.weekTrackedHours || 0).toFixed(2) + ' h'],
+          ['Pending Approvals', overview.pendingApprovalsCount || 0],
+          ['Assigned Workspaces', overview.accessibleWorkspacesCount || 0]
+        ].forEach(function(item) {
+          const box = document.createElement('div');
+          box.className = 'kpi-card';
+          const label = document.createElement('div');
+          label.className = 'kpi-label';
+          label.textContent = item[0];
+          const value = document.createElement('div');
+          value.className = 'kpi-val';
+          value.textContent = String(item[1]);
+          box.append(label, value);
+          grid.appendChild(box);
+        });
+        ui.card.appendChild(grid);
       } catch (e) {
-        console.error('Failed to load admin dashboard', e);
+        renderError(ui.container, 'Failed to load manager overview: ', e);
+      }
+    }
+
+    function renderManagerWorkspaces() {
+      const ui = managerContentCard(
+        'My Workspaces',
+        'Only workspaces assigned to this Admin are visible. Admins remain limited to three active workspaces.'
+      );
+      const rows = (state.workspaces || []).map(function(ws) {
+        const focus = document.createElement('button');
+        focus.className = 'btn btn-secondary btn-sm';
+        focus.textContent = 'Focus';
+        focus.onclick = function() {
+          state.managerWorkspaceFilter = ws.WorkspaceID;
+          const select = document.getElementById('managerWorkspaceSelect');
+          if (select) select.value = ws.WorkspaceID;
+          switchManagerTab('overview');
+        };
+        return [
+          ws.WorkspaceName || '',
+          ws.WorkspaceID || '',
+          ws.Timezone || 'UTC',
+          ws.Status || '',
+          focus
+        ];
+      });
+      ui.card.appendChild(managerTable(
+        ['Workspace','ID','Timezone','Status','Action'],
+        rows
+      ));
+    }
+
+    async function renderManagerLive() {
+      const ui = managerContentCard('Live Activity', 'Loading active timers...');
+      try {
+        const radar = await apiCall(
+          'dashboard.radar',
+          {},
+          state.managerWorkspaceFilter
+        );
+        const rows = (radar.workers || []).map(function(item) {
+          return [
+            item.userName || item.userId || '',
+            item.workspaceName || item.workspaceId || '',
+            item.projectName || '',
+            item.description || '',
+            formatSecs(Number(item.elapsedSeconds || 0))
+          ];
+        });
+        ui.card.appendChild(managerTable(
+          ['User','Workspace','Project','Description','Elapsed'],
+          rows
+        ));
+      } catch (e) {
+        renderError(ui.container, 'Failed to load live activity: ', e);
+      }
+    }
+
+    async function collectManagerTimesheets(statusFilter) {
+      const rows = [];
+      for (const ws of managerTargets()) {
+        const result = await apiCall(
+          'timesheet.listForReview',
+          statusFilter ? { statusFilter: statusFilter } : {},
+          ws.WorkspaceID
+        );
+        (result || []).forEach(function(item) {
+          rows.push(Object.assign({}, item, {
+            workspaceId: ws.WorkspaceID,
+            workspaceName: ws.WorkspaceName
+          }));
+        });
+      }
+      return rows;
+    }
+
+    async function renderManagerTimesheets(approvalsOnly) {
+      const title = approvalsOnly ? 'Approvals' : 'Timesheets';
+      const ui = managerContentCard(title, 'Loading workspace timesheets...');
+      try {
+        const records = await collectManagerTimesheets(
+          approvalsOnly ? 'SUBMITTED' : ''
+        );
+        const rows = records.map(function(item) {
+          let actions = '-';
+          if (item.status === 'SUBMITTED') {
+            actions = document.createElement('span');
+
+            const approve = document.createElement('button');
+            approve.className = 'btn btn-success btn-sm';
+            approve.textContent = 'Approve';
+            approve.onclick = function() {
+              managerReviewTimesheet(
+                item.workspaceId,
+                item.timesheetId,
+                'APPROVE'
+              );
+            };
+
+            const reject = document.createElement('button');
+            reject.className = 'btn btn-danger btn-sm';
+            reject.textContent = 'Reject';
+            reject.style.marginLeft = '0.4rem';
+            reject.onclick = function() {
+              managerReviewTimesheet(
+                item.workspaceId,
+                item.timesheetId,
+                'REJECT'
+              );
+            };
+            actions.append(approve, reject);
+          }
+
+          return [
+            item.userName || item.userId || '',
+            item.workspaceName || '',
+            String(item.periodStart || '').substring(0,10) + ' to ' +
+              String(item.periodEnd || '').substring(0,10),
+            (Number(item.totalSeconds || 0) / 3600).toFixed(2),
+            item.status || '',
+            actions
+          ];
+        });
+        ui.card.appendChild(managerTable(
+          ['User','Workspace','Period','Hours','Status','Actions'],
+          rows
+        ));
+      } catch (e) {
+        renderError(ui.container, 'Failed to load manager timesheets: ', e);
+      }
+    }
+
+    async function managerReviewTimesheet(workspaceId, timesheetId, action) {
+      const comment = prompt(
+        action === 'REJECT'
+          ? 'Rejection comment (required):'
+          : 'Approval comment (optional):',
+        ''
+      );
+      if (action === 'REJECT' && !String(comment || '').trim()) {
+        return alert('A rejection comment is required.');
+      }
+      try {
+        await apiCall(
+          action === 'APPROVE' ? 'timesheet.approve' : 'timesheet.reject',
+          { timesheetId: timesheetId, comment: String(comment || '').trim() },
+          workspaceId
+        );
+        await switchManagerTab('approvals');
+      } catch (e) {
+        alert(e.message || 'Timesheet review failed.');
+      }
+    }
+
+    async function renderManagerReports() {
+      const ui = managerContentCard('Reports', 'Loading assigned-workspace summaries...');
+      try {
+        const rows = [];
+        for (const ws of managerTargets()) {
+          const report = await apiCall(
+            'reports.summary',
+            { groupings: ['project'] },
+            ws.WorkspaceID
+          );
+          rows.push([
+            ws.WorkspaceName || ws.WorkspaceID,
+            Number(report.overall && report.overall.totalHours || 0).toFixed(2),
+            Number(report.overall && report.overall.billableHours || 0).toFixed(2),
+            report.totalEntries || 0
+          ]);
+        }
+        ui.card.appendChild(managerTable(
+          ['Workspace','Tracked Hours','Billable Hours','Entries'],
+          rows
+        ));
+      } catch (e) {
+        renderError(ui.container, 'Failed to load manager reports: ', e);
+      }
+    }
+
+    async function collectManagerUsers() {
+      const seen = {};
+      for (const ws of managerTargets()) {
+        const users = await apiCall('users.list', {}, ws.WorkspaceID);
+        (users || []).forEach(function(user) {
+          const id = user.UserID || user.userId;
+          if (id && !seen[id]) seen[id] = user;
+        });
+      }
+      return Object.values(seen);
+    }
+
+    async function renderManagerUsers() {
+      const ui = managerContentCard(
+        'Users',
+        'Admins request lifecycle changes; Super Admin executes them.'
+      );
+      try {
+        const newUser = document.createElement('button');
+        newUser.className = 'btn btn-sm';
+        newUser.textContent = 'Request New User';
+        newUser.style.margin = '1rem 0';
+        newUser.onclick = openManagerNewUserRequest;
+        ui.card.appendChild(newUser);
+
+        const users = await collectManagerUsers();
+        state.users = users;
+        const rows = users.map(function(user) {
+          let actions = '-';
+          if (user.Role === 'USER') {
+            actions = document.createElement('span');
+
+            const reset = document.createElement('button');
+            reset.className = 'btn btn-secondary btn-sm';
+            reset.textContent = 'Request Reset';
+            reset.onclick = function() {
+              submitManagerLifecycleRequest('PASSWORD_RESET', user.UserID);
+            };
+
+            const passive = document.createElement('button');
+            passive.className = 'btn btn-danger btn-sm';
+            passive.textContent = 'Request Passive';
+            passive.style.marginLeft = '0.4rem';
+            passive.onclick = function() {
+              submitManagerLifecycleRequest('MAKE_PASSIVE', user.UserID);
+            };
+            actions.append(reset, passive);
+          }
+          return [
+            user.DisplayName || '',
+            user.Username || '',
+            user.Email || '',
+            user.Status || '',
+            actions
+          ];
+        });
+        ui.card.appendChild(managerTable(
+          ['Name','Username','Google Email','Status','Actions'],
+          rows
+        ));
+      } catch (e) {
+        renderError(ui.container, 'Failed to load manager users: ', e);
+      }
+    }
+
+    function managerRequestWorkspaceId() {
+      return state.managerWorkspaceFilter ||
+        ((state.workspaces[0] && state.workspaces[0].WorkspaceID) || '');
+    }
+
+    async function submitManagerLifecycleRequest(requestType, targetUserId) {
+      const reason = prompt('Reason for this request:', '');
+      if (!String(reason || '').trim()) return;
+      const workspaceId = managerRequestWorkspaceId();
+      try {
+        await apiCall(
+          'requests.submit',
+          {
+            requestType: requestType,
+            workspaceId: workspaceId,
+            targetUserId: targetUserId,
+            reason: String(reason).trim()
+          },
+          workspaceId
+        );
+        alert('Request submitted.');
+      } catch (e) {
+        alert(e.message || 'Request failed.');
+      }
+    }
+
+    function openManagerNewUserRequest() {
+      const displayName = prompt('New user full name:', '');
+      if (!displayName) return;
+      const username = prompt('New user username:', '');
+      if (!username) return;
+      const email = prompt('Google Workspace email:', '');
+      if (!email) return;
+      const reason = prompt('Business reason:', 'New team member');
+      if (!reason) return;
+
+      const workspaceId = managerRequestWorkspaceId();
+      apiCall(
+        'requests.submit',
+        {
+          requestType: 'NEW_USER',
+          workspaceId: workspaceId,
+          requestedData: {
+            displayName: displayName,
+            username: username,
+            email: email,
+            role: 'USER'
+          },
+          reason: reason
+        },
+        workspaceId
+      ).then(
+        function() { alert('New-user request submitted.'); },
+        function(err) { alert(err.message || 'Request failed.'); }
+      );
+    }
+
+    async function renderManagerRequests() {
+      const ui = managerContentCard('Requests', 'Loading request queue...');
+      try {
+        const requests = await apiCall(
+          'requests.list',
+          {},
+          state.managerWorkspaceFilter
+        );
+        const rows = (requests || []).map(function(item) {
+          return [
+            item.RequestType || '',
+            item.WorkspaceID || '',
+            item.Status || '',
+            item.Reason || '',
+            String(item.RequestedAt || '').substring(0,19)
+          ];
+        });
+        ui.card.appendChild(managerTable(
+          ['Type','Workspace','Status','Reason','Requested'],
+          rows
+        ));
+      } catch (e) {
+        renderError(ui.container, 'Failed to load requests: ', e);
+      }
+    }
+
+    async function renderManagerAlerts() {
+      const ui = managerContentCard('Alerts', 'Loading anomalies...');
+      try {
+        const rows = [];
+        for (const ws of managerTargets()) {
+          const result = await apiCall(
+            'reports.exceptions',
+            {},
+            ws.WorkspaceID
+          );
+          (result.anomalies || []).forEach(function(item) {
+            rows.push([
+              ws.WorkspaceName || ws.WorkspaceID,
+              item.severity || '',
+              item.type || '',
+              item.userName || item.userId || '',
+              item.message || ''
+            ]);
+          });
+        }
+        ui.card.appendChild(managerTable(
+          ['Workspace','Severity','Type','User','Message'],
+          rows
+        ));
+      } catch (e) {
+        renderError(ui.container, 'Failed to load alerts: ', e);
       }
     }
 
