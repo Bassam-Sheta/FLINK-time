@@ -426,6 +426,45 @@ const AuthService = {
       throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'User credentials or MFA configuration not found.', 401);
     }
 
+    const normalizedClientType = String(clientType || 'WEB').toUpperCase();
+    let googleEmail = '';
+    try {
+      googleEmail = IdentityService.assertAccountIdentity(
+        account,
+        normalizedClientType
+      );
+      const challengeEmail = IdentityService.normalizeEmail(
+        lockedChallenge.googleEmail || ''
+      );
+      if (
+        (normalizedClientType === 'WEB' ||
+          normalizedClientType === 'SETUP_WIZARD') &&
+        (!challengeEmail || challengeEmail !== googleEmail)
+      ) {
+        throw new AppError(
+          ERROR_CODES.AUTH_REQUIRED,
+          'MFA challenge identity mismatch.',
+          401
+        );
+      }
+    } catch (identityErr) {
+      this._deleteMfaChallenge(userId);
+      MasterRepository.logSecurityEvent({
+        UserID: account.UserID,
+        Username: account.Username,
+        EventType: CONSTANTS.AUDIT_EVENTS.IDENTITY_MISMATCH,
+        Success: false,
+        metadata: {
+          reason: 'Google Workspace identity changed during MFA'
+        }
+      });
+      throw new AppError(
+        ERROR_CODES.AUTH_REQUIRED,
+        'Invalid authentication challenge. Please log in again.',
+        401
+      );
+    }
+
     if (
       account.Status === CONSTANTS.ACCOUNT_STATUS.LOCKED ||
       (cred.LockUntil && new Date(cred.LockUntil).getTime() > now)
@@ -446,7 +485,10 @@ const AuthService = {
     const verification = SecurityService.verifyTotpWithStep(cred.TotpSecret, code);
     if (!verification.valid) {
       const failedCount = (parseInt(cred.FailedLoginCount, 10) || 0) + 1;
-      const credUpdates = { FailedLoginCount: failedCount };
+      const credUpdates = {
+        FailedLoginCount: failedCount,
+        LastFailedAt: new Date(now).toISOString()
+      };
 
       if (failedCount >= CONSTANTS.LIMITS.MAX_FAILED_LOGIN_ATTEMPTS) {
         const lockUntil = new Date(
@@ -496,6 +538,7 @@ const AuthService = {
     // Reset failure counter on success & advance replay protection step
     MasterRepository.updateCredentials(account.UserID, {
       FailedLoginCount: 0,
+      LastFailedAt: '',
       LockUntil: '',
       LastSuccessfulTotpStep: currentStep
     });
@@ -513,17 +556,29 @@ const AuthService = {
       Username: account.Username,
       EventType: CONSTANTS.AUDIT_EVENTS.MFA_VERIFIED,
       Success: true,
-      metadata: { clientType, step: currentStep }
+      metadata: {
+        clientType: normalizedClientType,
+        step: currentStep,
+        googleIdentity: googleEmail || ''
+      }
     });
     MasterRepository.logSecurityEvent({
       UserID: account.UserID,
       Username: account.Username,
       EventType: CONSTANTS.AUDIT_EVENTS.LOGIN_SUCCESS,
       Success: true,
-      metadata: { clientType, mfa: true }
+      metadata: {
+        clientType: normalizedClientType,
+        mfa: true,
+        googleIdentity: googleEmail || ''
+      }
     });
 
-    const sessionData = SessionService.createSession(account.UserID, clientType);
+    const sessionData = SessionService.createSession(
+      account.UserID,
+      normalizedClientType,
+      googleEmail
+    );
     const accesses = MasterRepository.getWorkspaceAccessForUser(account.UserID);
     const assignedWorkspaces = accesses.map(a => a.WorkspaceID);
 
@@ -536,6 +591,7 @@ const AuthService = {
         displayName: account.DisplayName,
         role: account.Role,
         status: account.Status,
+        email: account.Email || '',
         primaryWorkspaceId: account.PrimaryWorkspaceID || assignedWorkspaces[0] || '',
         assignedWorkspaces: assignedWorkspaces,
         mustChangePassword: account.MustChangePassword === true || account.MustChangePassword === 'TRUE'
