@@ -45,6 +45,20 @@ const Validation = {
     return trimmed;
   },
 
+  validateEmail(email) {
+    if (!email || typeof email !== 'string') {
+      throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'Email is required.');
+    }
+    const normalized = email.trim().toLowerCase();
+    if (
+      normalized.length > 254 ||
+      !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized)
+    ) {
+      throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'A valid email address is required.');
+    }
+    return normalized;
+  },
+
   validatePassword(password) {
     if (!password || typeof password !== 'string') {
       throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'Password is required.');
