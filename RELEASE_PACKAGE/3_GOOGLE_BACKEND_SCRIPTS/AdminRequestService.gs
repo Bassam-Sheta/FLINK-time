@@ -60,7 +60,11 @@ const AdminRequestService = {
           400
         );
       }
-      Validation.assertRequired(requestedData, ['username', 'displayName']);
+      Validation.assertRequired(
+        requestedData,
+        ['username', 'displayName', 'email']
+      );
+      requestedData.email = Validation.validateEmail(requestedData.email);
       const requestedRole = requestedData.role || CONSTANTS.ROLES.USER;
       if (requestedRole !== CONSTANTS.ROLES.USER) {
         throw new AppError(
@@ -229,7 +233,11 @@ const AdminRequestService = {
             400
           );
         }
-        Validation.assertRequired(requestedData, ['username', 'displayName']);
+        Validation.assertRequired(
+          requestedData,
+          ['username', 'displayName', 'email']
+        );
+        requestedData.email = Validation.validateEmail(requestedData.email);
 
         executionResult = UserService.createUser(superAdminContext, {
           ...requestedData,
