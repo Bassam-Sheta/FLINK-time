@@ -27,6 +27,42 @@ test('high-risk Super Admin actions require short-lived server-bound step-up aut
   assert.match(src, /Super Admin MFA must be enabled before high-risk administrative actions/);
 });
 
+test('Super Admin-only mutations are step-up protected except bootstrap and MFA-recovery flows', () => {
+  const src = source();
+  const permissionsStart = src.indexOf('const ACTION_PERMISSIONS = {');
+  const permissionsEnd = src.indexOf('/**\n * Explicit unauthenticated boundary', permissionsStart);
+  const permissions = src.slice(permissionsStart, permissionsEnd);
+  const stepStart = src.indexOf('const PRIVILEGED_STEP_UP_ACTIONS = new Set([');
+  const stepEnd = src.indexOf(']);', stepStart);
+  const stepBlock = src.slice(stepStart, stepEnd);
+  const protectedActions = new Set(
+    [...stepBlock.matchAll(/'([^']+)'/g)].map(match => match[1])
+  );
+
+  const superAdminOnlyWrites = [];
+  for (const match of permissions.matchAll(/'([^']+)':\s*\{([^}]+)\}/g)) {
+    const [, action, body] = match;
+    if (
+      /authRequired:\s*true/.test(body) &&
+      /isWrite:\s*true/.test(body) &&
+      /roles:\s*\[CONSTANTS\.ROLES\.SUPER_ADMIN\]/.test(body)
+    ) {
+      superAdminOnlyWrites.push(action);
+    }
+  }
+
+  const explicitExemptions = new Set([
+    'auth.stepUp',
+    'auth.disableMfa',
+    'setup.completeStep',
+    'setup.finalize'
+  ]);
+  const missing = superAdminOnlyWrites.filter(
+    action => !explicitExemptions.has(action) && !protectedActions.has(action)
+  );
+  assert.deepEqual(missing, []);
+});
+
 test('all browser portals obtain and attach privileged step-up grants', () => {
   for (const file of [userPath, adminPath, superAdminPath]) {
     const html = fs.readFileSync(file, 'utf8');
