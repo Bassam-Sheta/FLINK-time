@@ -11,7 +11,7 @@
  * - WEB sessions require Session.getActiveUser().getEmail().
  * - The observed email must exactly match the FLINK account Email.
  */
-const IdentityService = {
+var IdentityService = (typeof global !== 'undefined' && global.IdentityService) || {
   normalizeEmail(value) {
     return String(value || '').trim().toLowerCase();
   },
@@ -78,7 +78,7 @@ const IdentityService = {
  * - Full compatibility with both Google Apps Script runtime and Node.js testing environments
  */
 
-const SecurityService = {
+var SecurityService = (typeof global !== 'undefined' && global.SecurityService) || {
   /**
    * Ensures a high-entropy server pepper exists in Script Properties.
    * Intended to be called only during owner-controlled installation/bootstrap.
@@ -591,7 +591,7 @@ const SecurityService = {
  * record ownership, and the hard Admin 3-workspace assignment limit.
  */
 
-const AuthorizationService = {
+var AuthorizationService = (typeof global !== 'undefined' && global.AuthorizationService) || {
   /**
    * Asserts that authenticated user possesses one of the allowed roles
    */
@@ -704,7 +704,7 @@ const AuthorizationService = {
  * and automatic revocation upon password changes or account suspension.
  */
 
-const SessionService = {
+var SessionService = (typeof global !== 'undefined' && global.SessionService) || {
   /**
    * Creates and registers a new authenticated session
    */
@@ -934,7 +934,7 @@ const SessionService = {
  * password changes, administrative resets, and session issuance.
  */
 
-const AuthService = {
+var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
   _mfaChallengeMemory: {},
 
   _mfaChallengePropertyKey(userId) {
@@ -1787,7 +1787,7 @@ const AuthService = {
  * Centralizes time-tracking policy and referential-integrity checks.
  */
 
-const TrackingPolicyService = {
+var TrackingPolicyService = (typeof global !== 'undefined' && global.TrackingPolicyService) || {
   _toBoolean(value, defaultValue = false) {
     if (value === true || value === 1 || value === 'TRUE' || value === 'true' || value === '1') return true;
     if (value === false || value === 0 || value === 'FALSE' || value === 'false' || value === '0') return false;
