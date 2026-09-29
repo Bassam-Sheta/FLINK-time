@@ -18,6 +18,11 @@ const SheetRepository = {
   _invalidateTable(workspaceId, tabName) {
     delete this._requestCache[this._cacheKey(workspaceId, tabName)];
   },
+
+  clearTableCache(workspaceId, tabName) {
+    this._invalidateTable(workspaceId, tabName);
+  },
+
   /**
    * Helper to retrieve tab data from a specific workspace sheet
    */
