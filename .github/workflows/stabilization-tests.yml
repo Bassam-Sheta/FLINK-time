@@ -1,10 +1,14 @@
-name: Stabilization Tests
+name: FLINK Time Tests
 
 on:
+  push:
+    branches:
+      - main
   pull_request:
+  workflow_dispatch:
 
 concurrency:
-  group: stabilization-${{ github.event.pull_request.number || github.ref }}
+  group: flink-time-tests-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -25,3 +29,32 @@ jobs:
 
       - name: Run regression tests
         run: npm test
+
+  human-browser-acceptance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Use Node.js 20
+        uses: actions/setup-node@v7
+        with:
+          node-version: '20'
+
+      - name: Install browser test dependency
+        run: npm install --no-audit --no-fund
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Run normal employee browser flow
+        run: npm run test:human
+
+      - name: Upload browser evidence on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: human-browser-evidence
+          path: test-results/
+          if-no-files-found: ignore
