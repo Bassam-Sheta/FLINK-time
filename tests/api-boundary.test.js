@@ -53,7 +53,7 @@ const {
 
 test('permission matrix and dispatcher action inventory stay in exact parity', () => {
   const source = fs.readFileSync(appPath, 'utf8');
-  const start = source.indexOf('function dispatchAction(');
+  const start = source.indexOf('function dispatchAction_(');
   const end = source.indexOf('\n/**\n * Builds ContentService JSON HTTP response', start);
   assert.ok(start >= 0 && end > start, 'dispatchAction source boundaries must exist');
   const dispatcherSource = source.slice(start, end);
@@ -68,6 +68,38 @@ test('permission matrix and dispatcher action inventory stay in exact parity', (
   assert.deepEqual(declaredButUnhandled, [], 'every declared action must have a dispatcher/public handler');
   assert.deepEqual(handledButUndeclared, [], 'every dispatcher case must be declared in ACTION_PERMISSIONS');
   assert.equal(new Set(caseActions).size, caseActions.length, 'dispatcher action cases must be unique');
+});
+
+test('Apps Script browser RPC surface is explicit and cannot bypass session authorization', () => {
+  const source = fs.readFileSync(appPath, 'utf8');
+  const topLevelFunctions = [...source.matchAll(/^function\s+([A-Za-z0-9_$]+)\s*\(/gm)]
+    .map(match => match[1]);
+  const browserCallable = topLevelFunctions.filter(name => !name.endsWith('_'));
+
+  assert.deepEqual(
+    browserCallable,
+    ['doGet', 'doPost', 'handleClientRequest'],
+    'only the required web entrypoints and authenticated client bridge may be browser-callable'
+  );
+
+  assert.match(source, /function dispatchAction_\(action, data\)/);
+  assert.doesNotMatch(source, /authContextOverride/);
+  assert.match(source, /const authContext = SessionService\.validateSession\(token\);/);
+
+  assert.match(source, /function initializeInstallation_\(\)/);
+  assert.equal(source.includes('function initializeInstallation()'), false);
+
+  for (const removed of [
+    'saveScreenshotToMasterVault',
+    'runMasterVaultRetention',
+    'getOrCreateMasterVault',
+    'getOrCreateSubFolder'
+  ]) {
+    assert.equal(source.includes(removed), false, removed + ' must not be present');
+  }
+
+  assert.match(source, /handler: 'scheduledHousekeeping_'/);
+  assert.match(source, /handler: 'scheduledRollups_'/);
 });
 
 test('every action has explicit security/mutation metadata', () => {

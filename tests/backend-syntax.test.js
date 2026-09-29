@@ -59,7 +59,7 @@ test('the single Code.gs backend parses and loads in an Apps Script-like global 
     "SetupService:typeof SetupService," +
     "TimezoneService:typeof TimezoneService," +
     "App:typeof App," +
-    "dispatchAction:typeof dispatchAction" +
+    "dispatchAction_:typeof dispatchAction_" +
     "})", context);
 
   const missing = Object.entries(coreTypes)

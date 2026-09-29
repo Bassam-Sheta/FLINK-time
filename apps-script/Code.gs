@@ -657,7 +657,7 @@ function doGet(e) {
   // API GET requests are read-only; privileged/admin HTML is not served from this deployment.
   // If action query parameter is passed, treat as GET API request
   if (action) {
-    return handleApiRequest(action, params, 'GET');
+    return handleApiRequest_(action, params, 'GET');
   }
 
   // Otherwise serve the Google Workspace-Native Web Application UI
@@ -706,13 +706,13 @@ function doPost(e) {
       payload = e.parameter;
     }
   } catch (err) {
-    return buildJsonResponse({
+    return buildJsonResponse_({
       ok: false,
       error: { code: ERROR_CODES.VALIDATION_ERROR, message: 'Malformed JSON payload: ' + err.message }
     });
   }
 
-  return handleApiRequest(action, payload, 'POST');
+  return handleApiRequest_(action, payload, 'POST');
 }
 
 /**
@@ -851,7 +851,7 @@ const GET_SAFE_ACTIONS = new Set([
   'setup.status'
 ]);
 
-function isHttpMethodAllowed(action, method) {
+function isHttpMethodAllowed_(action, method) {
   if (!ACTION_PERMISSIONS[action]) return false;
   const normalized = String(method || '').toUpperCase();
   if (normalized === 'POST') return true;
@@ -862,7 +862,7 @@ function isHttpMethodAllowed(action, method) {
 /**
  * Universal API Request Handler
  */
-function executeApiRequest(action, requestData, httpMethod = 'POST') {
+function executeApiRequest_(action, requestData, httpMethod = 'POST') {
   // Explicit request boundary for repository caches. Apps Script V8 isolates may
   // be reused between executions, so never allow cached Sheet rows to survive
   // from one API request into another.
@@ -885,7 +885,7 @@ function executeApiRequest(action, requestData, httpMethod = 'POST') {
     };
   }
 
-  if (!isHttpMethodAllowed(action, httpMethod)) {
+  if (!isHttpMethodAllowed_(action, httpMethod)) {
     return {
       ok: false,
       error: {
@@ -898,7 +898,7 @@ function executeApiRequest(action, requestData, httpMethod = 'POST') {
 
   // Transactional locking is owned by the service performing the mutation.
   try {
-    const result = dispatchAction(action, requestData);
+    const result = dispatchAction_(action, requestData);
     return { ok: true, data: result };
   } catch (err) {
     if (err instanceof AppError) {
@@ -915,8 +915,8 @@ function executeApiRequest(action, requestData, httpMethod = 'POST') {
   }
 }
 
-function handleApiRequest(action, requestData, httpMethod = 'POST') {
-  return buildJsonResponse(executeApiRequest(action, requestData, httpMethod));
+function handleApiRequest_(action, requestData, httpMethod = 'POST') {
+  return buildJsonResponse_(executeApiRequest_(action, requestData, httpMethod));
 }
 
 /**
@@ -924,13 +924,13 @@ function handleApiRequest(action, requestData, httpMethod = 'POST') {
  * Returns a plain serializable object rather than ContentService.TextOutput.
  */
 function handleClientRequest(action, requestData) {
-  return executeApiRequest(action, requestData, 'POST');
+  return executeApiRequest_(action, requestData, 'POST');
 }
 
 /**
  * Action Router with Centralized Default-Deny Authorization
  */
-function dispatchAction(action, data, authContextOverride = null) {
+function dispatchAction_(action, data) {
   const perm = ACTION_PERMISSIONS[action];
   if (!perm) {
     throw new AppError(ERROR_CODES.NOT_FOUND, `Unknown API action: ${action}`, 404);
@@ -960,7 +960,7 @@ function dispatchAction(action, data, authContextOverride = null) {
   }
 
   // All other actions require authenticated session
-  const authContext = authContextOverride || SessionService.validateSession(token);
+  const authContext = SessionService.validateSession(token);
 
   // Forced password change is a server-side security state, not a UI hint.
   // Temporary/reset-password sessions may only validate, change password, or logout.
@@ -1281,7 +1281,7 @@ function dispatchAction(action, data, authContextOverride = null) {
 /**
  * Builds ContentService JSON HTTP response
  */
-function buildJsonResponse(obj) {
+function buildJsonResponse_(obj) {
   const jsonString = JSON.stringify(obj);
   if (typeof ContentService !== 'undefined' && ContentService.createTextOutput) {
     return ContentService.createTextOutput(jsonString).setMimeType(ContentService.MimeType.JSON);
@@ -1293,14 +1293,14 @@ const App = {
   ACTION_PERMISSIONS,
   PUBLIC_ACTIONS,
   GET_SAFE_ACTIONS,
-  isHttpMethodAllowed,
+  isHttpMethodAllowed: isHttpMethodAllowed_,
   doGet,
   doPost,
-  handleApiRequest,
+  handleApiRequest: handleApiRequest_,
   handleClientRequest,
-  executeApiRequest,
-  dispatchAction,
-  buildJsonResponse
+  executeApiRequest: executeApiRequest_,
+  dispatchAction: dispatchAction_,
+  buildJsonResponse: buildJsonResponse_
 };
 
 /* ============================================================ */
@@ -1415,7 +1415,7 @@ var SecurityService = (typeof global !== 'undefined' && global.SecurityService) 
       if (pepper) return pepper;
       throw new AppError(
         ERROR_CODES.CRYPTO_FAILURE,
-        'Server cryptographic secret is not initialized. Run initializeInstallation() as the deployment owner.',
+        'Server cryptographic secret is not initialized. Run initializeInstallation_() as the deployment owner.',
         500
       );
     }
@@ -3295,112 +3295,7 @@ var TrackingPolicyService = (typeof global !== 'undefined' && global.TrackingPol
 /** FLINK Time — Consolidated Drive, repository, workspace routing/lifecycle, and timezone data services. */
 
 
-/* ===== DriveManager.gs ===== */
-/**
- * Ultra-Account: Super Admin Master Google Drive Vault Manager
- * ALL screenshots are stored EXCLUSIVELY in the Super Admin's Google Drive storage.
- * Employee personal Google Drive accounts are NEVER used or touched.
- * 
- * Strict Master Vault Hierarchy:
- * /UltraAccount_Master_Vault/
- *    ├── [Workspace_Name]/
- *    │     └── [User_Email]/
- *    │           └── [YYYY-MM-DD]/
- *    │                 ├── sc_20260917_120530_ent123.jpg
- *    │                 └── sc_20260917_121030_ent123.jpg
- */
-
-const MASTER_VAULT_ROOT = "UltraAccount_Master_Vault";
-
-/**
- * Stores a screenshot directly into the Super Admin's Google Drive.
- * Executed under the Super Admin's identity via Apps Script Web App (executeAs: USER_DEPLOYING).
- * 
- * @param {string} workspaceName Name of assigned workspace (e.g. "Engineering Core")
- * @param {string} userEmail Email of employee (e.g. "developer@gmail.com")
- * @param {string} dateStr Format "YYYY-MM-DD"
- * @param {string} screenshotId Unique ID (e.g. "sc_a8f9c12e")
- * @param {string} base64ImageBytes Base64 JPEG/WebP image string
- * @returns {object} file_id and view URL in Super Admin's Drive
- */
-function saveScreenshotToMasterVault(workspaceName, userEmail, dateStr, screenshotId, base64ImageBytes) {
-  try {
-    const rootFolder = getOrCreateMasterVault();
-    
-    // 1. Workspace Folder: /UltraAccount_Master_Vault/{Workspace_Name}
-    const sanitizedWs = (workspaceName || 'Default_Workspace').replace(/[^a-zA-Z0-9_ -]/g, '_');
-    const wsFolder = getOrCreateSubFolder(rootFolder, sanitizedWs);
-    
-    // 2. User Folder: /UltraAccount_Master_Vault/{Workspace_Name}/{User_Email}
-    const sanitizedUser = (userEmail || 'unassigned_user').replace(/[^a-zA-Z0-9@._-]/g, '_');
-    const userFolder = getOrCreateSubFolder(wsFolder, sanitizedUser);
-    
-    // 3. Date Folder: /UltraAccount_Master_Vault/{Workspace_Name}/{User_Email}/{YYYY-MM-DD}
-    const dateFolder = getOrCreateSubFolder(userFolder, dateStr);
-    
-    // 4. Save file into Super Admin's Drive
-    const cleanBase64 = base64ImageBytes.replace(/^data:image\/(jpeg|png|webp);base64,/, '');
-    const decodedBytes = Utilities.base64Decode(cleanBase64);
-    const blob = Utilities.newBlob(decodedBytes, 'image/jpeg', screenshotId + '.jpg');
-    
-    const file = dateFolder.createFile(blob);
-    file.setDescription('Ultra-Account monitored screenshot. Workspace: ' + workspaceName + ' | User: ' + userEmail);
-
-    return {
-      status: 'SUCCESS',
-      file_id: file.getId(),
-      file_url: file.getUrl(),
-      size_bytes: file.getSize(),
-      vault_path: MASTER_VAULT_ROOT + '/' + sanitizedWs + '/' + sanitizedUser + '/' + dateStr + '/' + screenshotId + '.jpg'
-    };
-  } catch (err) {
-    Logger.log('Failed to save to master vault: ' + err.toString());
-    throw new Error('Master Drive Vault Error: ' + err.toString());
-  }
-}
-
-function getOrCreateMasterVault() {
-  const folders = DriveApp.getFoldersByName(MASTER_VAULT_ROOT);
-  if (folders.hasNext()) return folders.next();
-  const folder = DriveApp.createFolder(MASTER_VAULT_ROOT);
-  folder.setDescription('Ultra-Account Super Admin Master Vault (All workspaces & screenshots)');
-  return folder;
-}
-
-function getOrCreateSubFolder(parent, name) {
-  const folders = parent.getFoldersByName(name);
-  if (folders.hasNext()) return folders.next();
-  return parent.createFolder(name);
-}
-
-/**
- * Scheduled cleanup trigger: moves archive folders older than retention period to Trash
- */
-function runMasterVaultRetention(retentionDays) {
-  const days = retentionDays || 90;
-  const cutoffDate = new Date();
-  cutoffDate.setDate(cutoffDate.getDate() - days);
-  const cutoffStr = Utilities.formatDate(cutoffDate, 'GMT', 'yyyy-MM-dd');
-
-  Logger.log('Running Master Vault Retention for dates prior to: ' + cutoffStr);
-  const root = getOrCreateMasterVault();
-  const wsFolders = root.getFolders();
-
-  while (wsFolders.hasNext()) {
-    const ws = wsFolders.next();
-    const userFolders = ws.getFolders();
-    while (userFolders.hasNext()) {
-      const uFolder = userFolders.next();
-      const dateFolders = uFolder.getFolders();
-      while (dateFolders.hasNext()) {
-        const dFolder = dateFolders.next();
-        if (/^\d{4}-\d{2}-\d{2}$/.test(dFolder.getName()) && dFolder.getName() < cutoffStr) {
-          dFolder.setTrashed(true);
-        }
-      }
-    }
-  }
-}
+/* Legacy screenshot-vault subsystem removed: no unauthenticated Drive RPC surface. */
 
 /* ===== MasterRepository.gs ===== */
 /**
@@ -9957,7 +9852,7 @@ var SetupService = (typeof global !== 'undefined' && global.SetupService) || {
     if (!expectedSetupKeyHash) {
       throw new AppError(
         ERROR_CODES.AUTH_REQUIRED,
-        'Installation is not initialized. Run initializeInstallation() from the Apps Script editor first.',
+        'Installation is not initialized. Run initializeInstallation_() from the Apps Script editor first.',
         401
       );
     }
@@ -11134,8 +11029,8 @@ var IntegrityService = (typeof global !== 'undefined' && global.IntegrityService
 
 var JobService = (typeof global !== 'undefined' && global.JobService) || {
   _scheduledTriggerSpecs: [
-    { handler: 'scheduledHousekeeping', hour: 1, purpose: 'Expired session cleanup' },
-    { handler: 'scheduledRollups', hour: 2, purpose: 'Rollup reconciliation' }
+    { handler: 'scheduledHousekeeping_', hour: 1, purpose: 'Expired session cleanup' },
+    { handler: 'scheduledRollups_', hour: 2, purpose: 'Rollup reconciliation' }
   ],
 
   getScheduledTriggerStatus() {
@@ -11576,11 +11471,11 @@ var JobService = (typeof global !== 'undefined' && global.JobService) || {
   }
 };
 
-function scheduledHousekeeping() {
+function scheduledHousekeeping_() {
   return JobService.dispatchHousekeeping();
 }
 
-function scheduledRollups() {
+function scheduledRollups_() {
   return JobService.dispatchRollups();
 }
 
@@ -12511,7 +12406,7 @@ var MigrationService = (typeof global !== 'undefined' && global.MigrationService
  * Run this function once from the Apps Script editor before opening the public web app.
  * The one-time setup key is written to the execution log and must be entered in Setup Step 1.
  */
-function initializeInstallation() {
+function initializeInstallation_() {
   MigrationService.bootstrapMasterSheet();
   if (typeof PropertiesService === 'undefined' || !PropertiesService.getScriptProperties) {
     throw new AppError(ERROR_CODES.INTERNAL_ERROR, 'Script Properties are unavailable in this runtime.');
@@ -12535,9 +12430,9 @@ if (typeof module !== 'undefined' && module.exports) {
     ERROR_CODES, AppError,
     CONSTANTS, MASTER_SCHEMA, WORKSPACE_SCHEMA, Validation,
     ACTION_PERMISSIONS, PUBLIC_ACTIONS, GET_SAFE_ACTIONS,
-    isHttpMethodAllowed, App, doGet, doPost,
-    handleApiRequest, handleClientRequest, executeApiRequest,
-    dispatchAction, buildJsonResponse,
+    isHttpMethodAllowed: isHttpMethodAllowed_, App, doGet, doPost,
+    handleApiRequest: handleApiRequest_, handleClientRequest, executeApiRequest: executeApiRequest_,
+    dispatchAction: dispatchAction_, buildJsonResponse: buildJsonResponse_,
     IdentityService, SecurityService, AuthorizationService,
     SessionService, AuthService, TrackingPolicyService,
     MasterRepository, SheetRepository, WorkspaceRouter,
@@ -12547,6 +12442,6 @@ if (typeof module !== 'undefined' && module.exports) {
     ApprovalService, ReportService, RollupService, DashboardService,
     UserService, AdminRequestService, SetupService, IntegrityService,
     JobService, BackupService, AuditService, NotificationService,
-    ExportService, MigrationService, initializeInstallation
+    ExportService, MigrationService, initializeInstallation: initializeInstallation_
   };
 }
