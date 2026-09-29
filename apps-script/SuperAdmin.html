@@ -529,16 +529,33 @@
           <p style="color: var(--text-secondary); font-size: 0.875rem; margin-top: 0.35rem;">Time & Workforce Platform</p>
         </div>
         <div id="loginAlert" class="hidden" style="padding: 0.75rem; border-radius: 6px; background: rgba(239, 68, 68, 0.2); color: #F87171; font-size: 0.8rem; margin-bottom: 1.25rem;"></div>
-        <form onsubmit="handleLogin(event)">
+        <form id="passwordLoginForm" onsubmit="handleLogin(event)">
           <div style="margin-bottom: 1.25rem;">
             <label for="loginUsername">Username</label>
-            <input type="text" id="loginUsername" required autocomplete="username" placeholder="e.g. admin">
+            <input type="text" id="loginUsername" required autocomplete="username" placeholder="e.g. employee">
           </div>
           <div style="margin-bottom: 1.75rem;">
             <label for="loginPassword">Password</label>
             <input type="password" id="loginPassword" required autocomplete="current-password">
           </div>
           <button type="submit" class="btn" style="width: 100%;">Sign In</button>
+        </form>
+        <form id="mfaLoginForm" class="hidden" onsubmit="handleMfaVerification(event)">
+          <div style="margin-bottom:0.75rem; font-weight:700;">Two-Factor Verification</div>
+          <div style="margin-bottom:1.25rem; color:var(--text-secondary); font-size:0.85rem;">
+            Enter the current 6-digit code from your authenticator app.
+          </div>
+          <div style="margin-bottom:1.25rem;">
+            <label for="mfaCode">Authenticator Code</label>
+            <input type="text" id="mfaCode" required inputmode="numeric"
+              autocomplete="one-time-code" maxlength="6" pattern="[0-9]{6}"
+              placeholder="123456">
+          </div>
+          <button type="submit" class="btn" style="width:100%; margin-bottom:0.65rem;">
+            Verify & Sign In
+          </button>
+          <button type="button" class="btn btn-secondary" style="width:100%;"
+            onclick="cancelMfaChallenge()">Back to Password</button>
         </form>
       </div>
     </div>
@@ -814,6 +831,7 @@
     // State Container
     const state = {
       token: sessionStorage.getItem('flink_session_token') || '',
+      pendingMfaChallengeToken: '',
       user: null,
       currentWorkspace: '',
       workspaces: [],
@@ -959,6 +977,66 @@
       document.getElementById('loginView').classList.remove('hidden');
       document.getElementById('setupWizardContainer').classList.add('hidden');
       document.getElementById('appHeader').classList.add('hidden');
+      const passwordForm = document.getElementById('passwordLoginForm');
+      const mfaForm = document.getElementById('mfaLoginForm');
+      if (passwordForm) passwordForm.classList.remove('hidden');
+      if (mfaForm) mfaForm.classList.add('hidden');
+    }
+
+    function completeBrowserLogin(res) {
+      state.pendingMfaChallengeToken = '';
+      state.token = res.sessionToken;
+      state.user = normalizeUser(res.user);
+      sessionStorage.setItem('flink_session_token', res.sessionToken);
+
+      const mfaCode = document.getElementById('mfaCode');
+      if (mfaCode) mfaCode.value = '';
+
+      if (state.user.mustChangePassword) {
+        openPasswordChangeModal();
+      } else {
+        initApp();
+      }
+    }
+
+    function showMfaChallenge(challengeToken) {
+      state.pendingMfaChallengeToken = challengeToken || '';
+      document.getElementById('passwordLoginForm').classList.add('hidden');
+      document.getElementById('mfaLoginForm').classList.remove('hidden');
+      const code = document.getElementById('mfaCode');
+      code.value = '';
+      code.focus();
+    }
+
+    function cancelMfaChallenge() {
+      state.pendingMfaChallengeToken = '';
+      document.getElementById('mfaLoginForm').classList.add('hidden');
+      document.getElementById('passwordLoginForm').classList.remove('hidden');
+      document.getElementById('loginPassword').value = '';
+      document.getElementById('loginPassword').focus();
+    }
+
+    async function handleMfaVerification(e) {
+      e.preventDefault();
+      const alertBox = document.getElementById('loginAlert');
+      alertBox.classList.add('hidden');
+      const code = String(document.getElementById('mfaCode').value || '').trim();
+
+      try {
+        const res = await apiCall('auth.verifyMfa', {
+          mfaChallengeToken: state.pendingMfaChallengeToken,
+          code,
+          clientType: 'WEB'
+        });
+        completeBrowserLogin(res);
+      } catch (err) {
+        alertBox.textContent = err && err.message
+          ? err.message
+          : 'Invalid two-factor authentication code.';
+        alertBox.classList.remove('hidden');
+        document.getElementById('mfaCode').value = '';
+        document.getElementById('mfaCode').focus();
+      }
     }
 
     async function handleLogin(e) {
@@ -971,17 +1049,10 @@
       try {
         const res = await apiCall('auth.login', { username, password, clientType: 'WEB' });
         if (res.mfaRequired) {
-          throw new Error('Two-factor verification is required before this browser session can continue.');
+          showMfaChallenge(res.mfaChallengeToken);
+          return;
         }
-        state.token = res.sessionToken;
-        state.user = normalizeUser(res.user);
-        sessionStorage.setItem('flink_session_token', res.sessionToken);
-
-        if (state.user.mustChangePassword) {
-          openPasswordChangeModal();
-        } else {
-          initApp();
-        }
+        completeBrowserLogin(res);
       } catch (err) {
         alertBox.innerText = err.message || 'Invalid username or password.';
         alertBox.classList.remove('hidden');
