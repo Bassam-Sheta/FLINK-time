@@ -180,6 +180,8 @@ var CONSTANTS = {
     MAX_FAILED_LOGIN_ATTEMPTS: 5,
     LOCKOUT_DURATION_MINUTES: 15,
     LOGIN_RETRY_DELAYS_SECONDS: [0, 2, 5, 15, 30],
+    LOGIN_CALLER_ATTEMPTS_PER_MINUTE: 30,
+    LOGIN_GLOBAL_ATTEMPTS_PER_MINUTE: 200,
     SESSION_IDLE_TIMEOUT_HOURS: 8,
     SESSION_ABSOLUTE_TIMEOUT_HOURS: 24,
     SESSION_TOUCH_INTERVAL_MINUTES: 5,
@@ -1918,12 +1920,42 @@ var SecurityService = (typeof global !== 'undefined' && global.SecurityService) 
    * Computes HMAC-SHA256 hash for audit record chained to previous hash.
    * Keyed with external server pepper (inaccessible to spreadsheet viewers).
    */
+  buildAuditPayloadV2(record, workspaceScope = '') {
+    const asStoredString = value => {
+      if (value === null || value === undefined) return '';
+      return typeof value === 'object' ? JSON.stringify(value) : String(value);
+    };
+    return {
+      version: 2,
+      auditId: asStoredString(record.AuditID),
+      timestamp: asStoredString(record.TimestampUTC),
+      actor: asStoredString(record.ActorUserID),
+      actorRole: asStoredString(record.ActorRole),
+      workspaceId: asStoredString(workspaceScope || record.WorkspaceID || ''),
+      entityType: asStoredString(record.EntityType),
+      entityId: asStoredString(record.EntityID),
+      action: asStoredString(record.Action),
+      before: asStoredString(record.BeforeJSON),
+      after: asStoredString(record.AfterJSON),
+      reason: asStoredString(record.Reason),
+      correlationId: asStoredString(record.CorrelationID),
+      clientType: asStoredString(record.ClientType || 'WEB')
+    };
+  },
+
   computeAuditHash(previousHash, recordPayload) {
     const prev = previousHash || '0000000000000000000000000000000000000000000000000000000000000000';
     const payloadStr = typeof recordPayload === 'object' ? JSON.stringify(recordPayload) : String(recordPayload);
     const auditKey = this.getPepper() + (CONSTANTS.SECURITY.AUDIT_KEY_SUFFIX || '_FLINK_AUDIT_KEY');
     const bytes = this.hmacSha256(auditKey, `${prev}|${payloadStr}`);
     return Array.from(bytes).map(b => (b < 0 ? b + 256 : b).toString(16).padStart(2, '0')).join('');
+  },
+
+  computeAuditRecordHashV2(previousHash, record, workspaceScope = '') {
+    return 'v2:' + this.computeAuditHash(
+      previousHash,
+      this.buildAuditPayloadV2(record, workspaceScope)
+    );
   },
 
   /**
@@ -2407,6 +2439,110 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
     }
   },
 
+  _withLoginStateLock(fn) {
+    if (
+      typeof LockService === 'undefined' ||
+      !LockService.getScriptLock
+    ) {
+      return fn();
+    }
+
+    const lock = LockService.getScriptLock();
+    if (!lock || typeof lock.hasLock !== 'function') {
+      // Unit-test/non-Apps-Script adapters may not implement hasLock().
+      return fn();
+    }
+    if (lock.hasLock()) return fn();
+
+    lock.waitLock(5000);
+    try {
+      return fn();
+    } finally {
+      try { lock.releaseLock(); } catch (e) {}
+    }
+  },
+
+  _enforceLoginRateLimit(googleEmail) {
+    if (
+      typeof CacheService === 'undefined' ||
+      !CacheService.getScriptCache
+    ) {
+      return;
+    }
+
+    try {
+      const cache = CacheService.getScriptCache();
+      if (!cache || !cache.get || !cache.put) return;
+
+      const minuteBucket = Math.floor(Date.now() / 60000);
+      const identityKey = SecurityService
+        .hashToken(IdentityService.normalizeEmail(googleEmail || 'unknown'))
+        .substring(0, 20);
+      const callerKey = `FLINK_LOGIN_CALLER_${identityKey}_${minuteBucket}`;
+      const globalKey = `FLINK_LOGIN_GLOBAL_${minuteBucket}`;
+
+      const updateCounters = () => {
+        const callerCount = (parseInt(cache.get(callerKey), 10) || 0) + 1;
+        const globalCount = (parseInt(cache.get(globalKey), 10) || 0) + 1;
+        cache.put(callerKey, String(callerCount), 120);
+        cache.put(globalKey, String(globalCount), 120);
+
+        if (
+          callerCount >
+            (CONSTANTS.LIMITS.LOGIN_CALLER_ATTEMPTS_PER_MINUTE || 30) ||
+          globalCount >
+            (CONSTANTS.LIMITS.LOGIN_GLOBAL_ATTEMPTS_PER_MINUTE || 200)
+        ) {
+          throw new AppError(
+            ERROR_CODES.AUTH_REQUIRED,
+            'Invalid username or password.',
+            401
+          );
+        }
+      };
+
+      // CacheService has no atomic increment. Serialize this tiny counter update
+      // when the real Apps Script Lock API is available.
+      if (typeof LockService !== 'undefined' && LockService.getScriptLock) {
+        const lock = LockService.getScriptLock();
+        if (lock && typeof lock.hasLock === 'function' && !lock.hasLock()) {
+          lock.waitLock(2000);
+          try {
+            updateCounters();
+          } finally {
+            try { lock.releaseLock(); } catch (e) {}
+          }
+          return;
+        }
+      }
+      updateCounters();
+    } catch (err) {
+      if (err instanceof AppError) throw err;
+      // Cache/rate-limit infrastructure failure must not disclose internals.
+      console.warn('Login rate-limit cache unavailable: ' + err.message);
+    }
+  },
+
+  _shouldLogRejectedLogin(keyMaterial) {
+    if (
+      typeof CacheService === 'undefined' ||
+      !CacheService.getScriptCache
+    ) {
+      return true;
+    }
+    try {
+      const cache = CacheService.getScriptCache();
+      const bucket = Math.floor(Date.now() / 60000);
+      const digest = SecurityService.hashToken(String(keyMaterial || '')).substring(0, 20);
+      const key = `FLINK_LOGIN_EVENT_${digest}_${bucket}`;
+      if (cache.get(key)) return false;
+      cache.put(key, '1', 120);
+      return true;
+    } catch (e) {
+      return true;
+    }
+  },
+
   /**
    * Authenticates user with username and password
    */
@@ -2417,7 +2553,14 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
       401
     );
 
-    if (!username || !password) {
+    if (
+      typeof username !== 'string' ||
+      typeof password !== 'string' ||
+      !username ||
+      !password ||
+      username.length > 50 ||
+      password.length > (CONSTANTS.LIMITS.MAX_PASSWORD_LENGTH || 128)
+    ) {
       throw invalidAuth();
     }
 
@@ -2437,18 +2580,21 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
     if (normalizedClientType === 'WEB' || normalizedClientType === 'SETUP_WIZARD') {
       googleEmail = IdentityService.getCurrentGoogleEmail(true);
     }
+    this._enforceLoginRateLimit(googleEmail);
 
-    const account = MasterRepository.findAccountByUsername(cleanUsername);
+    let account = MasterRepository.findAccountByUsername(cleanUsername);
     if (!account) {
-      MasterRepository.logSecurityEvent({
-        Username: cleanUsername,
-        EventType: CONSTANTS.AUDIT_EVENTS.LOGIN_FAIL,
-        Success: false,
-        metadata: {
-          reason: 'User not found',
-          googleIdentity: googleEmail || ''
-        }
-      });
+      if (this._shouldLogRejectedLogin('UNKNOWN|' + googleEmail + '|' + cleanUsername)) {
+        MasterRepository.logSecurityEvent({
+          Username: cleanUsername,
+          EventType: CONSTANTS.AUDIT_EVENTS.LOGIN_FAIL,
+          Success: false,
+          metadata: {
+            reason: 'User not found',
+            googleIdentity: googleEmail || ''
+          }
+        });
+      }
       throw invalidAuth();
     }
 
@@ -2471,7 +2617,7 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
       throw invalidAuth();
     }
 
-    const cred = MasterRepository.getCredentials(account.UserID);
+    let cred = MasterRepository.getCredentials(account.UserID);
     if (!cred) {
       MasterRepository.logSecurityEvent({
         UserID: account.UserID,
@@ -2580,20 +2726,22 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
       Number.isFinite(lastFailedMs) &&
       now < lastFailedMs + delaySeconds * 1000
     ) {
-      MasterRepository.logSecurityEvent({
-        UserID: account.UserID,
-        Username: account.Username,
-        EventType: CONSTANTS.AUDIT_EVENTS.LOGIN_THROTTLED,
-        Success: false,
-        metadata: {
-          failedAttempts: failedCount,
-          delaySeconds,
-          retryAfterMs: Math.max(
-            0,
-            lastFailedMs + delaySeconds * 1000 - now
-          )
-        }
-      });
+      if (this._shouldLogRejectedLogin('THROTTLED|' + account.UserID)) {
+        MasterRepository.logSecurityEvent({
+          UserID: account.UserID,
+          Username: account.Username,
+          EventType: CONSTANTS.AUDIT_EVENTS.LOGIN_THROTTLED,
+          Success: false,
+          metadata: {
+            failedAttempts: failedCount,
+            delaySeconds,
+            retryAfterMs: Math.max(
+              0,
+              lastFailedMs + delaySeconds * 1000 - now
+            )
+          }
+        });
+      }
       throw invalidAuth();
     }
 
@@ -2603,55 +2751,103 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
     );
 
     if (!isValid) {
-      const newFailedCount = failedCount + 1;
-      const failedAt = new Date(now).toISOString();
-      const updates = {
-        FailedLoginCount: newFailedCount,
-        LastFailedAt: failedAt
-      };
+      return this._withLoginStateLock(() => {
+        if (MasterRepository._invalidateTable) {
+          MasterRepository._invalidateTable(CONSTANTS.MASTER_TABS.CREDENTIALS);
+          MasterRepository._invalidateTable(CONSTANTS.MASTER_TABS.ACCOUNTS);
+        }
+        const latestCred = MasterRepository.getCredentials(account.UserID);
+        const latestAccount = MasterRepository.findAccountById(account.UserID);
+        if (!latestCred || !latestAccount) throw invalidAuth();
 
-      if (newFailedCount >= CONSTANTS.LIMITS.MAX_FAILED_LOGIN_ATTEMPTS) {
-        const lockUntil = new Date(
-          now +
-          CONSTANTS.LIMITS.LOCKOUT_DURATION_MINUTES * 60 * 1000
-        ).toISOString();
-        updates.LockUntil = lockUntil;
-        MasterRepository.updateAccount(account.UserID, {
-          Status: CONSTANTS.ACCOUNT_STATUS.LOCKED
-        });
+        // If credentials changed after the expensive password check, do not
+        // mutate counters based on stale authentication state.
+        if (String(latestCred.PasswordHash) !== String(cred.PasswordHash)) {
+          throw invalidAuth();
+        }
 
+        const latestLockUntilMs = latestCred.LockUntil
+          ? new Date(latestCred.LockUntil).getTime()
+          : NaN;
+        if (
+          latestAccount.Status === CONSTANTS.ACCOUNT_STATUS.LOCKED ||
+          (Number.isFinite(latestLockUntilMs) && latestLockUntilMs > Date.now())
+        ) {
+          throw invalidAuth();
+        }
+
+        const latestFailedCount =
+          parseInt(latestCred.FailedLoginCount, 10) || 0;
+        const newFailedCount = latestFailedCount + 1;
+        const failedAt = new Date().toISOString();
+        const updates = {
+          FailedLoginCount: newFailedCount,
+          LastFailedAt: failedAt
+        };
+
+        if (newFailedCount >= CONSTANTS.LIMITS.MAX_FAILED_LOGIN_ATTEMPTS) {
+          const lockUntil = new Date(
+            Date.now() +
+            CONSTANTS.LIMITS.LOCKOUT_DURATION_MINUTES * 60 * 1000
+          ).toISOString();
+          updates.LockUntil = lockUntil;
+          MasterRepository.updateAccount(account.UserID, {
+            Status: CONSTANTS.ACCOUNT_STATUS.LOCKED
+          });
+
+          MasterRepository.logSecurityEvent({
+            UserID: account.UserID,
+            Username: account.Username,
+            EventType: CONSTANTS.AUDIT_EVENTS.ACCOUNT_LOCK,
+            Success: false,
+            metadata: {
+              failedAttempts: newFailedCount,
+              lockUntil
+            }
+          });
+        }
+
+        MasterRepository.updateCredentials(account.UserID, updates);
         MasterRepository.logSecurityEvent({
           UserID: account.UserID,
           Username: account.Username,
-          EventType: CONSTANTS.AUDIT_EVENTS.ACCOUNT_LOCK,
+          EventType: CONSTANTS.AUDIT_EVENTS.LOGIN_FAIL,
           Success: false,
           metadata: {
-            failedAttempts: newFailedCount,
-            lockUntil
+            reason: 'Invalid password',
+            failedAttempts: newFailedCount
           }
         });
-      }
 
-      MasterRepository.updateCredentials(account.UserID, updates);
-      MasterRepository.logSecurityEvent({
-        UserID: account.UserID,
-        Username: account.Username,
-        EventType: CONSTANTS.AUDIT_EVENTS.LOGIN_FAIL,
-        Success: false,
-        metadata: {
-          reason: 'Invalid password',
-          failedAttempts: newFailedCount
-        }
+        throw invalidAuth();
       });
-
-      throw invalidAuth();
     }
 
-    // Password-stage failures are cleared only after a valid password.
-    MasterRepository.updateCredentials(account.UserID, {
-      FailedLoginCount: 0,
-      LastFailedAt: '',
-      LockUntil: ''
+    // Clear password-stage failures atomically, and ensure the credential that
+    // was verified has not been replaced/reset concurrently.
+    this._withLoginStateLock(() => {
+      if (MasterRepository._invalidateTable) {
+        MasterRepository._invalidateTable(CONSTANTS.MASTER_TABS.CREDENTIALS);
+        MasterRepository._invalidateTable(CONSTANTS.MASTER_TABS.ACCOUNTS);
+      }
+      const latestCred = MasterRepository.getCredentials(account.UserID);
+      const latestAccount = MasterRepository.findAccountById(account.UserID);
+      if (
+        !latestCred ||
+        !latestAccount ||
+        latestAccount.Status !== CONSTANTS.ACCOUNT_STATUS.ACTIVE ||
+        String(latestCred.PasswordHash) !== String(cred.PasswordHash)
+      ) {
+        throw invalidAuth();
+      }
+
+      MasterRepository.updateCredentials(account.UserID, {
+        FailedLoginCount: 0,
+        LastFailedAt: '',
+        LockUntil: ''
+      });
+      cred = { ...latestCred, FailedLoginCount: 0, LastFailedAt: '', LockUntil: '' };
+      account = latestAccount;
     });
 
     if (cred.MfaEnabled === true || cred.MfaEnabled === 'TRUE') {
@@ -3987,32 +4183,41 @@ var MasterRepository = (typeof global !== 'undefined' && global.MasterRepository
   },
 
   logGlobalAudit(auditData) {
+    let auditLock = null;
+    let acquiredAuditLock = false;
     try {
+      if (typeof LockService !== 'undefined' && LockService.getScriptLock) {
+        auditLock = LockService.getScriptLock();
+        if (
+          auditLock &&
+          typeof auditLock.hasLock === 'function' &&
+          !auditLock.hasLock()
+        ) {
+          auditLock.waitLock(10000);
+          acquiredAuditLock = true;
+        }
+      }
+
+      // Refresh the chain head after acquiring the lock so concurrent audit
+      // writers cannot legitimately select the same predecessor.
+      this._invalidateTable(CONSTANTS.MASTER_TABS.GLOBAL_AUDIT);
+
       const auditId = Validation.generateId('AUD');
       const timestamp = new Date().toISOString();
-      const beforeStr = typeof auditData.BeforeJSON === 'object' ? JSON.stringify(auditData.BeforeJSON) : (auditData.BeforeJSON || '');
-      const afterStr = typeof auditData.AfterJSON === 'object' ? JSON.stringify(auditData.AfterJSON) : (auditData.AfterJSON || '');
+      const beforeStr = typeof auditData.BeforeJSON === 'object'
+        ? JSON.stringify(auditData.BeforeJSON)
+        : (auditData.BeforeJSON || '');
+      const afterStr = typeof auditData.AfterJSON === 'object'
+        ? JSON.stringify(auditData.AfterJSON)
+        : (auditData.AfterJSON || '');
 
       let prevHash = '0000000000000000000000000000000000000000000000000000000000000000';
-      try {
-        const { rows } = this.getTableData(CONSTANTS.MASTER_TABS.GLOBAL_AUDIT);
-        if (rows.length > 0 && rows[rows.length - 1].RecordHash) {
-          prevHash = rows[rows.length - 1].RecordHash;
-        }
-      } catch (err) {}
+      const { rows } = this.getTableData(CONSTANTS.MASTER_TABS.GLOBAL_AUDIT);
+      if (rows.length > 0 && rows[rows.length - 1].RecordHash) {
+        prevHash = rows[rows.length - 1].RecordHash;
+      }
 
-      const recordPayload = {
-        auditId,
-        timestamp,
-        actor: auditData.ActorUserID || '',
-        action: auditData.Action,
-        entityType: auditData.EntityType,
-        entityId: auditData.EntityID,
-        after: afterStr
-      };
-      const recordHash = SecurityService.computeAuditHash(prevHash, recordPayload);
-
-      this.appendRow(CONSTANTS.MASTER_TABS.GLOBAL_AUDIT, {
+      const record = {
         AuditID: auditId,
         TimestampUTC: timestamp,
         ActorUserID: auditData.ActorUserID || '',
@@ -4027,10 +4232,23 @@ var MasterRepository = (typeof global !== 'undefined' && global.MasterRepository
         CorrelationID: auditData.CorrelationID || '',
         ClientType: auditData.ClientType || 'WEB',
         PreviousHash: prevHash,
-        RecordHash: recordHash
-      });
+        RecordHash: ''
+      };
+      record.RecordHash = SecurityService.computeAuditRecordHashV2(
+        prevHash,
+        record,
+        record.WorkspaceID
+      );
+
+      this.appendRow(CONSTANTS.MASTER_TABS.GLOBAL_AUDIT, record);
+      return true;
     } catch (e) {
       console.error('Failed to write global audit: ' + e.message);
+      return false;
+    } finally {
+      if (acquiredAuditLock && auditLock) {
+        try { auditLock.releaseLock(); } catch (releaseErr) {}
+      }
     }
   },
 
@@ -4525,32 +4743,42 @@ var SheetRepository = (typeof global !== 'undefined' && global.SheetRepository) 
   /* ------------------- WORKSPACE AUDIT ------------------- */
 
   logWorkspaceAudit(workspaceId, auditData) {
+    let auditLock = null;
+    let acquiredAuditLock = false;
     try {
+      if (typeof LockService !== 'undefined' && LockService.getScriptLock) {
+        auditLock = LockService.getScriptLock();
+        if (
+          auditLock &&
+          typeof auditLock.hasLock === 'function' &&
+          !auditLock.hasLock()
+        ) {
+          auditLock.waitLock(10000);
+          acquiredAuditLock = true;
+        }
+      }
+
+      this._invalidateTable(workspaceId, CONSTANTS.WORKSPACE_TABS.AUDIT_LOG);
+
       const auditId = Validation.generateId('WSAUD');
       const timestamp = new Date().toISOString();
-      const beforeStr = typeof auditData.BeforeJSON === 'object' ? JSON.stringify(auditData.BeforeJSON) : (auditData.BeforeJSON || '');
-      const afterStr = typeof auditData.AfterJSON === 'object' ? JSON.stringify(auditData.AfterJSON) : (auditData.AfterJSON || '');
+      const beforeStr = typeof auditData.BeforeJSON === 'object'
+        ? JSON.stringify(auditData.BeforeJSON)
+        : (auditData.BeforeJSON || '');
+      const afterStr = typeof auditData.AfterJSON === 'object'
+        ? JSON.stringify(auditData.AfterJSON)
+        : (auditData.AfterJSON || '');
 
       let prevHash = '0000000000000000000000000000000000000000000000000000000000000000';
-      try {
-        const { rows } = this.getTableData(workspaceId, CONSTANTS.WORKSPACE_TABS.AUDIT_LOG);
-        if (rows.length > 0 && rows[rows.length - 1].RecordHash) {
-          prevHash = rows[rows.length - 1].RecordHash;
-        }
-      } catch (err) {}
+      const { rows } = this.getTableData(
+        workspaceId,
+        CONSTANTS.WORKSPACE_TABS.AUDIT_LOG
+      );
+      if (rows.length > 0 && rows[rows.length - 1].RecordHash) {
+        prevHash = rows[rows.length - 1].RecordHash;
+      }
 
-      const recordPayload = {
-        auditId,
-        timestamp,
-        actor: auditData.ActorUserID || '',
-        action: auditData.Action,
-        entityType: auditData.EntityType,
-        entityId: auditData.EntityID,
-        after: afterStr
-      };
-      const recordHash = SecurityService.computeAuditHash(prevHash, recordPayload);
-
-      this.appendRow(workspaceId, CONSTANTS.WORKSPACE_TABS.AUDIT_LOG, {
+      const record = {
         AuditID: auditId,
         TimestampUTC: timestamp,
         ActorUserID: auditData.ActorUserID || '',
@@ -4563,10 +4791,23 @@ var SheetRepository = (typeof global !== 'undefined' && global.SheetRepository) 
         Reason: auditData.Reason || '',
         ClientType: auditData.ClientType || 'WEB',
         PreviousHash: prevHash,
-        RecordHash: recordHash
-      });
+        RecordHash: ''
+      };
+      record.RecordHash = SecurityService.computeAuditRecordHashV2(
+        prevHash,
+        record,
+        workspaceId
+      );
+
+      this.appendRow(workspaceId, CONSTANTS.WORKSPACE_TABS.AUDIT_LOG, record);
+      return true;
     } catch (e) {
       console.error('Failed to log workspace audit: ' + e.message);
+      return false;
+    } finally {
+      if (acquiredAuditLock && auditLock) {
+        try { auditLock.releaseLock(); } catch (releaseErr) {}
+      }
     }
   }
 };
@@ -12413,18 +12654,29 @@ var AuditService = (typeof global !== 'undefined' && global.AuditService) || {
 
     const checkpointKey = (CONSTANTS.SECURITY.CHECKPOINT_PROPERTY_PREFIX || 'FLINK_AUDIT_CHECKPOINT_') + `${scope}_${dateStr}`;
 
+    if (typeof PropertiesService === 'undefined' || !PropertiesService.getScriptProperties) {
+      throw new AppError(
+        ERROR_CODES.CRYPTO_FAILURE,
+        'Audit checkpoint storage is unavailable.',
+        500
+      );
+    }
     try {
-      if (typeof PropertiesService !== 'undefined' && PropertiesService.getScriptProperties) {
-        PropertiesService.getScriptProperties().setProperty(checkpointKey, JSON.stringify({
-          scope,
-          date: dateStr,
-          lastHash,
-          count: verification.count,
-          rootHash,
-          checkpointAt: new Date().toISOString()
-        }));
-      }
-    } catch (e) {}
+      PropertiesService.getScriptProperties().setProperty(checkpointKey, JSON.stringify({
+        scope,
+        date: dateStr,
+        lastHash,
+        count: verification.count,
+        rootHash,
+        checkpointAt: new Date().toISOString()
+      }));
+    } catch (e) {
+      throw new AppError(
+        ERROR_CODES.CRYPTO_FAILURE,
+        'Audit checkpoint could not be persisted.',
+        500
+      );
+    }
 
     return {
       ok: true,
@@ -12444,19 +12696,23 @@ var AuditService = (typeof global !== 'undefined' && global.AuditService) || {
   verifyAuditChain(workspaceId = null) {
     let rows = [];
     let scopeName = '';
+    const scope = workspaceId || 'MASTER';
     if (workspaceId) {
       scopeName = `Workspace (${workspaceId})`;
-      rows = SheetRepository.getTableData(workspaceId, CONSTANTS.WORKSPACE_TABS.AUDIT_LOG).rows || [];
+      rows = SheetRepository.getTableData(
+        workspaceId,
+        CONSTANTS.WORKSPACE_TABS.AUDIT_LOG
+      ).rows || [];
     } else {
       scopeName = 'Master GlobalAudit';
-      rows = MasterRepository.getTableData(CONSTANTS.MASTER_TABS.GLOBAL_AUDIT).rows || [];
+      rows = MasterRepository.getTableData(
+        CONSTANTS.MASTER_TABS.GLOBAL_AUDIT
+      ).rows || [];
     }
 
-    if (rows.length === 0) {
-      return { ok: true, verified: true, count: 0, scope: scopeName, message: 'Audit log is empty (Genesis state).' };
-    }
+    let previousHash =
+      '0000000000000000000000000000000000000000000000000000000000000000';
 
-    let previousHash = '0000000000000000000000000000000000000000000000000000000000000000';
     for (let i = 0; i < rows.length; i++) {
       const row = rows[i];
 
@@ -12471,7 +12727,7 @@ var AuditService = (typeof global !== 'undefined' && global.AuditService) || {
         };
       }
 
-      if (row.PreviousHash !== previousHash) {
+      if (!SecurityService.constantTimeEquals(String(row.PreviousHash), String(previousHash))) {
         return {
           ok: false,
           verified: false,
@@ -12479,62 +12735,183 @@ var AuditService = (typeof global !== 'undefined' && global.AuditService) || {
           auditId: row.AuditID,
           expectedPreviousHash: previousHash,
           actualPreviousHash: row.PreviousHash,
-          message: `Audit chain broken at record index ${i} (${row.AuditID}). Previous hash mismatch.`
+          message:
+            `Audit chain broken at record index ${i} (${row.AuditID}). Previous hash mismatch.`
         };
       }
 
-      const recordPayload = {
-        auditId: row.AuditID,
-        timestamp: row.TimestampUTC,
-        actor: row.ActorUserID || '',
-        action: row.Action,
-        entityType: row.EntityType,
-        entityId: row.EntityID,
-        after: typeof row.AfterJSON === 'object' ? JSON.stringify(row.AfterJSON) : (row.AfterJSON || '')
-      };
-      const computedHash = SecurityService.computeAuditHash(row.PreviousHash, recordPayload);
-      if (!SecurityService.constantTimeEquals(computedHash, row.RecordHash)) {
+      let expectedRecordHash = '';
+      if (String(row.RecordHash).startsWith('v2:')) {
+        if (
+          !SecurityService.buildAuditPayloadV2 ||
+          !SecurityService.computeAuditRecordHashV2
+        ) {
+          return {
+            ok: false,
+            verified: false,
+            brokenAtIndex: i,
+            auditId: row.AuditID,
+            message: 'Audit v2 verification support is unavailable.'
+          };
+        }
+        expectedRecordHash = SecurityService.computeAuditRecordHashV2(
+          row.PreviousHash,
+          row,
+          workspaceId || row.WorkspaceID || ''
+        );
+      } else {
+        // Backward-compatible verification for records created before audit v2.
+        const legacyPayload = {
+          auditId: row.AuditID,
+          timestamp: row.TimestampUTC,
+          actor: row.ActorUserID || '',
+          action: row.Action,
+          entityType: row.EntityType,
+          entityId: row.EntityID,
+          after: typeof row.AfterJSON === 'object'
+            ? JSON.stringify(row.AfterJSON)
+            : (row.AfterJSON || '')
+        };
+        expectedRecordHash = SecurityService.computeAuditHash(
+          row.PreviousHash,
+          legacyPayload
+        );
+      }
+
+      if (!SecurityService.constantTimeEquals(expectedRecordHash, row.RecordHash)) {
         return {
           ok: false,
           verified: false,
           brokenAtIndex: i,
           auditId: row.AuditID,
-          message: `Tamper detected: Record HMAC mismatch at record index ${i} (${row.AuditID}).`
+          message:
+            `Tamper detected: Record HMAC mismatch at record index ${i} (${row.AuditID}).`
         };
       }
       previousHash = row.RecordHash;
     }
 
-    // Check against external checkpoints if available
     let checkpointVerified = false;
-    let checkpointInfo = null;
-    try {
-      if (typeof PropertiesService !== 'undefined' && PropertiesService.getScriptProperties) {
+    const checkpointInfo = [];
+    if (
+      typeof PropertiesService !== 'undefined' &&
+      PropertiesService.getScriptProperties
+    ) {
+      try {
         const props = PropertiesService.getScriptProperties();
-        const scope = workspaceId || 'MASTER';
-        const dateStr = new Date().toISOString().split('T')[0];
-        const checkpointKey = (CONSTANTS.SECURITY.CHECKPOINT_PROPERTY_PREFIX || 'FLINK_AUDIT_CHECKPOINT_') + `${scope}_${dateStr}`;
-        const raw = props.getProperty(checkpointKey);
-        if (raw) {
-          const cp = JSON.parse(raw);
-          const expectedRoot = SecurityService.computeAuditCheckpoint(cp.scope, cp.date, cp.lastHash, cp.count);
-          if (SecurityService.constantTimeEquals(expectedRoot, cp.rootHash)) {
-            checkpointVerified = true;
-            checkpointInfo = cp;
-          }
+        const prefix =
+          (CONSTANTS.SECURITY.CHECKPOINT_PROPERTY_PREFIX ||
+            'FLINK_AUDIT_CHECKPOINT_') +
+          scope +
+          '_';
+        let stored = {};
+
+        if (props.getProperties) {
+          stored = props.getProperties() || {};
+        } else if (props.getProperty) {
+          const today = new Date().toISOString().split('T')[0];
+          const key = prefix + today;
+          const raw = props.getProperty(key);
+          if (raw) stored[key] = raw;
         }
+
+        const checkpointEntries = Object.entries(stored)
+          .filter(([key]) => key.startsWith(prefix))
+          .sort(([a], [b]) => a.localeCompare(b));
+
+        for (const [key, raw] of checkpointEntries) {
+          let cp;
+          try {
+            cp = JSON.parse(raw);
+          } catch (parseErr) {
+            return {
+              ok: false,
+              verified: false,
+              scope: scopeName,
+              message: `Audit checkpoint ${key} is malformed.`
+            };
+          }
+
+          const count = Number(cp.count);
+          if (
+            cp.scope !== scope ||
+            !Number.isInteger(count) ||
+            count < 0 ||
+            !cp.date ||
+            !cp.lastHash ||
+            !cp.rootHash
+          ) {
+            return {
+              ok: false,
+              verified: false,
+              scope: scopeName,
+              message: `Audit checkpoint ${key} is incomplete or has an invalid scope/count.`
+            };
+          }
+
+          const expectedRoot = SecurityService.computeAuditCheckpoint(
+            cp.scope,
+            cp.date,
+            cp.lastHash,
+            count
+          );
+          if (!SecurityService.constantTimeEquals(expectedRoot, cp.rootHash)) {
+            return {
+              ok: false,
+              verified: false,
+              scope: scopeName,
+              message: `Audit checkpoint ${key} failed integrity verification.`
+            };
+          }
+
+          if (count > rows.length) {
+            return {
+              ok: false,
+              verified: false,
+              scope: scopeName,
+              count: rows.length,
+              checkpointCount: count,
+              message:
+                `Audit truncation detected: checkpoint ${key} proves at least ${count} records existed, but only ${rows.length} remain.`
+            };
+          }
+
+          const chainHashAtCheckpoint =
+            count === 0 ? 'GENESIS' : String(rows[count - 1].RecordHash || '');
+          if (!SecurityService.constantTimeEquals(chainHashAtCheckpoint, String(cp.lastHash))) {
+            return {
+              ok: false,
+              verified: false,
+              scope: scopeName,
+              message:
+                `Audit checkpoint ${key} does not match the recorded chain prefix.`
+            };
+          }
+
+          checkpointVerified = true;
+          checkpointInfo.push(cp);
+        }
+      } catch (checkpointErr) {
+        return {
+          ok: false,
+          verified: false,
+          scope: scopeName,
+          message: 'Audit checkpoint verification could not be completed.'
+        };
       }
-    } catch (e) {}
+    }
 
     return {
       ok: true,
       verified: true,
       count: rows.length,
-      lastRecordHash: previousHash,
+      lastRecordHash: rows.length > 0 ? previousHash : '',
       scope: scopeName,
       checkpointVerified,
       checkpointInfo,
-      message: `Audit chain verified successfully across all ${rows.length} records using HMAC-SHA256.`
+      message: rows.length > 0
+        ? `Audit chain verified successfully across all ${rows.length} records.`
+        : 'Audit log is empty and no durable checkpoint contradicts Genesis state.'
     };
   }
 };
