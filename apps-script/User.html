@@ -1271,10 +1271,18 @@
       }
     }
 
-    function logout() {
-      apiCall('auth.logout').catch(() => {});
-      sessionStorage.removeItem('flink_session_token');
-      location.reload();
+    async function logout() {
+      try {
+        await apiCall('auth.logout');
+      } catch (e) {
+        // Local sign-out must still complete even if the server is temporarily
+        // unreachable; server-side absolute/idle expiry remains the fallback.
+      } finally {
+        sessionStorage.removeItem('flink_session_token');
+        state.token = '';
+        state.user = null;
+        location.reload();
+      }
     }
 
     /* ------------------- TIMER LOGIC ------------------- */
