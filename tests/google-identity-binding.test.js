@@ -206,3 +206,85 @@ test('legacy WEB session without bound ClientLabel fails closed', () => {
   );
   assert.equal(writes.at(-1).Revoked, true);
 });
+
+test('IdentityService rejects unsupported caller-supplied authentication channels', () => {
+  global.AppError = AppError;
+  global.ERROR_CODES = { AUTH_REQUIRED:'AUTH_REQUIRED' };
+  global.Session = {
+    getActiveUser() {
+      return { getEmail() { return 'worker@example.com'; } };
+    }
+  };
+  delete require.cache[require.resolve(identityPath)];
+  const { IdentityService } = require(identityPath);
+
+  assert.throws(
+    () => IdentityService.assertAccountIdentity(
+      { Email:'worker@example.com' },
+      'DESKTOP'
+    ),
+    err => err instanceof AppError &&
+      err.code === 'AUTH_REQUIRED'
+  );
+  assert.throws(
+    () => IdentityService.assertAccountIdentity(
+      { Email:'worker@example.com' },
+      'anything'
+    ),
+    err => err instanceof AppError &&
+      err.code === 'AUTH_REQUIRED'
+  );
+});
+
+test('legacy session with unsupported client type is revoked', () => {
+  const writes = [];
+  const now = Date.now();
+  const session = {
+    SessionID:'S-OLD',
+    UserID:'U1',
+    ClientType:'DESKTOP',
+    ClientLabel:'',
+    CreatedAt:new Date(now-60000).toISOString(),
+    LastSeenAt:new Date(now-1000).toISOString(),
+    ExpiresAt:new Date(now+3600000).toISOString(),
+    AbsoluteExpiresAt:new Date(now+7200000).toISOString()
+  };
+
+  global.AppError = AppError;
+  global.ERROR_CODES = {
+    AUTH_REQUIRED:'AUTH_REQUIRED',
+    SESSION_EXPIRED:'SESSION_EXPIRED',
+    ACCOUNT_LOCKED:'ACCOUNT_LOCKED',
+    ACCOUNT_PASSIVE:'ACCOUNT_PASSIVE'
+  };
+  global.CONSTANTS = {
+    LIMITS:{
+      SESSION_IDLE_TIMEOUT_HOURS:8,
+      SESSION_ABSOLUTE_TIMEOUT_HOURS:24,
+      SESSION_TOUCH_INTERVAL_MINUTES:5
+    },
+    ACCOUNT_STATUS:{ ACTIVE:'ACTIVE', LOCKED:'LOCKED' }
+  };
+  global.SecurityService = { hashToken() { return 'HASH'; } };
+  global.Validation = { generateId() { return 'S1'; } };
+  global.MasterRepository = {
+    findSessionByTokenHash() { return session; },
+    findAccountById() {
+      return {
+        UserID:'U1', Username:'worker',
+        Email:'worker@example.com',
+        Role:'USER', Status:'ACTIVE'
+      };
+    },
+    updateSession(_id,patch) { writes.push({ ...patch }); }
+  };
+  delete require.cache[require.resolve(sessionPath)];
+  const { SessionService } = require(sessionPath);
+
+  assert.throws(
+    () => SessionService.validateSession('TOKEN'),
+    err => err instanceof AppError && err.code === 'AUTH_REQUIRED'
+  );
+  assert.equal(writes.at(-1).Revoked, true);
+  assert.equal(writes.at(-1).RevokeReason, 'UNSUPPORTED_CLIENT_TYPE');
+});
