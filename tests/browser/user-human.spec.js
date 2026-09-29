@@ -58,12 +58,7 @@ test('returning employee completes a real browser workday flow', async ({ page }
   await page.getByRole('button', { name: 'Account' }).click();
   await expect(page.locator('#accountDetails')).toContainText('employee@example.test');
 
-  await page.locator('#accountView').getByRole('button', { name: 'Sign Out' }).click();
-  await expect.poll(async () =>
-    page.evaluate(() => window.__mockState.loggedOut)
-  ).toBe(true);
-
-  const called = await page.evaluate(() =>
+  const calledBeforeLogout = await page.evaluate(() =>
     window.__mockState.calls.map(call => call.action)
   );
 
@@ -73,11 +68,17 @@ test('returning employee completes a real browser workday flow', async ({ page }
     'timer.stop',
     'entries.list',
     'reports.summary',
-    'reports.detailed',
-    'auth.logout'
+    'reports.detailed'
   ]) {
-    expect(called).toContain(action);
+    expect(calledBeforeLogout).toContain(action);
   }
+
+  await page.locator('#accountView').getByRole('button', { name: 'Sign Out' }).click();
+  await expect(page.locator('#loginView')).toBeVisible();
+  const sessionAfterLogout = await page.evaluate(() =>
+    sessionStorage.getItem('flink_session_token')
+  );
+  expect(sessionAfterLogout).toBeNull();
 
   expect(dialogs.some(message =>
     /Timesheet submitted successfully/i.test(message)
