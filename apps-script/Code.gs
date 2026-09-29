@@ -943,6 +943,7 @@ const PRIVILEGED_STEP_UP_ACTIONS = new Set([
   'users.resetPassword',
   'users.unlock',
   'users.forceLogout',
+  'users.assignWorkspace',
   'requests.review',
   'system.repair',
   'settings.save',
@@ -3492,6 +3493,10 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
       );
     }
 
+    // Invalidate the previous session's privileged grant before revocation.
+    // Even if the old session row cannot be updated immediately, it must not
+    // retain high-risk authorization after the rotation.
+    this._deleteStepUp(authContext.session.SessionID);
     SessionService.revokeSession(rawSessionToken);
     MasterRepository.logSecurityEvent({
       UserID: authContext.userId,
