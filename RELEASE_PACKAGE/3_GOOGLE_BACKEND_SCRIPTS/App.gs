@@ -110,6 +110,7 @@ const ACTION_PERMISSIONS = {
 
   // Timesheet & Approvals
   'timesheet.getWeekly': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN, CONSTANTS.ROLES.ADMIN, CONSTANTS.ROLES.USER], requiresWorkspace: true, isWrite: false },
+  'timesheet.listForReview': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN, CONSTANTS.ROLES.ADMIN], requiresWorkspace: true, isWrite: false },
   'timesheet.submit': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN, CONSTANTS.ROLES.ADMIN, CONSTANTS.ROLES.USER], requiresWorkspace: true, isWrite: true },
   'timesheet.approve': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN, CONSTANTS.ROLES.ADMIN], requiresWorkspace: true, isWrite: true },
   'timesheet.reject': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN, CONSTANTS.ROLES.ADMIN], requiresWorkspace: true, isWrite: true },
@@ -437,6 +438,13 @@ function dispatchAction(action, data, authContextOverride = null) {
     /* ---------------- TIMESHEET & APPROVALS ---------------- */
     case 'timesheet.getWeekly':
       return TimesheetService.getWeeklyTimesheet(authContext, wsId, payload.targetUserId, payload.weekStartDate);
+
+    case 'timesheet.listForReview':
+      return TimesheetService.listTimesheetsForManager(
+        authContext,
+        wsId,
+        payload.statusFilter
+      );
 
     case 'timesheet.submit':
       return TimesheetService.submitTimesheet(authContext, wsId, payload);
