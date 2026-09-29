@@ -11388,6 +11388,11 @@ var SetupService = (typeof global !== 'undefined' && global.SetupService) || {
       }
     }
 
+    // Existing production installations may predate newly required scheduled
+    // handlers. Self-heal reconciles them so upgrades do not require reopening
+    // the bootstrap-only setup wizard.
+    const triggerStatus = JobService.ensureScheduledTriggers();
+
     MasterRepository.logGlobalAudit({
       ActorUserID: authContext ? authContext.userId : 'SYSTEM',
       ActorRole: authContext ? authContext.role : 'SUPER_ADMIN',
@@ -11395,14 +11400,15 @@ var SetupService = (typeof global !== 'undefined' && global.SetupService) || {
       EntityType: 'SYSTEM',
       EntityID: 'SELF_HEAL',
       Action: 'SYSTEM_REPAIRED',
-      Reason: `Self-healing repaired ${repairedTabs.length} tabs and rebuilt rollups for ${rollupsRebuilt.length} workspaces.`
+      Reason: `Self-healing repaired ${repairedTabs.length} tabs, rebuilt rollups for ${rollupsRebuilt.length} workspaces, and reconciled scheduled security jobs.`
     });
 
     return {
       ok: true,
       repairedTabs,
       rollupsRebuilt,
-      message: `Self-healing completed: ${repairedTabs.length} schema corrections applied, rollups synchronized across ${rollupsRebuilt.length} workspaces.`
+      triggerStatus,
+      message: `Self-healing completed: ${repairedTabs.length} schema corrections applied, rollups synchronized across ${rollupsRebuilt.length} workspaces, and required scheduled jobs reconciled.`
     };
   },
 
@@ -12007,6 +12013,17 @@ var JobService = (typeof global !== 'undefined' && global.JobService) || {
       );
     }
 
+    const projectTriggers = ScriptApp.getProjectTriggers();
+    const legacyHandlers = new Set(['scheduledHousekeeping', 'scheduledRollups']);
+    const removedLegacy = [];
+    for (const trigger of projectTriggers) {
+      const handler = trigger.getHandlerFunction ? trigger.getHandlerFunction() : '';
+      if (legacyHandlers.has(handler) && ScriptApp.deleteTrigger) {
+        ScriptApp.deleteTrigger(trigger);
+        removedLegacy.push(handler);
+      }
+    }
+
     const existing = new Set(
       ScriptApp.getProjectTriggers()
         .map(trigger => trigger.getHandlerFunction ? trigger.getHandlerFunction() : '')
@@ -12029,6 +12046,7 @@ var JobService = (typeof global !== 'undefined' && global.JobService) || {
     return {
       ok: status.healthy,
       created,
+      removedLegacy,
       ...status
     };
   },
