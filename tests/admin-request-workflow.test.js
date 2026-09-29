@@ -63,6 +63,7 @@ function installBase(overrides = {}) {
     },
     sanitizeCellValue(v) { return String(v); },
     sanitizeRow(v) { return { ...v }; },
+    validateEmail(v) { return String(v).toLowerCase(); },
     generateId() { return 'REQ-1'; }
   };
   global.SecurityService = {
@@ -176,7 +177,8 @@ test('approval claims request before nested execution and completes exactly once
     TargetUserID:'',
     RequestedDataJSON:JSON.stringify({
       username:'worker',
-      displayName:'Worker'
+      displayName:'Worker',
+      email:'worker@example.com'
     }),
     Reason:'new hire',
     Status:'PENDING'
@@ -266,7 +268,8 @@ test('failed execution releases claim back to PENDING for controlled retry', () 
     WorkspaceID:'W1',
     RequestedDataJSON:JSON.stringify({
       username:'worker',
-      displayName:'Worker'
+      displayName:'Worker',
+      email:'worker@example.com'
     }),
     Status:'PENDING'
   };
@@ -311,7 +314,8 @@ test('request from inactive originating workspace cannot execute', () => {
     WorkspaceID:'W1',
     RequestedDataJSON:JSON.stringify({
       username:'worker',
-      displayName:'Worker'
+      displayName:'Worker',
+      email:'worker@example.com'
     }),
     Status:'PENDING'
   };
