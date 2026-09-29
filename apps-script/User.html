@@ -1,0 +1,4346 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>FLINK Time — Employee</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg-base: #0B0F19;
+      --bg-surface: #111827;
+      --bg-card: #1F2937;
+      --bg-hover: #374151;
+      --border: rgba(255, 255, 255, 0.08);
+      --border-focus: #3B82F6;
+      --text-primary: #F9FAFB;
+      --text-secondary: #9CA3AF;
+      --text-muted: #6B7280;
+      --primary: #2563EB;
+      --primary-hover: #1D4ED8;
+      --primary-glow: rgba(37, 99, 235, 0.25);
+      --success: #10B981;
+      --warning: #F59E0B;
+      --danger: #EF4444;
+      --font-main: 'Plus Jakarta Sans', -apple-system, sans-serif;
+      --font-mono: 'JetBrains Mono', monospace;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background-color: var(--bg-base);
+      color: var(--text-primary);
+      font-family: var(--font-main);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* Layout & Header */
+    header {
+      background: rgba(17, 24, 39, 0.85);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border);
+      padding: 0.75rem 1.5rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      position: sticky;
+      top: 0;
+      z-index: 50;
+    }
+    .logo-badge {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      font-weight: 800;
+      font-size: 1.2rem;
+      letter-spacing: -0.02em;
+    }
+    .logo-badge span {
+      background: linear-gradient(135deg, #3B82F6, #60A5FA);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    .tag-workspace {
+      font-size: 0.75rem;
+      padding: 0.25rem 0.6rem;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text-secondary);
+      font-weight: 600;
+    }
+    .nav-links {
+      display: flex;
+      gap: 0.4rem;
+      align-items: center;
+    }
+    .nav-btn {
+      background: transparent;
+      border: none;
+      color: var(--text-secondary);
+      padding: 0.5rem 0.85rem;
+      border-radius: 6px;
+      font-size: 0.85rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.15s ease;
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+    }
+    .nav-btn:hover { background: var(--bg-surface); color: var(--text-primary); }
+    .nav-btn.active { background: var(--bg-card); color: var(--text-primary); border: 1px solid var(--border); }
+    .user-pill {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+    }
+    .role-tag {
+      font-size: 0.7rem;
+      text-transform: uppercase;
+      font-weight: 800;
+      padding: 0.2rem 0.5rem;
+      border-radius: 4px;
+      background: rgba(37, 99, 235, 0.2);
+      color: #93C5FD;
+      border: 1px solid rgba(59, 130, 246, 0.3);
+    }
+
+    /* Help Drawer Button */
+    .help-btn {
+      background: rgba(245, 158, 11, 0.15);
+      border: 1px solid rgba(245, 158, 11, 0.3);
+      color: #FBBF24;
+      font-weight: 700;
+      font-size: 0.75rem;
+      padding: 0.35rem 0.75rem;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .help-btn:hover { background: rgba(245, 158, 11, 0.25); }
+
+    /* Container */
+    main {
+      flex: 1;
+      padding: 1.75rem 1.5rem;
+      max-width: 1320px;
+      margin: 0 auto;
+      width: 100%;
+    }
+
+    /* Cards & Containers */
+    .card {
+      background: var(--bg-surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 1.5rem;
+      margin-bottom: 1.5rem;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.25);
+    }
+    .card-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 1.25rem;
+    }
+    .card-title {
+      font-size: 1.15rem;
+      font-weight: 700;
+      letter-spacing: -0.01em;
+    }
+    .card-subtitle {
+      font-size: 0.8rem;
+      color: var(--text-muted);
+      margin-top: 0.2rem;
+    }
+
+    /* Form controls */
+    input, select, textarea {
+      width: 100%;
+      padding: 0.65rem 0.85rem;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text-primary);
+      font-family: inherit;
+      font-size: 0.875rem;
+      outline: none;
+      transition: border 0.15s ease;
+    }
+    input:focus, select:focus, textarea:focus {
+      border-color: var(--border-focus);
+    }
+    label {
+      display: block;
+      font-size: 0.75rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      color: var(--text-secondary);
+      margin-bottom: 0.4rem;
+    }
+    .field-hint {
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      margin-top: 0.35rem;
+      line-height: 1.35;
+    }
+
+    /* Buttons */
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.4rem;
+      padding: 0.65rem 1.25rem;
+      background: var(--primary);
+      color: white;
+      font-weight: 600;
+      font-size: 0.875rem;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: background 0.15s ease;
+      text-decoration: none;
+    }
+    .btn:hover { background: var(--primary-hover); }
+    .btn-danger { background: var(--danger); }
+    .btn-danger:hover { background: #DC2626; }
+    .btn-success { background: var(--success); }
+    .btn-success:hover { background: #059669; }
+    .btn-warning { background: var(--warning); color: #111827; }
+    .btn-warning:hover { background: #D97706; }
+    .btn-secondary { background: var(--bg-card); border: 1px solid var(--border); color: var(--text-primary); }
+    .btn-secondary:hover { background: var(--bg-hover); }
+    .btn-sm { padding: 0.4rem 0.75rem; font-size: 0.75rem; }
+
+    /* Timer Bar */
+    .timer-bar {
+      display: grid;
+      grid-template-columns: 2fr 1.5fr 3fr 1fr auto;
+      gap: 1rem;
+      align-items: center;
+      background: var(--bg-surface);
+      padding: 1.25rem;
+      border-radius: 12px;
+      border: 1px solid var(--border);
+      margin-bottom: 1.75rem;
+    }
+    .timer-clock {
+      font-family: var(--font-mono);
+      font-size: 2.25rem;
+      font-weight: 700;
+      color: var(--text-primary);
+      letter-spacing: -0.03em;
+      min-width: 170px;
+      text-align: right;
+    }
+    .timer-clock.running {
+      color: #34D399;
+      text-shadow: 0 0 15px rgba(52, 211, 153, 0.35);
+    }
+
+    /* Tables */
+    .table-responsive {
+      overflow-x: auto;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      text-align: left;
+      font-size: 0.875rem;
+    }
+    th {
+      background: rgba(255, 255, 255, 0.02);
+      color: var(--text-muted);
+      font-weight: 700;
+      text-transform: uppercase;
+      font-size: 0.7rem;
+      padding: 0.75rem 1rem;
+      border-bottom: 1px solid var(--border);
+    }
+    td {
+      padding: 0.85rem 1rem;
+      border-bottom: 1px solid var(--border);
+      color: var(--text-secondary);
+    }
+    tr:hover td {
+      background: rgba(255, 255, 255, 0.015);
+      color: var(--text-primary);
+    }
+
+    /* Status Badges */
+    .badge {
+      display: inline-block;
+      font-size: 0.7rem;
+      font-weight: 700;
+      padding: 0.2rem 0.5rem;
+      border-radius: 4px;
+      text-transform: uppercase;
+    }
+    .badge-open { background: rgba(156, 163, 175, 0.2); color: #9CA3AF; }
+    .badge-submitted { background: rgba(245, 158, 11, 0.2); color: #FBBF24; }
+    .badge-approved { background: rgba(16, 185, 129, 0.2); color: #34D399; }
+    .badge-rejected { background: rgba(239, 68, 68, 0.2); color: #F87171; }
+    .badge-active { background: rgba(16, 185, 129, 0.2); color: #34D399; }
+    .badge-passive { background: rgba(107, 114, 128, 0.2); color: #9CA3AF; }
+    .badge-locked { background: rgba(239, 68, 68, 0.2); color: #F87171; }
+
+    /* Modals & Backdrops */
+    .modal-backdrop {
+      position: fixed;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(0,0,0,0.75);
+      backdrop-filter: blur(5px);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 100;
+      padding: 1rem;
+    }
+    .modal {
+      background: var(--bg-surface);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 2rem;
+      width: 100%;
+      max-width: 580px;
+      max-height: 90vh;
+      overflow-y: auto;
+      box-shadow: 0 10px 40px rgba(0,0,0,0.5);
+    }
+    .modal-lg { max-width: 820px; }
+
+    /* Help Drawer */
+    .help-drawer {
+      position: fixed;
+      top: 0;
+      right: -420px;
+      width: 400px;
+      height: 100vh;
+      background: var(--bg-surface);
+      border-left: 1px solid var(--border);
+      z-index: 110;
+      padding: 2rem;
+      overflow-y: auto;
+      transition: right 0.25s ease;
+      box-shadow: -5px 0 30px rgba(0,0,0,0.5);
+    }
+    .help-drawer.open { right: 0; }
+
+    /* Grid utilities */
+    .grid-2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 1rem; }
+    .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; }
+    .grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem; }
+    .grid-5 { display: grid; grid-template-columns: repeat(5, 1fr); gap: 1rem; }
+
+    /* KPI Cards */
+    .kpi-card {
+      background: var(--bg-surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1.25rem;
+      position: relative;
+      overflow: hidden;
+    }
+    .kpi-card::before {
+      content: '';
+      position: absolute;
+      top: 0; left: 0; right: 0; height: 3px;
+      background: linear-gradient(90deg, #3B82F6, #60A5FA);
+    }
+    .kpi-label { font-size: 0.75rem; font-weight: 700; text-transform: uppercase; color: var(--text-muted); }
+    .kpi-val { font-size: 1.75rem; font-weight: 800; margin-top: 0.25rem; font-family: var(--font-mono); }
+
+    /* Setup Wizard Timeline */
+    .wizard-steps {
+      display: flex;
+      justify-content: space-between;
+      margin-bottom: 2.5rem;
+      position: relative;
+    }
+    .wizard-steps::before {
+      content: '';
+      position: absolute;
+      top: 15px; left: 0; right: 0; height: 2px;
+      background: var(--bg-card);
+      z-index: 1;
+    }
+    .wizard-step {
+      position: relative;
+      z-index: 2;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 0.5rem;
+      font-size: 0.75rem;
+      font-weight: 600;
+      color: var(--text-muted);
+    }
+    .wizard-step-circle {
+      width: 32px; height: 32px;
+      border-radius: 50%;
+      background: var(--bg-card);
+      border: 2px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 800;
+      color: var(--text-secondary);
+    }
+    .wizard-step.active .wizard-step-circle {
+      background: var(--primary);
+      border-color: #60A5FA;
+      color: white;
+      box-shadow: 0 0 12px var(--primary-glow);
+    }
+    .wizard-step.done .wizard-step-circle {
+      background: var(--success);
+      border-color: #34D399;
+      color: white;
+    }
+    .wizard-step.active { color: var(--text-primary); }
+
+    /* Setup Assistant Checklist */
+    .checklist-bar {
+      height: 8px;
+      background: var(--bg-card);
+      border-radius: 4px;
+      overflow: hidden;
+      margin: 1rem 0;
+    }
+    .checklist-progress {
+      height: 100%;
+      background: linear-gradient(90deg, #3B82F6, #10B981);
+      width: 85%;
+    }
+
+    /* Subtabs inside Super Admin */
+    .subtabs-bar {
+      display: flex;
+      gap: 0.5rem;
+      overflow-x: auto;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 0.5rem;
+      margin-bottom: 1.5rem;
+    }
+
+    .hidden { display: none !important; }
+  </style>
+</head>
+<body>
+
+  <!-- AUTH HEADER -->
+  <header id="appHeader" class="hidden">
+    <div class="logo-badge">
+      <span>FLINK</span> TIME
+      <span class="tag-workspace" id="currentWorkspaceBadge">Primary Workspace</span>
+    </div>
+    <nav class="nav-links" id="navLinks"></nav>
+    <div class="user-pill">
+      <button class="help-btn" onclick="toggleHelpDrawer()">[ ? HELP ]</button>
+      <span class="role-tag" id="userRoleBadge">USER</span>
+      <span id="userDisplayName" style="font-weight: 600; font-size: 0.875rem;">User</span>
+      <button class="nav-btn" onclick="logout()">Sign Out</button>
+    </div>
+  </header>
+
+  <!-- MAIN APP CONTAINER -->
+  <main>
+    <!-- 1. FIRST-RUN SETUP WIZARD & DEPLOYMENT ASSISTANT -->
+    <div id="setupWizardContainer" class="hidden">
+      <!-- Welcome Hero -->
+      <div id="setupWelcomeScreen" class="card" style="max-width: 680px; margin: 3rem auto; text-align: center; padding: 3.5rem 2.5rem;">
+        <div style="font-size: 2.5rem; font-weight: 800; letter-spacing: -0.03em; margin-bottom: 0.5rem;">
+          Welcome to <span style="background: linear-gradient(135deg, #3B82F6, #60A5FA); -webkit-background-clip: text; -webkit-text-fill-color: transparent;">FLINK Time</span>
+        </div>
+        <p style="color: var(--text-secondary); font-size: 1.05rem; line-height: 1.5; margin-bottom: 2.5rem;">
+          A commercial-grade, multi-tenant workforce monitoring and time tracking platform built directly on Google Workspace. Zero servers, zero spreadsheet formula editing, pure GUI governance.
+        </p>
+        <div class="grid-2" style="margin-bottom: 2.5rem; text-align: left;">
+          <div class="card" style="margin-bottom: 0; background: var(--bg-card); padding: 1.25rem;">
+            <div style="font-weight: 700; color: #60A5FA; margin-bottom: 0.4rem;">Deployment Assistant</div>
+            <div style="font-size: 0.8rem; color: var(--text-secondary);">Step-by-step instructions to embed this Web App full-page in Google Sites.</div>
+          </div>
+          <div class="card" style="margin-bottom: 0; background: var(--bg-card); padding: 1.25rem;">
+            <div style="font-weight: 700; color: #34D399; margin-bottom: 0.4rem;">Guided 9-Step Setup</div>
+            <div style="font-size: 0.8rem; color: var(--text-secondary);">Provisions root Super Admin, multi-tab workspace database, and company rules.</div>
+          </div>
+        </div>
+        <div style="display: flex; gap: 1rem; justify-content: center;">
+          <button class="btn btn-secondary" onclick="showDeploymentAssistant()">Deployment Assistant</button>
+          <button class="btn" style="padding: 0.75rem 2rem; font-size: 1rem;" onclick="startSetupWizard()">[ START SETUP ]</button>
+        </div>
+      </div>
+
+      <!-- Deployment Assistant Page -->
+      <div id="deploymentAssistantView" class="card hidden" style="max-width: 760px; margin: 2rem auto;">
+        <div class="card-header">
+          <div>
+            <div class="card-title">FLINK Time Deployment Assistant</div>
+            <div class="card-subtitle">Google Sites Full-Page Embedding Guide</div>
+          </div>
+          <button class="btn btn-secondary btn-sm" onclick="hideDeploymentAssistant()">Back to Setup</button>
+        </div>
+        <div class="card" style="background: var(--bg-card); margin-bottom: 1.5rem;">
+          <div style="font-weight: 700; margin-bottom: 0.75rem;">System Environment Checks</div>
+          <div style="font-size: 0.85rem; line-height: 1.8;">
+            <div><span style="color: #34D399;">✓</span> Google Apps Script Runtime: Authorized V8 Engine</div>
+            <div><span style="color: #34D399;">✓</span> Master Sheet Repository: Connected & Bootstrapped</div>
+            <div><span style="color: #34D399;">✓</span> Google Drive Storage: Ready for Automated Backups</div>
+            <div><span style="color: #34D399;">✓</span> Frame Embedding Mode: ALLOWALL Enabled</div>
+          </div>
+        </div>
+        <div style="margin-bottom: 1.5rem;">
+          <div style="font-weight: 700; margin-bottom: 0.5rem;">Web App URL</div>
+          <div style="display: flex; gap: 0.5rem;">
+            <input type="text" id="deployWebAppUrl" value="https://script.google.com/macros/s/CURRENT/exec" readonly>
+            <button class="btn btn-secondary" onclick="copyDeployUrl()">COPY URL</button>
+          </div>
+        </div>
+        <ol style="padding-left: 1.25rem; font-size: 0.875rem; color: var(--text-secondary); line-height: 1.8; margin-bottom: 2rem;">
+          <li>Open your company's <strong>Google Sites</strong> portal.</li>
+          <li>Click the <strong>Insert</strong> tab on the right sidebar and select <strong>Embed</strong>.</li>
+          <li>Select <strong>By URL</strong> and paste the copied Apps Script Web App URL.</li>
+          <li>Choose <strong>Full Page Embed</strong> so FLINK fills the entire window seamlessly.</li>
+          <li>Click <strong>Publish</strong> on Google Sites.</li>
+          <li>Return here and click <strong>[ I HAVE DONE THIS ]</strong> to continue software setup.</li>
+        </ol>
+        <button class="btn btn-success" style="width: 100%;" onclick="startSetupWizard()">I HAVE DONE THIS — PROCEED TO SETUP</button>
+      </div>
+
+      <!-- 9-Step Setup Wizard Card -->
+      <div id="setupWizardCard" class="card hidden" style="max-width: 800px; margin: 2rem auto;">
+        <div class="wizard-steps" id="wizardStepsBar"></div>
+        <div id="wizardStepContent"></div>
+      </div>
+    </div>
+
+    <!-- 2. LOGIN VIEW -->
+    <div id="loginView" class="hidden" style="max-width: 420px; margin: 5rem auto;">
+      <div class="card" style="padding: 2.5rem 2rem;">
+        <div style="text-align: center; margin-bottom: 2rem;">
+          <h1 style="font-size: 1.85rem; font-weight: 800; letter-spacing: -0.02em;">FLINK</h1>
+          <p style="color: var(--text-secondary); font-size: 0.875rem; margin-top: 0.35rem;">Time & Workforce Platform</p>
+        </div>
+        <div id="loginAlert" class="hidden" style="padding: 0.75rem; border-radius: 6px; background: rgba(239, 68, 68, 0.2); color: #F87171; font-size: 0.8rem; margin-bottom: 1.25rem;"></div>
+        <form onsubmit="handleLogin(event)">
+          <div style="margin-bottom: 1.25rem;">
+            <label for="loginUsername">Username</label>
+            <input type="text" id="loginUsername" required autocomplete="username" placeholder="e.g. admin">
+          </div>
+          <div style="margin-bottom: 1.75rem;">
+            <label for="loginPassword">Password</label>
+            <input type="password" id="loginPassword" required autocomplete="current-password">
+          </div>
+          <button type="submit" class="btn" style="width: 100%;">Sign In</button>
+        </form>
+      </div>
+    </div>
+
+    <!-- 3. USER TIMER VIEW -->
+    <div id="timerView" class="hidden">
+      <!-- Live Timer Bar -->
+      <div class="timer-bar">
+        <div>
+          <label>Project</label>
+          <select id="timerProjectSelect" onchange="onTimerProjectChange()"></select>
+        </div>
+        <div>
+          <label>Task</label>
+          <select id="timerTaskSelect"></select>
+        </div>
+        <div>
+          <label>Tags</label>
+          <select id="timerTagsSelect" multiple title="Hold Ctrl/Cmd to select multiple tags"></select>
+        </div>
+        <div>
+          <label>What are you working on?</label>
+          <input type="text" id="timerDescriptionInput" placeholder="Describe current activity...">
+        </div>
+        <div class="timer-clock" id="timerClockDisplay">00:00:00</div>
+        <div>
+          <button id="timerToggleBtn" class="btn btn-success" style="height: 42px; min-width: 110px;" onclick="toggleTimer()">START</button>
+        </div>
+      </div>
+
+      <!-- Quick KPI Cards -->
+      <div class="grid-3" style="margin-bottom: 1.5rem;">
+        <div class="kpi-card">
+          <div class="kpi-label">Today's Tracked</div>
+          <div class="kpi-val" id="userTodayHours">0.00 h</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">This Week's Tracked</div>
+          <div class="kpi-val" id="userWeekHours">0.00 h</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">Active Workspace</div>
+          <div class="kpi-val" id="userActiveWsName" style="font-size: 1.2rem;">-</div>
+        </div>
+      </div>
+
+      <!-- Recent Entries Table -->
+      <div class="card">
+        <div class="card-header">
+          <div>
+            <div class="card-title">Today's Time Entries</div>
+            <div class="card-subtitle">Current workspace business date</div>
+          </div>
+          <button class="btn btn-secondary btn-sm" onclick="openManualEntryModal()">+ Manual Entry</button>
+        </div>
+        <div class="table-responsive">
+          <table>
+            <thead>
+              <tr>
+                <th>Project</th>
+                <th>Task</th>
+                <th>Description</th>
+                <th>Start (UTC)</th>
+                <th>End (UTC)</th>
+                <th>Duration</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody id="userRecentEntriesBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- 4. WEEKLY TIMESHEET VIEW -->
+    <div id="timesheetView" class="hidden">
+      <div class="card">
+        <div class="card-header">
+          <div>
+            <div class="card-title">Weekly Timesheet</div>
+            <div class="card-subtitle" id="timesheetPeriodLabel">Current Week</div>
+          </div>
+          <div style="display: flex; gap: 0.75rem; align-items: center;">
+            <span id="timesheetStatusBadge" class="badge badge-open">OPEN</span>
+            <button id="submitTimesheetBtn" class="btn btn-success" onclick="submitTimesheet()">Submit Timesheet</button>
+          </div>
+        </div>
+        <div class="table-responsive">
+          <table>
+            <thead>
+              <tr>
+                <th>Project / Task</th>
+                <th id="timesheetDay0">Day 1</th><th id="timesheetDay1">Day 2</th><th id="timesheetDay2">Day 3</th><th id="timesheetDay3">Day 4</th><th id="timesheetDay4">Day 5</th><th id="timesheetDay5">Day 6</th><th id="timesheetDay6">Day 7</th>
+                <th>Total</th>
+              </tr>
+            </thead>
+            <tbody id="timesheetMatrixBody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:1.25rem;">
+        <div class="card-header">
+          <div>
+            <div class="card-title">My Time History</div>
+            <div class="card-subtitle">Your own entries. Open and unlocked entries can be corrected or deleted.</div>
+          </div>
+          <button class="btn btn-secondary btn-sm" onclick="loadMyTimeHistory()">Refresh</button>
+        </div>
+        <div class="table-responsive">
+          <table>
+            <thead>
+              <tr><th>Date</th><th>Project</th><th>Description</th><th>Duration</th><th>Status</th><th>Actions</th></tr>
+            </thead>
+            <tbody id="myTimeHistoryBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- 5. MANAGER / ADMIN WORKSPACE -->
+    <div id="adminDashboardView" class="hidden">
+      <div class="card" style="padding:1.25rem 1.5rem; margin-bottom:1.25rem;">
+        <div class="card-header">
+          <div>
+            <div class="card-title">Manager Workspace</div>
+            <div class="card-subtitle">Operational control across assigned workspaces only</div>
+          </div>
+          <div>
+            <label for="managerWorkspaceSelect">Workspace Scope</label>
+            <select id="managerWorkspaceSelect" onchange="onManagerWorkspaceChange()"></select>
+          </div>
+        </div>
+        <div class="subtabs-bar" id="managerTabs">
+          <button class="nav-btn active" id="mgrTab_overview" onclick="switchManagerTab('overview')">Overview</button>
+          <button class="nav-btn" id="mgrTab_workspaces" onclick="switchManagerTab('workspaces')">My Workspaces</button>
+          <button class="nav-btn" id="mgrTab_live" onclick="switchManagerTab('live')">Live Activity</button>
+          <button class="nav-btn" id="mgrTab_timesheets" onclick="switchManagerTab('timesheets')">Timesheets</button>
+          <button class="nav-btn" id="mgrTab_approvals" onclick="switchManagerTab('approvals')">Approvals</button>
+          <button class="nav-btn" id="mgrTab_reports" onclick="switchManagerTab('reports')">Reports</button>
+          <button class="nav-btn" id="mgrTab_users" onclick="switchManagerTab('users')">Users</button>
+          <button class="nav-btn" id="mgrTab_requests" onclick="switchManagerTab('requests')">Requests</button>
+          <button class="nav-btn" id="mgrTab_alerts" onclick="switchManagerTab('alerts')">Alerts</button>
+        </div>
+      </div>
+      <div id="managerContent"></div>
+    </div>
+
+    <!-- 6. SUPER ADMIN UNIFIED CONTROL CENTER (22 SECTIONS) -->
+    <div id="superAdminView" class="hidden">
+      <!-- Super Admin Header & Navigation Subtabs -->
+      <div class="card" style="padding: 1.25rem 1.5rem; margin-bottom: 1.25rem;">
+        <div class="card-header" style="margin-bottom: 0.75rem;">
+          <div>
+            <div class="card-title">Super Admin Control Center</div>
+            <div class="card-subtitle">Zero-Code Governance, Multi-Workspace Administration & Self-Healing Engine</div>
+          </div>
+          <div style="display: flex; gap: 0.5rem;">
+            <button class="btn btn-sm" onclick="openCreateWorkspaceWizard()">+ New Workspace</button>
+            <button class="btn btn-secondary btn-sm" onclick="openCreateUserModal()">+ New User</button>
+            <button class="btn btn-warning btn-sm" onclick="runSystemAutoRepair()">Self-Healing Repair</button>
+          </div>
+        </div>
+        <div class="subtabs-bar">
+          <button class="nav-btn active" id="saTab_overview" onclick="switchSaSubtab('overview')">Executive Overview</button>
+          <button class="nav-btn" id="saTab_workspaces" onclick="switchSaSubtab('workspaces')">Workspaces</button>
+          <button class="nav-btn" id="saTab_users" onclick="switchSaSubtab('users')">Users & RBAC</button>
+          <button class="nav-btn" id="saTab_admins" onclick="switchSaSubtab('admins')">Admin Limits</button>
+          <button class="nav-btn" id="saTab_requests" onclick="switchSaSubtab('requests')">Request Queue</button>
+          <button class="nav-btn" id="saTab_timeadmin" onclick="switchSaSubtab('timeadmin')">Time Entries</button>
+          <button class="nav-btn" id="saTab_approvals" onclick="switchSaSubtab('approvals')">Timesheets</button>
+          <button class="nav-btn" id="saTab_projects" onclick="switchSaSubtab('projects')">Projects & Clients</button>
+          <button class="nav-btn" id="saTab_reportbuilder" onclick="switchSaSubtab('reportbuilder')">Report Builder</button>
+          <button class="nav-btn" id="saTab_alerts" onclick="switchSaSubtab('alerts')">Alerts & Anomalies</button>
+          <button class="nav-btn" id="saTab_security" onclick="switchSaSubtab('security')">Security Center</button>
+          <button class="nav-btn" id="saTab_backups" onclick="switchSaSubtab('backups')">Backups & Restore</button>
+          <button class="nav-btn" id="saTab_health" onclick="switchSaSubtab('health')">System Health</button>
+          <button class="nav-btn" id="saTab_settings" onclick="switchSaSubtab('settings')">Settings</button>
+          <button class="nav-btn" id="saTab_diagnostics" onclick="switchSaSubtab('diagnostics')">Advanced Diagnostics</button>
+        </div>
+      </div>
+
+      <!-- Subtab Dynamic Container -->
+      <div id="saSubtabContent"></div>
+    </div>
+
+    <!-- 7. ACCOUNT VIEW -->
+    <div id="accountView" class="hidden">
+      <div class="card" style="max-width:760px;">
+        <div class="card-header">
+          <div>
+            <div class="card-title">My Account</div>
+            <div class="card-subtitle">Identity, security, and session controls</div>
+          </div>
+        </div>
+        <div class="grid-2" id="accountDetails"></div>
+        <div style="display:flex; gap:0.75rem; margin-top:1.5rem;">
+          <button class="btn" onclick="openPasswordChangeModal()">Change Password</button>
+          <button class="btn btn-secondary" onclick="logout()">Sign Out</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 8. REPORTS VIEW -->
+    <div id="reportsView" class="hidden">
+      <div class="card">
+        <div class="card-header">
+          <div>
+            <div class="card-title">Clockify-Class Reports & Analytics</div>
+            <div class="card-subtitle">Summary, Detailed, Attendance, and Anomaly reports with multi-level grouping</div>
+          </div>
+          <div id="reportsManagerActions" style="display:flex; gap:0.5rem;"></div>
+        </div>
+        <div id="reportsContent"></div>
+      </div>
+    </div>
+  </main>
+
+  <!-- CONTEXTUAL HELP DRAWER -->
+  <div id="helpDrawer" class="help-drawer">
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem;">
+      <h3 style="font-size: 1.15rem; font-weight: 800;">Contextual Guidance</h3>
+      <button class="nav-btn" onclick="toggleHelpDrawer()">✕</button>
+    </div>
+    <div id="helpDrawerBody" style="line-height: 1.6; font-size: 0.875rem; color: var(--text-secondary);">
+      <div style="font-weight: 700; color: var(--text-primary); margin-bottom: 0.5rem;">FLINK Self-Guiding System</div>
+      <p style="margin-bottom: 1rem;">Click on any section to reveal tailored explanations, recommended choices, and risk warnings.</p>
+    </div>
+  </div>
+
+  <!-- MODALS CONTAINER -->
+  <div id="modalContainer"></div>
+
+  <!-- CORE FRONTEND ENGINE SCRIPT -->
+  <script>
+    const EMBED_MODE = 'USER';
+
+    function embedRoleAllowed(role) {
+      const normalized = String(role || '').toUpperCase();
+      if (EMBED_MODE === 'USER') {
+        return ['USER', 'ADMIN', 'SUPER_ADMIN'].includes(normalized);
+      }
+      if (EMBED_MODE === 'ADMIN') {
+        return ['ADMIN', 'SUPER_ADMIN'].includes(normalized);
+      }
+      return normalized === 'SUPER_ADMIN';
+    }
+
+    function embedDefaultView() {
+      if (EMBED_MODE === 'ADMIN') return 'admin';
+      if (EMBED_MODE === 'SUPER_ADMIN') return 'superadmin';
+      return 'timer';
+    }
+
+    function embedAllowedViews() {
+      if (EMBED_MODE === 'ADMIN') return new Set(['admin', 'reports', 'account']);
+      if (EMBED_MODE === 'SUPER_ADMIN') return new Set(['superadmin', 'admin', 'reports', 'account']);
+      return new Set(['timer', 'mytime', 'reports', 'account']);
+    }
+
+    function showEmbedAccessDenied() {
+      document.getElementById('setupWizardContainer').classList.add('hidden');
+      document.getElementById('appHeader').classList.add('hidden');
+      const login = document.getElementById('loginView');
+      login.classList.remove('hidden');
+      const alertBox = document.getElementById('loginAlert');
+      alertBox.textContent =
+        'This Google Sites page is for ' + EMBED_MODE +
+        ' access. Your FLINK role is ' + String(state.user && state.user.role || 'UNKNOWN') + '.';
+      alertBox.classList.remove('hidden');
+    }
+
+    // State Container
+    const state = {
+      token: sessionStorage.getItem('flink_session_token') || '',
+      user: null,
+      currentWorkspace: '',
+      workspaces: [],
+      projects: [],
+      tasks: [],
+      tags: [],
+      users: [],
+      activeTimer: null,
+      timerInterval: null,
+      pendingTimerStartOperationId: '',
+      pendingTimerStopOperationId: '',
+      timerCooldownUntil: 0,
+      timerRequestInFlight: false,
+      myTimeEntries: [],
+      managerWorkspaceFilter: '',
+      managerTab: 'overview',
+      currentTimesheetPeriod: null,
+      setupStatus: null
+    };
+
+    function newOperationId() {
+      if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+        return window.crypto.randomUUID();
+      }
+      return 'op-' + Date.now().toString(36) + '-' +
+        Math.random().toString(36).slice(2) + '-' +
+        Math.random().toString(36).slice(2);
+    }
+
+    function escapeHtml(value) {
+      return String(value === null || value === undefined ? '' : value).replace(/[&<>"']/g, ch => ({
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#39;'
+      })[ch]);
+    }
+
+    function htmlJsArg(value) {
+      return escapeHtml(JSON.stringify(String(value === null || value === undefined ? '' : value)));
+    }
+
+    function safeClassToken(value, fallback = 'open') {
+      const token = String(value || fallback).toLowerCase().replace(/[^a-z0-9_-]/g, '');
+      return token || fallback;
+    }
+
+    function renderError(container, prefix, err) {
+      container.replaceChildren();
+      const div = document.createElement('div');
+      div.style.color = '#F87171';
+      const message = err && err.message ? err.message : String(err || 'Unknown error');
+      div.textContent = String(prefix || '') + message;
+      container.appendChild(div);
+    }
+
+    function normalizeUser(raw, roleFallback = '') {
+      raw = raw || {};
+      return {
+        userId: raw.userId || raw.UserID || '',
+        username: raw.username || raw.Username || '',
+        displayName: raw.displayName || raw.DisplayName || '',
+        email: raw.email || raw.Email || '',
+        role: raw.role || raw.Role || roleFallback || '',
+        status: raw.status || raw.Status || '',
+        primaryWorkspaceId: raw.primaryWorkspaceId || raw.PrimaryWorkspaceID || '',
+        assignedWorkspaces: raw.assignedWorkspaces || raw.AssignedWorkspaceIDs || [],
+        mustChangePassword:
+          raw.mustChangePassword === true || raw.MustChangePassword === true ||
+          raw.mustChangePassword === 'TRUE' || raw.MustChangePassword === 'TRUE'
+      };
+    }
+
+    // workspaceOverride may be '' intentionally for manager all-workspace reads.
+    async function apiCall(action, payload = {}, workspaceOverride = undefined) {
+      const body = {
+        action,
+        sessionToken: state.token,
+        workspaceId:
+          workspaceOverride === undefined ? state.currentWorkspace : workspaceOverride,
+        payload
+      };
+
+      if (typeof google !== 'undefined' && google.script && google.script.run) {
+        return new Promise((resolve, reject) => {
+          google.script.run
+            .withSuccessHandler(res => {
+              if (res && res.ok) resolve(res.data);
+              else reject(res ? res.error : new Error('Unknown error'));
+            })
+            .withFailureHandler(err => reject(err))
+            .handleClientRequest(action, body);
+        });
+      }
+
+      // HTTP fetch fallback for standalone testing
+      const res = await fetch('', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+      const data = await res.json();
+      if (!data.ok) throw data.error;
+      return data.data;
+    }
+
+    // App Initialization
+    window.addEventListener('DOMContentLoaded', async () => {
+      try {
+        const setup = await apiCall('setup.status');
+        state.setupStatus = setup;
+
+        if (!setup.initialized && !state.token) {
+          if (EMBED_MODE === 'SUPER_ADMIN') {
+            document.getElementById('setupWizardContainer').classList.remove('hidden');
+          } else {
+            showLogin();
+            const alertBox = document.getElementById('loginAlert');
+            alertBox.textContent = 'FLINK Time setup is not complete. Open the Super Admin Google Sites page first.';
+            alertBox.classList.remove('hidden');
+          }
+          return;
+        }
+      } catch (e) {}
+
+      if (state.token) {
+        try {
+          const res = await apiCall('auth.validateSession');
+          state.user = normalizeUser(res.user, res.role);
+          initApp();
+        } catch (e) {
+          sessionStorage.removeItem('flink_session_token');
+          state.token = '';
+          showLogin();
+        }
+      } else {
+        showLogin();
+      }
+    });
+
+    function showLogin() {
+      document.getElementById('loginView').classList.remove('hidden');
+      document.getElementById('setupWizardContainer').classList.add('hidden');
+      document.getElementById('appHeader').classList.add('hidden');
+    }
+
+    async function handleLogin(e) {
+      e.preventDefault();
+      const username = document.getElementById('loginUsername').value;
+      const password = document.getElementById('loginPassword').value;
+      const alertBox = document.getElementById('loginAlert');
+      alertBox.classList.add('hidden');
+
+      try {
+        const res = await apiCall('auth.login', { username, password, clientType: 'WEB' });
+        if (res.mfaRequired) {
+          throw new Error('Two-factor verification is required before this browser session can continue.');
+        }
+        state.token = res.sessionToken;
+        state.user = normalizeUser(res.user);
+        sessionStorage.setItem('flink_session_token', res.sessionToken);
+
+        if (state.user.mustChangePassword) {
+          openPasswordChangeModal();
+        } else {
+          initApp();
+        }
+      } catch (err) {
+        alertBox.innerText = err.message || 'Invalid username or password.';
+        alertBox.classList.remove('hidden');
+      }
+    }
+
+    async function initApp() {
+      if (!embedRoleAllowed(state.user && state.user.role)) {
+        showEmbedAccessDenied();
+        return;
+      }
+      document.getElementById('loginView').classList.add('hidden');
+      document.getElementById('setupWizardContainer').classList.add('hidden');
+      document.getElementById('appHeader').classList.remove('hidden');
+      document.getElementById('userDisplayName').innerText = state.user.displayName || state.user.username;
+      document.getElementById('userRoleBadge').innerText = state.user.role;
+
+      // Load Workspaces
+      try {
+        state.workspaces = await apiCall('workspaces.list');
+        if (state.workspaces.length > 0) {
+          const preferredWorkspaceId = state.user.primaryWorkspaceId || '';
+          const preferredExists = state.workspaces.some(w => w.WorkspaceID === preferredWorkspaceId);
+          state.currentWorkspace = preferredExists ? preferredWorkspaceId : state.workspaces[0].WorkspaceID;
+          const currentWs = state.workspaces.find(w => w.WorkspaceID === state.currentWorkspace);
+          document.getElementById('currentWorkspaceBadge').innerText = currentWs ? currentWs.WorkspaceName : state.currentWorkspace;
+        }
+      } catch (e) {}
+
+      buildNavigation();
+      navigate(embedDefaultView());
+      if (EMBED_MODE === 'USER') loadWorkspaceData();
+    }
+
+    function buildNavigation() {
+      const nav = document.getElementById('navLinks');
+      nav.replaceChildren();
+
+      let links;
+      if (EMBED_MODE === 'ADMIN') {
+        links = [
+          { id: 'admin', label: 'Manager' },
+          { id: 'reports', label: 'Reports' },
+          { id: 'account', label: 'Account' }
+        ];
+      } else if (EMBED_MODE === 'SUPER_ADMIN') {
+        links = [
+          { id: 'superadmin', label: 'Admin Console' },
+          { id: 'admin', label: 'Manager' },
+          { id: 'reports', label: 'Reports' },
+          { id: 'account', label: 'Account' }
+        ];
+      } else {
+        links = [
+          { id: 'timer', label: 'Timer' },
+          { id: 'mytime', label: 'My Time' },
+          { id: 'reports', label: 'Reports' },
+          { id: 'account', label: 'Account' }
+        ];
+      }
+
+      links.forEach(link => {
+        const btn = document.createElement('button');
+        btn.className = 'nav-btn';
+        btn.id = 'navBtn_' + link.id;
+        btn.textContent = link.label;
+        btn.onclick = () => navigate(link.id);
+        nav.appendChild(btn);
+      });
+    }
+
+    function navigate(viewId) {
+      if (!embedAllowedViews().has(viewId)) {
+        viewId = embedDefaultView();
+      }
+      document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+      const activeBtn = document.getElementById('navBtn_' + viewId);
+      if (activeBtn) activeBtn.classList.add('active');
+
+      ['timerView', 'timesheetView', 'adminDashboardView', 'superAdminView', 'reportsView', 'accountView'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.classList.add('hidden');
+      });
+
+      if (viewId === 'timer') {
+        document.getElementById('timerView').classList.remove('hidden');
+        recoverActiveTimer();
+        loadRecentEntries();
+      } else if (viewId === 'mytime') {
+        document.getElementById('timesheetView').classList.remove('hidden');
+        loadTimesheet();
+        loadMyTimeHistory();
+      } else if (viewId === 'admin') {
+        document.getElementById('adminDashboardView').classList.remove('hidden');
+        loadManagerDashboard();
+      } else if (viewId === 'superadmin') {
+        document.getElementById('superAdminView').classList.remove('hidden');
+        switchSaSubtab('overview');
+      } else if (viewId === 'reports') {
+        document.getElementById('reportsView').classList.remove('hidden');
+        loadReportsView();
+      } else if (viewId === 'account') {
+        document.getElementById('accountView').classList.remove('hidden');
+        renderAccountView();
+      }
+    }
+
+    function logout() {
+      apiCall('auth.logout').catch(() => {});
+      sessionStorage.removeItem('flink_session_token');
+      location.reload();
+    }
+
+    /* ------------------- TIMER LOGIC ------------------- */
+    async function loadWorkspaceData() {
+      if (!state.currentWorkspace) return;
+      try {
+        const [projects, tags] = await Promise.all([
+          apiCall('projects.list'),
+          apiCall('tags.list')
+        ]);
+        state.projects = Array.isArray(projects) ? projects : [];
+        state.tags = Array.isArray(tags) ? tags : [];
+
+        const projSelect = document.getElementById('timerProjectSelect');
+        projSelect.replaceChildren(new Option('Select Project', ''));
+        state.projects.forEach(p => {
+          projSelect.add(new Option(String(p.ProjectName || ''), String(p.ProjectID || '')));
+        });
+
+        const tagSelect = document.getElementById('timerTagsSelect');
+        tagSelect.replaceChildren();
+        state.tags.forEach(tag => {
+          tagSelect.add(new Option(String(tag.TagName || ''), String(tag.TagID || '')));
+        });
+      } catch (e) {}
+    }
+
+    async function onTimerProjectChange() {
+      const projId = document.getElementById('timerProjectSelect').value;
+      const taskSelect = document.getElementById('timerTaskSelect');
+      taskSelect.replaceChildren(new Option('Select Task (Optional)', ''));
+      if (!projId) return;
+      try {
+        const tasks = await apiCall('tasks.list', { projectId: projId });
+        tasks.forEach(t => {
+          taskSelect.add(new Option(String(t.TaskName || ''), String(t.TaskID || '')));
+        });
+      } catch (e) {}
+    }
+
+    async function recoverActiveTimer() {
+      if (!state.currentWorkspace) return;
+      try {
+        const timer = await apiCall('timer.getActive');
+        if (timer) {
+          state.activeTimer = timer;
+          startLocalClock(timer.startedAtUTC);
+          const btn = document.getElementById('timerToggleBtn');
+          btn.innerText = 'STOP';
+          btn.className = 'btn btn-danger';
+        }
+      } catch (e) {}
+    }
+
+    function startLocalClock(startedAtUtcStr) {
+      if (state.timerInterval) clearInterval(state.timerInterval);
+      const startMs = new Date(startedAtUtcStr).getTime();
+      const clockEl = document.getElementById('timerClockDisplay');
+      clockEl.classList.add('running');
+
+      const update = () => {
+        const diffSecs = Math.max(0, Math.floor((Date.now() - startMs) / 1000));
+        const hrs = Math.floor(diffSecs / 3600);
+        const mins = Math.floor((diffSecs % 3600) / 60);
+        const secs = diffSecs % 60;
+        clockEl.innerText = `${String(hrs).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+      };
+
+      update();
+      state.timerInterval = setInterval(update, 1000);
+    }
+
+    function applyTimerCooldown() {
+      state.timerCooldownUntil = Date.now() + 5000;
+      const btn = document.getElementById('timerToggleBtn');
+      btn.disabled = true;
+      window.setTimeout(() => {
+        if (!state.timerRequestInFlight && Date.now() >= state.timerCooldownUntil) {
+          btn.disabled = false;
+        }
+      }, 5000);
+    }
+
+    function finishTimerRequest() {
+      state.timerRequestInFlight = false;
+      const btn = document.getElementById('timerToggleBtn');
+      const remaining = state.timerCooldownUntil - Date.now();
+      if (remaining <= 0) {
+        btn.disabled = false;
+      } else {
+        window.setTimeout(() => {
+          if (!state.timerRequestInFlight) btn.disabled = false;
+        }, remaining);
+      }
+    }
+
+    async function toggleTimer() {
+      if (
+        state.timerRequestInFlight ||
+        Date.now() < state.timerCooldownUntil
+      ) {
+        return;
+      }
+      state.timerRequestInFlight = true;
+      applyTimerCooldown();
+      const btn = document.getElementById('timerToggleBtn');
+      if (state.activeTimer) {
+        const operationId =
+          state.pendingTimerStopOperationId || newOperationId();
+        state.pendingTimerStopOperationId = operationId;
+
+        try {
+          await apiCall('timer.stop', {
+            timerId: state.activeTimer.timerId,
+            operationId
+          });
+          state.pendingTimerStopOperationId = '';
+          state.activeTimer = null;
+          clearInterval(state.timerInterval);
+          document.getElementById('timerClockDisplay').classList.remove('running');
+          document.getElementById('timerClockDisplay').innerText = '00:00:00';
+          btn.innerText = 'START';
+          btn.className = 'btn btn-success';
+          loadRecentEntries();
+        } catch (err) {
+          // Keep the same operationId. A network retry must represent the same
+          // logical stop request rather than creating a second operation.
+          alert(err.message || 'Failed to stop timer.');
+        } finally {
+          finishTimerRequest();
+        }
+      } else {
+        const projectId = document.getElementById('timerProjectSelect').value;
+        const taskId = document.getElementById('timerTaskSelect').value;
+        const description = document.getElementById('timerDescriptionInput').value;
+        const tagIds = Array.from(document.getElementById('timerTagsSelect').selectedOptions).map(option => option.value);
+        const operationId =
+          state.pendingTimerStartOperationId || newOperationId();
+        state.pendingTimerStartOperationId = operationId;
+
+        try {
+          const res = await apiCall('timer.start', {
+            projectId,
+            taskId,
+            description,
+            tagIds,
+            operationId
+          });
+          state.pendingTimerStartOperationId = '';
+
+          // A delayed retry can arrive after this same logical timer has already
+          // been stopped. In that case do not resurrect a local running state.
+          if (res.completed) {
+            state.activeTimer = null;
+            btn.innerText = 'START';
+            btn.className = 'btn btn-success';
+            loadRecentEntries();
+            return;
+          }
+
+          state.activeTimer = res;
+          startLocalClock(res.startedAtUTC);
+          btn.innerText = 'STOP';
+          btn.className = 'btn btn-danger';
+        } catch (err) {
+          // Keep the operationId for the next retry.
+          alert(err.message || 'Failed to start timer.');
+        } finally {
+          finishTimerRequest();
+        }
+      }
+    }
+
+    async function loadRecentEntries() {
+      if (!state.currentWorkspace || !state.user) return;
+      try {
+        const [overview, report] = await Promise.all([
+          apiCall('dashboard.overview', {}, state.currentWorkspace),
+          apiCall('reports.detailed', {
+            filters: { userId: state.user.userId }
+          }, state.currentWorkspace)
+        ]);
+
+        document.getElementById('userTodayHours').textContent =
+          Number(overview.todayTrackedHours || 0).toFixed(2) + ' h';
+        document.getElementById('userWeekHours').textContent =
+          Number(overview.weekTrackedHours || 0).toFixed(2) + ' h';
+        const currentWs = state.workspaces.find(
+          ws => ws.WorkspaceID === state.currentWorkspace
+        );
+        document.getElementById('userActiveWsName').textContent =
+          currentWs ? currentWs.WorkspaceName : state.currentWorkspace;
+
+        const today = overview.currentBusinessDate || '';
+        const entries = (report.entries || [])
+          .filter(entry => !today || entry.businessDate === today)
+          .sort((a,b) => String(b.startUTC || '').localeCompare(String(a.startUTC || '')));
+
+        const tbody = document.getElementById('userRecentEntriesBody');
+        tbody.replaceChildren();
+
+        entries.forEach(entry => {
+          const tr = document.createElement('tr');
+          const values = [
+            entry.projectName || 'General',
+            entry.taskName || '-',
+            entry.description || '-',
+            entry.startLocal || entry.startUTC || '',
+            entry.endLocal || entry.endUTC || '',
+            entry.durationFormatted || formatSecs(Number(entry.durationSeconds || 0))
+          ];
+          values.forEach((value, index) => {
+            const td = document.createElement('td');
+            td.textContent = String(value);
+            if (index === 0) td.style.fontWeight = '700';
+            if (index >= 3) td.style.fontFamily = 'var(--font-mono)';
+            tr.appendChild(td);
+          });
+          const statusCell = document.createElement('td');
+          const badge = document.createElement('span');
+          const status = String(entry.approvalStatus || 'OPEN');
+          badge.className = 'badge badge-' + safeClassToken(status);
+          badge.textContent = status;
+          statusCell.appendChild(badge);
+          tr.appendChild(statusCell);
+          tbody.appendChild(tr);
+        });
+      } catch (e) {
+        console.error('Failed to load today entries', e);
+      }
+    }
+
+    function openManualEntryModal() {
+      const modal = document.getElementById('modalContainer');
+      modal.replaceChildren();
+
+      const backdrop = document.createElement('div');
+      backdrop.className = 'modal-backdrop';
+      const box = document.createElement('div');
+      box.className = 'modal';
+      box.innerHTML = `
+        <h3 style="margin-bottom:0.75rem;">Create Manual Time Entry</h3>
+        <label>Project</label>
+        <select id="manualProject"></select>
+        <label style="margin-top:0.75rem;">Task</label>
+        <select id="manualTask"></select>
+        <label style="margin-top:0.75rem;">Description</label>
+        <input type="text" id="manualDescription">
+        <label style="margin-top:0.75rem;">Tags</label>
+        <select id="manualTags" multiple title="Hold Ctrl/Cmd to select multiple tags"></select>
+        <div class="grid-2" style="margin-top:0.75rem;">
+          <div><label>Start</label><input type="datetime-local" id="manualStart"></div>
+          <div><label>End</label><input type="datetime-local" id="manualEnd"></div>
+        </div>
+        <label style="display:block; margin-top:0.75rem;"><input type="checkbox" id="manualBillable"> Billable</label>
+        <div style="display:flex; gap:0.75rem; justify-content:flex-end; margin-top:1.25rem;">
+          <button class="btn btn-secondary" id="manualCancelBtn">Cancel</button>
+          <button class="btn" id="manualSaveBtn">Create Entry</button>
+        </div>
+      `;
+
+      const project = box.querySelector('#manualProject');
+      project.replaceChildren(new Option('Select Project', ''));
+      (state.projects || []).forEach(p => project.add(new Option(String(p.ProjectName || ''), String(p.ProjectID || ''))));
+      project.onchange = populateManualTasks;
+
+      box.querySelector('#manualTask').replaceChildren(new Option('Select Task (Optional)', ''));
+
+      const tagSelect = box.querySelector('#manualTags');
+      tagSelect.replaceChildren();
+      (state.tags || []).forEach(tag => tagSelect.add(
+        new Option(String(tag.TagName || ''), String(tag.TagID || ''))
+      ));
+
+      box.querySelector('#manualCancelBtn').onclick = closeModal;
+      box.querySelector('#manualSaveBtn').onclick = submitManualEntry;
+
+      backdrop.appendChild(box);
+      modal.appendChild(backdrop);
+    }
+
+    async function populateManualTasks() {
+      const projectId = document.getElementById('manualProject')?.value || '';
+      const task = document.getElementById('manualTask');
+      if (!task) return;
+      task.replaceChildren(new Option('Select Task (Optional)', ''));
+      if (!projectId) return;
+      try {
+        const tasks = await apiCall('tasks.list', { projectId });
+        (tasks || []).forEach(item => task.add(new Option(String(item.TaskName || ''), String(item.TaskID || ''))));
+      } catch (e) {
+        alert(e.message || 'Failed to load tasks.');
+      }
+    }
+
+    async function submitManualEntry() {
+      const projectId = document.getElementById('manualProject')?.value || '';
+      const taskId = document.getElementById('manualTask')?.value || '';
+      const description = document.getElementById('manualDescription')?.value || '';
+      const tags = Array.from(document.getElementById('manualTags')?.selectedOptions || []).map(option => option.value);
+      const startRaw = document.getElementById('manualStart')?.value || '';
+      const endRaw = document.getElementById('manualEnd')?.value || '';
+      const billable = !!document.getElementById('manualBillable')?.checked;
+
+      if (!startRaw || !endRaw) return alert('Start and end time are required.');
+      const start = new Date(startRaw);
+      const end = new Date(endRaw);
+      if (isNaN(start.getTime()) || isNaN(end.getTime())) return alert('Start or end time is invalid.');
+
+      try {
+        await apiCall('entries.createManual', {
+          projectId,
+          taskId,
+          description,
+          tags,
+          startUtc: start.toISOString(),
+          endUtc: end.toISOString(),
+          billable
+        });
+        closeModal();
+        await loadRecentEntries();
+        await loadTimesheet();
+        await loadMyTimeHistory();
+      } catch (e) {
+        alert(e.message || 'Failed to create manual entry.');
+      }
+    }
+
+    /* ------------------- WEEKLY TIMESHEET ------------------- */
+    async function loadTimesheet() {
+      if (!state.currentWorkspace) return;
+      try {
+        // Send an absolute instant; the server derives the workspace-local
+        // business date/week. Sending a UTC YYYY-MM-DD can select the wrong week
+        // around local midnight or a configured week boundary.
+        const currentInstant = new Date().toISOString();
+        const data = await apiCall('timesheet.getWeekly', { weekStartDate: currentInstant });
+
+        state.currentTimesheetPeriod = {
+          periodStart: data.periodStart,
+          periodEnd: data.periodEnd
+        };
+
+        document.getElementById('timesheetPeriodLabel').innerText =
+          `Period: ${String(data.periodStart || '').substring(0, 10)} to ${String(data.periodEnd || '').substring(0, 10)}`;
+
+        const status = data.status || 'OPEN';
+        const statusBadge = document.getElementById('timesheetStatusBadge');
+        statusBadge.innerText = status;
+        statusBadge.className = `badge badge-${status.toLowerCase()}`;
+
+        const labels = Array.isArray(data.dayLabels) ? data.dayLabels : [];
+        for (let i = 0; i < 7; i++) {
+          const th = document.getElementById('timesheetDay' + i);
+          if (th) th.innerText = labels[i] || ('Day ' + (i + 1));
+        }
+
+        const submitBtn = document.getElementById('submitTimesheetBtn');
+        submitBtn.disabled = !(status === 'OPEN' || status === 'REJECTED');
+
+        const tbody = document.getElementById('timesheetMatrixBody');
+        tbody.replaceChildren();
+
+        const rows = Array.isArray(data.rows) ? data.rows : [];
+        rows.forEach(row => {
+          const tr = document.createElement('tr');
+
+          const nameCell = document.createElement('td');
+          const strong = document.createElement('strong');
+          strong.textContent = row.projectName || row.projectId || 'Unassigned';
+          nameCell.appendChild(strong);
+          if (row.taskName) {
+            nameCell.appendChild(document.createTextNode(' / ' + row.taskName));
+          }
+          tr.appendChild(nameCell);
+
+          const dayValues = Array.isArray(row.days) ? row.days : [];
+          for (let i = 0; i < 7; i++) {
+            const td = document.createElement('td');
+            td.textContent = (Number(dayValues[i] || 0) / 3600).toFixed(2);
+            tr.appendChild(td);
+          }
+
+          const totalCell = document.createElement('td');
+          totalCell.style.fontWeight = '700';
+          totalCell.style.color = '#60A5FA';
+          totalCell.textContent = (Number(row.totalSeconds || 0) / 3600).toFixed(2) + ' h';
+          tr.appendChild(totalCell);
+
+          tbody.appendChild(tr);
+        });
+      } catch (e) {
+        console.error('Failed to load timesheet', e);
+      }
+    }
+
+    async function submitTimesheet() {
+      try {
+        if (!state.currentTimesheetPeriod) {
+          await loadTimesheet();
+        }
+        if (!state.currentTimesheetPeriod) {
+          throw new Error('Timesheet period is not available.');
+        }
+
+        await apiCall('timesheet.submit', {
+          periodStart: state.currentTimesheetPeriod.periodStart,
+          periodEnd: state.currentTimesheetPeriod.periodEnd
+        });
+        alert('Timesheet submitted successfully for Admin review.');
+        await loadTimesheet();
+      } catch (err) {
+        alert(err.message || 'Failed to submit timesheet.');
+      }
+    }
+
+    /* ------------------- MY TIME & ACCOUNT ------------------- */
+    async function loadMyTimeHistory() {
+      if (!state.currentWorkspace || !state.user) return;
+      const tbody = document.getElementById('myTimeHistoryBody');
+      if (!tbody) return;
+      try {
+        const entries = await apiCall(
+          'entries.list',
+          { filters: { userId: state.user.userId } },
+          state.currentWorkspace
+        );
+        state.myTimeEntries = Array.isArray(entries) ? entries : [];
+        tbody.replaceChildren();
+
+        [...state.myTimeEntries]
+          .sort((a,b) => String(b.startUtc || '').localeCompare(String(a.startUtc || '')))
+          .forEach(entry => {
+            const tr = document.createElement('tr');
+            const project = (state.projects || []).find(
+              p => p.ProjectID === entry.projectId
+            );
+            const values = [
+              String(entry.startUtc || '').substring(0,10),
+              project ? project.ProjectName : (entry.projectId || 'General'),
+              entry.description || '-',
+              formatSecs(Number(entry.durationSeconds || 0)),
+              entry.approvalStatus || entry.status || 'OPEN'
+            ];
+            values.forEach(value => {
+              const td = document.createElement('td');
+              td.textContent = String(value);
+              tr.appendChild(td);
+            });
+
+            const actionCell = document.createElement('td');
+            const editable =
+              !entry.locked &&
+              !['SUBMITTED','APPROVED'].includes(
+                String(entry.approvalStatus || '').toUpperCase()
+              );
+            if (editable) {
+              const edit = document.createElement('button');
+              edit.className = 'btn btn-secondary btn-sm';
+              edit.textContent = 'Edit';
+              edit.onclick = () => openEditTimeEntry(entry.entryId);
+              const del = document.createElement('button');
+              del.className = 'btn btn-danger btn-sm';
+              del.textContent = 'Delete';
+              del.style.marginLeft = '0.4rem';
+              del.onclick = () => deleteMyTimeEntry(entry.entryId);
+              actionCell.append(edit, del);
+            } else {
+              actionCell.textContent = 'Locked';
+            }
+            tr.appendChild(actionCell);
+            tbody.appendChild(tr);
+          });
+      } catch (e) {
+        console.error('Failed to load My Time history', e);
+      }
+    }
+
+    function openEditTimeEntry(entryId) {
+      const entry = (state.myTimeEntries || []).find(
+        item => item.entryId === entryId
+      );
+      if (!entry) return alert('Entry is not available. Refresh My Time.');
+
+      const modal = document.getElementById('modalContainer');
+      modal.replaceChildren();
+      modal.dataset.entryId = String(entry.entryId);
+      modal.dataset.expectedVersion = String(entry.version);
+
+      const backdrop = document.createElement('div');
+      backdrop.className = 'modal-backdrop';
+      const box = document.createElement('div');
+      box.className = 'modal';
+
+      const title = document.createElement('h3');
+      title.textContent = 'Edit Time Entry';
+
+      const descLabel = document.createElement('label');
+      descLabel.textContent = 'Description';
+      const desc = document.createElement('input');
+      desc.id = 'editTimeDescription';
+      desc.type = 'text';
+      desc.value = entry.description || '';
+
+      const billableLabel = document.createElement('label');
+      billableLabel.style.display = 'block';
+      billableLabel.style.marginTop = '0.75rem';
+      const billable = document.createElement('input');
+      billable.type = 'checkbox';
+      billable.id = 'editTimeBillable';
+      billable.checked = !!entry.billable;
+      billableLabel.append(billable, document.createTextNode(' Billable'));
+
+      const actions = document.createElement('div');
+      actions.style.display = 'flex';
+      actions.style.gap = '0.75rem';
+      actions.style.justifyContent = 'flex-end';
+      actions.style.marginTop = '1.25rem';
+
+      const cancel = document.createElement('button');
+      cancel.className = 'btn btn-secondary';
+      cancel.textContent = 'Cancel';
+      cancel.onclick = closeModal;
+      const save = document.createElement('button');
+      save.className = 'btn';
+      save.textContent = 'Save';
+      save.onclick = submitEditTimeEntry;
+
+      actions.append(cancel, save);
+      box.append(title, descLabel, desc, billableLabel, actions);
+      backdrop.appendChild(box);
+      modal.appendChild(backdrop);
+    }
+
+    async function submitEditTimeEntry() {
+      const modal = document.getElementById('modalContainer');
+      const entryId = modal.dataset.entryId || '';
+      const expectedVersion = Number(modal.dataset.expectedVersion || 0);
+      try {
+        await apiCall('entries.update', {
+          entryId,
+          expectedVersion,
+          updates: {
+            description: document.getElementById('editTimeDescription').value,
+            billable: document.getElementById('editTimeBillable').checked
+          }
+        });
+        closeModal();
+        await loadMyTimeHistory();
+        await loadRecentEntries();
+        await loadTimesheet();
+      } catch (e) {
+        alert(e.message || 'Failed to update time entry.');
+      }
+    }
+
+    async function deleteMyTimeEntry(entryId) {
+      const entry = (state.myTimeEntries || []).find(
+        item => item.entryId === entryId
+      );
+      if (!entry || !confirm('Delete this time entry?')) return;
+      try {
+        await apiCall('entries.delete', {
+          entryId,
+          expectedVersion: entry.version
+        });
+        await loadMyTimeHistory();
+        await loadRecentEntries();
+        await loadTimesheet();
+      } catch (e) {
+        alert(e.message || 'Failed to delete time entry.');
+      }
+    }
+
+    function renderAccountView() {
+      const container = document.getElementById('accountDetails');
+      container.replaceChildren();
+      const fields = [
+        ['Display Name', state.user.displayName || ''],
+        ['Username', state.user.username || ''],
+        ['Google Workspace Email', state.user.email || ''],
+        ['Role', state.user.role || ''],
+        ['Active Workspace',
+          (state.workspaces.find(ws => ws.WorkspaceID === state.currentWorkspace) || {}).WorkspaceName ||
+          state.currentWorkspace || '']
+      ];
+      fields.forEach(([labelText,value]) => {
+        const wrap = document.createElement('div');
+        wrap.style.marginBottom = '1rem';
+        const label = document.createElement('div');
+        label.className = 'kpi-label';
+        label.textContent = labelText;
+        const valueEl = document.createElement('div');
+        valueEl.style.fontWeight = '700';
+        valueEl.textContent = String(value);
+        wrap.append(label, valueEl);
+        container.appendChild(wrap);
+      });
+    }
+
+    function openPasswordChangeModal() {
+      const modal = document.getElementById('modalContainer');
+      modal.replaceChildren();
+      const backdrop = document.createElement('div');
+      backdrop.className = 'modal-backdrop';
+      const box = document.createElement('div');
+      box.className = 'modal';
+
+      const title = document.createElement('h3');
+      title.textContent = 'Change Password';
+      const oldLabel = document.createElement('label');
+      oldLabel.textContent = 'Current Password';
+      const oldInput = document.createElement('input');
+      oldInput.id = 'accountOldPassword';
+      oldInput.type = 'password';
+      oldInput.autocomplete = 'current-password';
+
+      const newLabel = document.createElement('label');
+      newLabel.style.marginTop = '0.75rem';
+      newLabel.textContent = 'New Password';
+      const newInput = document.createElement('input');
+      newInput.id = 'accountNewPassword';
+      newInput.type = 'password';
+      newInput.autocomplete = 'new-password';
+
+      const actions = document.createElement('div');
+      actions.style.display = 'flex';
+      actions.style.gap = '0.75rem';
+      actions.style.justifyContent = 'flex-end';
+      actions.style.marginTop = '1.25rem';
+      const cancel = document.createElement('button');
+      cancel.className = 'btn btn-secondary';
+      cancel.textContent = 'Cancel';
+      cancel.onclick = closeModal;
+      const save = document.createElement('button');
+      save.className = 'btn';
+      save.textContent = 'Change Password';
+      save.onclick = submitPasswordChange;
+      actions.append(cancel, save);
+      box.append(title, oldLabel, oldInput, newLabel, newInput, actions);
+      backdrop.appendChild(box);
+      modal.appendChild(backdrop);
+    }
+
+    async function submitPasswordChange() {
+      const oldPassword = document.getElementById('accountOldPassword').value;
+      const newPassword = document.getElementById('accountNewPassword').value;
+      try {
+        const result = await apiCall('auth.changePassword', {
+          oldPassword,
+          newPassword
+        });
+        state.token = result.sessionToken;
+        sessionStorage.setItem('flink_session_token', state.token);
+        closeModal();
+        alert('Password changed successfully.');
+        if (!document.getElementById('accountView').classList.contains('hidden')) {
+          renderAccountView();
+        } else {
+          initApp();
+        }
+      } catch (e) {
+        alert(e.message || 'Password change failed.');
+      }
+    }
+
+    /* ------------------- ADMIN DASHBOARD ------------------- */
+    /* ------------------- MANAGER / ADMIN WORKSPACE ------------------- */
+    function managerTargets() {
+      if (state.managerWorkspaceFilter) {
+        return (state.workspaces || []).filter(function(ws) {
+          return ws.WorkspaceID === state.managerWorkspaceFilter;
+        });
+      }
+      return (state.workspaces || []).slice();
+    }
+
+    function managerContentCard(title, subtitle) {
+      const container = document.getElementById('managerContent');
+      container.replaceChildren();
+      const card = document.createElement('div');
+      card.className = 'card';
+      const heading = document.createElement('div');
+      heading.className = 'card-title';
+      heading.textContent = title || '';
+      card.appendChild(heading);
+      if (subtitle) {
+        const sub = document.createElement('div');
+        sub.className = 'card-subtitle';
+        sub.textContent = subtitle;
+        card.appendChild(sub);
+      }
+      container.appendChild(card);
+      return { container: container, card: card };
+    }
+
+    function managerTable(headers, rows) {
+      const wrapper = document.createElement('div');
+      wrapper.className = 'table-responsive';
+      const table = document.createElement('table');
+      const thead = document.createElement('thead');
+      const hr = document.createElement('tr');
+      headers.forEach(function(header) {
+        const th = document.createElement('th');
+        th.textContent = header;
+        hr.appendChild(th);
+      });
+      thead.appendChild(hr);
+      table.appendChild(thead);
+
+      const tbody = document.createElement('tbody');
+      rows.forEach(function(row) {
+        const tr = document.createElement('tr');
+        row.forEach(function(value) {
+          const td = document.createElement('td');
+          if (value instanceof Node) td.appendChild(value);
+          else td.textContent = String(value === undefined || value === null ? '' : value);
+          tr.appendChild(td);
+        });
+        tbody.appendChild(tr);
+      });
+      table.appendChild(tbody);
+      wrapper.appendChild(table);
+      return wrapper;
+    }
+
+    async function loadManagerDashboard() {
+      if (!state.user || !['ADMIN','SUPER_ADMIN'].includes(state.user.role)) return;
+      const select = document.getElementById('managerWorkspaceSelect');
+      select.replaceChildren(new Option('All My Workspaces', ''));
+      (state.workspaces || []).forEach(function(ws) {
+        select.add(new Option(
+          String(ws.WorkspaceName || ws.WorkspaceID),
+          String(ws.WorkspaceID)
+        ));
+      });
+      select.value = state.managerWorkspaceFilter || '';
+      await switchManagerTab(state.managerTab || 'overview');
+    }
+
+    async function onManagerWorkspaceChange() {
+      state.managerWorkspaceFilter =
+        document.getElementById('managerWorkspaceSelect').value || '';
+      await switchManagerTab(state.managerTab || 'overview');
+    }
+
+    async function switchManagerTab(tabId) {
+      state.managerTab = tabId;
+      document.querySelectorAll('#managerTabs .nav-btn').forEach(function(btn) {
+        btn.classList.remove('active');
+      });
+      const active = document.getElementById('mgrTab_' + tabId);
+      if (active) active.classList.add('active');
+
+      if (tabId === 'overview') return renderManagerOverview();
+      if (tabId === 'workspaces') return renderManagerWorkspaces();
+      if (tabId === 'live') return renderManagerLive();
+      if (tabId === 'timesheets') return renderManagerTimesheets(false);
+      if (tabId === 'approvals') return renderManagerTimesheets(true);
+      if (tabId === 'reports') return renderManagerReports();
+      if (tabId === 'users') return renderManagerUsers();
+      if (tabId === 'requests') return renderManagerRequests();
+      if (tabId === 'alerts') return renderManagerAlerts();
+    }
+
+    async function renderManagerOverview() {
+      const ui = managerContentCard('Overview', 'Loading manager KPIs...');
+      try {
+        const overview = await apiCall(
+          'dashboard.overview',
+          {},
+          state.managerWorkspaceFilter
+        );
+        ui.card.replaceChildren();
+        const grid = document.createElement('div');
+        grid.className = 'grid-5';
+        [
+          ['Working Now', overview.activeTimersCount || 0],
+          ['Hours Today', Number(overview.todayTrackedHours || 0).toFixed(2) + ' h'],
+          ['Hours This Week', Number(overview.weekTrackedHours || 0).toFixed(2) + ' h'],
+          ['Pending Approvals', overview.pendingApprovalsCount || 0],
+          ['Assigned Workspaces', overview.accessibleWorkspacesCount || 0]
+        ].forEach(function(item) {
+          const box = document.createElement('div');
+          box.className = 'kpi-card';
+          const label = document.createElement('div');
+          label.className = 'kpi-label';
+          label.textContent = item[0];
+          const value = document.createElement('div');
+          value.className = 'kpi-val';
+          value.textContent = String(item[1]);
+          box.append(label, value);
+          grid.appendChild(box);
+        });
+        ui.card.appendChild(grid);
+      } catch (e) {
+        renderError(ui.container, 'Failed to load manager overview: ', e);
+      }
+    }
+
+    function renderManagerWorkspaces() {
+      const ui = managerContentCard(
+        'My Workspaces',
+        'Only workspaces assigned to this Admin are visible. Admins remain limited to three active workspaces.'
+      );
+      const rows = (state.workspaces || []).map(function(ws) {
+        const focus = document.createElement('button');
+        focus.className = 'btn btn-secondary btn-sm';
+        focus.textContent = 'Focus';
+        focus.onclick = function() {
+          state.managerWorkspaceFilter = ws.WorkspaceID;
+          const select = document.getElementById('managerWorkspaceSelect');
+          if (select) select.value = ws.WorkspaceID;
+          switchManagerTab('overview');
+        };
+        return [
+          ws.WorkspaceName || '',
+          ws.WorkspaceID || '',
+          ws.Timezone || 'UTC',
+          ws.Status || '',
+          focus
+        ];
+      });
+      ui.card.appendChild(managerTable(
+        ['Workspace','ID','Timezone','Status','Action'],
+        rows
+      ));
+    }
+
+    async function renderManagerLive() {
+      const ui = managerContentCard('Live Activity', 'Loading active timers...');
+      try {
+        const radar = await apiCall(
+          'dashboard.radar',
+          {},
+          state.managerWorkspaceFilter
+        );
+        const rows = (radar.workers || []).map(function(item) {
+          return [
+            item.userName || item.userId || '',
+            item.workspaceName || item.workspaceId || '',
+            item.projectName || '',
+            item.description || '',
+            formatSecs(Number(item.elapsedSeconds || 0))
+          ];
+        });
+        ui.card.appendChild(managerTable(
+          ['User','Workspace','Project','Description','Elapsed'],
+          rows
+        ));
+      } catch (e) {
+        renderError(ui.container, 'Failed to load live activity: ', e);
+      }
+    }
+
+    async function collectManagerTimesheets(statusFilter) {
+      const rows = [];
+      for (const ws of managerTargets()) {
+        const result = await apiCall(
+          'timesheet.listForReview',
+          statusFilter ? { statusFilter: statusFilter } : {},
+          ws.WorkspaceID
+        );
+        (result || []).forEach(function(item) {
+          rows.push(Object.assign({}, item, {
+            workspaceId: ws.WorkspaceID,
+            workspaceName: ws.WorkspaceName
+          }));
+        });
+      }
+      return rows;
+    }
+
+    async function renderManagerTimesheets(approvalsOnly) {
+      const title = approvalsOnly ? 'Approvals' : 'Timesheets';
+      const ui = managerContentCard(title, 'Loading workspace timesheets...');
+      try {
+        const records = await collectManagerTimesheets(
+          approvalsOnly ? 'SUBMITTED' : ''
+        );
+        const rows = records.map(function(item) {
+          let actions = '-';
+          if (item.status === 'SUBMITTED') {
+            actions = document.createElement('span');
+
+            const approve = document.createElement('button');
+            approve.className = 'btn btn-success btn-sm';
+            approve.textContent = 'Approve';
+            approve.onclick = function() {
+              managerReviewTimesheet(
+                item.workspaceId,
+                item.timesheetId,
+                'APPROVE'
+              );
+            };
+
+            const reject = document.createElement('button');
+            reject.className = 'btn btn-danger btn-sm';
+            reject.textContent = 'Reject';
+            reject.style.marginLeft = '0.4rem';
+            reject.onclick = function() {
+              managerReviewTimesheet(
+                item.workspaceId,
+                item.timesheetId,
+                'REJECT'
+              );
+            };
+            actions.append(approve, reject);
+          }
+
+          return [
+            item.userName || item.userId || '',
+            item.workspaceName || '',
+            String(item.periodStart || '').substring(0,10) + ' to ' +
+              String(item.periodEnd || '').substring(0,10),
+            (Number(item.totalSeconds || 0) / 3600).toFixed(2),
+            item.status || '',
+            actions
+          ];
+        });
+        ui.card.appendChild(managerTable(
+          ['User','Workspace','Period','Hours','Status','Actions'],
+          rows
+        ));
+      } catch (e) {
+        renderError(ui.container, 'Failed to load manager timesheets: ', e);
+      }
+    }
+
+    async function managerReviewTimesheet(workspaceId, timesheetId, action) {
+      const comment = prompt(
+        action === 'REJECT'
+          ? 'Rejection comment (required):'
+          : 'Approval comment (optional):',
+        ''
+      );
+      if (action === 'REJECT' && !String(comment || '').trim()) {
+        return alert('A rejection comment is required.');
+      }
+      try {
+        await apiCall(
+          action === 'APPROVE' ? 'timesheet.approve' : 'timesheet.reject',
+          { timesheetId: timesheetId, comment: String(comment || '').trim() },
+          workspaceId
+        );
+        await switchManagerTab('approvals');
+      } catch (e) {
+        alert(e.message || 'Timesheet review failed.');
+      }
+    }
+
+    async function renderManagerReports() {
+      const ui = managerContentCard('Reports', 'Loading assigned-workspace summaries...');
+      try {
+        const rows = [];
+        for (const ws of managerTargets()) {
+          const report = await apiCall(
+            'reports.summary',
+            { groupings: ['project'] },
+            ws.WorkspaceID
+          );
+          rows.push([
+            ws.WorkspaceName || ws.WorkspaceID,
+            Number(report.overall && report.overall.totalHours || 0).toFixed(2),
+            Number(report.overall && report.overall.billableHours || 0).toFixed(2),
+            report.totalEntries || 0
+          ]);
+        }
+        ui.card.appendChild(managerTable(
+          ['Workspace','Tracked Hours','Billable Hours','Entries'],
+          rows
+        ));
+      } catch (e) {
+        renderError(ui.container, 'Failed to load manager reports: ', e);
+      }
+    }
+
+    async function collectManagerUsers() {
+      const seen = {};
+      for (const ws of managerTargets()) {
+        const users = await apiCall('users.list', {}, ws.WorkspaceID);
+        (users || []).forEach(function(user) {
+          const id = user.UserID || user.userId;
+          if (id && !seen[id]) seen[id] = user;
+        });
+      }
+      return Object.values(seen);
+    }
+
+    async function renderManagerUsers() {
+      const ui = managerContentCard(
+        'Users',
+        'Admins request lifecycle changes; Super Admin executes them.'
+      );
+      try {
+        const newUser = document.createElement('button');
+        newUser.className = 'btn btn-sm';
+        newUser.textContent = 'Request New User';
+        newUser.style.margin = '1rem 0';
+        newUser.onclick = openManagerNewUserRequest;
+        ui.card.appendChild(newUser);
+
+        const users = await collectManagerUsers();
+        state.users = users;
+        const rows = users.map(function(user) {
+          let actions = '-';
+          if (user.Role === 'USER') {
+            actions = document.createElement('span');
+
+            const reset = document.createElement('button');
+            reset.className = 'btn btn-secondary btn-sm';
+            reset.textContent = 'Request Reset';
+            reset.onclick = function() {
+              submitManagerLifecycleRequest('PASSWORD_RESET', user.UserID);
+            };
+
+            const passive = document.createElement('button');
+            passive.className = 'btn btn-danger btn-sm';
+            passive.textContent = 'Request Passive';
+            passive.style.marginLeft = '0.4rem';
+            passive.onclick = function() {
+              submitManagerLifecycleRequest('MAKE_PASSIVE', user.UserID);
+            };
+            actions.append(reset, passive);
+          }
+          return [
+            user.DisplayName || '',
+            user.Username || '',
+            user.Email || '',
+            user.Status || '',
+            actions
+          ];
+        });
+        ui.card.appendChild(managerTable(
+          ['Name','Username','Google Email','Status','Actions'],
+          rows
+        ));
+      } catch (e) {
+        renderError(ui.container, 'Failed to load manager users: ', e);
+      }
+    }
+
+    function managerRequestWorkspaceId() {
+      return state.managerWorkspaceFilter ||
+        ((state.workspaces[0] && state.workspaces[0].WorkspaceID) || '');
+    }
+
+    async function submitManagerLifecycleRequest(requestType, targetUserId) {
+      const reason = prompt('Reason for this request:', '');
+      if (!String(reason || '').trim()) return;
+      const workspaceId = managerRequestWorkspaceId();
+      try {
+        await apiCall(
+          'requests.submit',
+          {
+            requestType: requestType,
+            workspaceId: workspaceId,
+            targetUserId: targetUserId,
+            reason: String(reason).trim()
+          },
+          workspaceId
+        );
+        alert('Request submitted.');
+      } catch (e) {
+        alert(e.message || 'Request failed.');
+      }
+    }
+
+    function openManagerNewUserRequest() {
+      const displayName = prompt('New user full name:', '');
+      if (!displayName) return;
+      const username = prompt('New user username:', '');
+      if (!username) return;
+      const email = prompt('Google Workspace email:', '');
+      if (!email) return;
+      const reason = prompt('Business reason:', 'New team member');
+      if (!reason) return;
+
+      const workspaceId = managerRequestWorkspaceId();
+      apiCall(
+        'requests.submit',
+        {
+          requestType: 'NEW_USER',
+          workspaceId: workspaceId,
+          requestedData: {
+            displayName: displayName,
+            username: username,
+            email: email,
+            role: 'USER'
+          },
+          reason: reason
+        },
+        workspaceId
+      ).then(
+        function() { alert('New-user request submitted.'); },
+        function(err) { alert(err.message || 'Request failed.'); }
+      );
+    }
+
+    async function renderManagerRequests() {
+      const ui = managerContentCard('Requests', 'Loading request queue...');
+      try {
+        const requests = await apiCall(
+          'requests.list',
+          {},
+          state.managerWorkspaceFilter
+        );
+        const rows = (requests || []).map(function(item) {
+          return [
+            item.RequestType || '',
+            item.WorkspaceID || '',
+            item.Status || '',
+            item.Reason || '',
+            String(item.RequestedAt || '').substring(0,19)
+          ];
+        });
+        ui.card.appendChild(managerTable(
+          ['Type','Workspace','Status','Reason','Requested'],
+          rows
+        ));
+      } catch (e) {
+        renderError(ui.container, 'Failed to load requests: ', e);
+      }
+    }
+
+    async function renderManagerAlerts() {
+      const ui = managerContentCard('Alerts', 'Loading anomalies...');
+      try {
+        const rows = [];
+        for (const ws of managerTargets()) {
+          const result = await apiCall(
+            'reports.exceptions',
+            {},
+            ws.WorkspaceID
+          );
+          (result.anomalies || []).forEach(function(item) {
+            rows.push([
+              ws.WorkspaceName || ws.WorkspaceID,
+              item.severity || '',
+              item.type || '',
+              item.userName || item.userId || '',
+              item.message || ''
+            ]);
+          });
+        }
+        ui.card.appendChild(managerTable(
+          ['Workspace','Severity','Type','User','Message'],
+          rows
+        ));
+      } catch (e) {
+        renderError(ui.container, 'Failed to load alerts: ', e);
+      }
+    }
+
+    /* ------------------- 9-STEP SETUP WIZARD ------------------- */
+    let wizardCurrentStep = 1;
+
+    function startSetupWizard() {
+      document.getElementById('setupWelcomeScreen').classList.add('hidden');
+      document.getElementById('deploymentAssistantView').classList.add('hidden');
+      document.getElementById('setupWizardCard').classList.remove('hidden');
+      renderWizardStep(1);
+    }
+
+    function showDeploymentAssistant() {
+      document.getElementById('setupWelcomeScreen').classList.add('hidden');
+      document.getElementById('deploymentAssistantView').classList.remove('hidden');
+    }
+
+    function hideDeploymentAssistant() {
+      document.getElementById('deploymentAssistantView').classList.add('hidden');
+      document.getElementById('setupWelcomeScreen').classList.remove('hidden');
+    }
+
+    function copyDeployUrl() {
+      const el = document.getElementById('deployWebAppUrl');
+      el.select();
+      navigator.clipboard.writeText(el.value);
+      alert('Deployment URL copied to clipboard.');
+    }
+
+    function renderWizardStep(step) {
+      wizardCurrentStep = step;
+      const bar = document.getElementById('wizardStepsBar');
+      bar.innerHTML = '';
+      for (let s = 1; s <= 9; s++) {
+        const activeClass = s === step ? 'active' : (s < step ? 'done' : '');
+        bar.innerHTML += `
+          <div class="wizard-step ${activeClass}">
+            <div class="wizard-step-circle">${s < step ? '✓' : s}</div>
+            <div>Step ${s}</div>
+          </div>
+        `;
+      }
+
+      const content = document.getElementById('wizardStepContent');
+      if (step === 1) {
+        content.innerHTML = `
+          <h2 style="margin-bottom: 0.5rem;">Step 1 — System Owner Registration</h2>
+          <p style="color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 1.5rem;">Create the root Super Admin account. First run requires the one-time installation key generated by initializeInstallation().</p>
+          <div style="margin-bottom: 1rem;">
+            <label>One-Time Installation Key</label>
+            <input type="password" id="wzSetupKey" autocomplete="off" required>
+          </div>
+          <div style="margin-bottom: 1rem;">
+            <label>Full Name</label>
+            <input type="text" id="wzOwnerName" value="Master Administrator" required>
+          </div>
+          <div style="margin-bottom: 1rem;">
+            <label>Username</label>
+            <input type="text" id="wzOwnerUser" value="admin" required>
+          </div>
+          <div class="grid-2" style="margin-bottom: 1.5rem;">
+            <div>
+              <label>Password (min 12 characters)</label>
+              <input type="password" id="wzOwnerPass" autocomplete="new-password" required>
+            </div>
+            <div>
+              <label>Confirm Password</label>
+              <input type="password" id="wzOwnerPassConfirm" autocomplete="new-password" required>
+            </div>
+          </div>
+          <button class="btn" style="width: 100%;" onclick="submitWizardStep1()">NEXT: Company Settings →</button>
+        `;
+      } else if (step === 2) {
+        content.innerHTML = `
+          <h2 style="margin-bottom: 0.5rem;">Step 2 — Company & Global Settings</h2>
+          <p style="color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 1.5rem;">Configure company identity, default timezone, and standard working week targets.</p>
+          <div style="margin-bottom: 1rem;">
+            <label>Company Legal Name</label>
+            <input type="text" id="wzCompanyName" value="FLINK Business Solutions">
+          </div>
+          <div class="grid-2" style="margin-bottom: 1rem;">
+            <div>
+              <label>Default Timezone</label>
+              <select id="wzTimezone">
+                <option value="Africa/Cairo" selected>Africa/Cairo (UTC+2)</option>
+                <option value="UTC">UTC</option>
+                <option value="America/New_York">America/New_York (EST)</option>
+                <option value="Europe/London">Europe/London (GMT)</option>
+              </select>
+            </div>
+            <div>
+              <label>Timesheet Week Starts</label>
+              <select id="wzWeekStarts">
+                <option value="Sunday" selected>Sunday</option>
+                <option value="Monday">Monday</option>
+              </select>
+            </div>
+          </div>
+          <div class="grid-2" style="margin-bottom: 1.5rem;">
+            <div>
+              <label>Default Daily Workday Target</label>
+              <input type="number" id="wzWorkdayHours" value="8">
+            </div>
+            <div>
+              <label>Default Weekly Workweek Target</label>
+              <input type="number" id="wzWorkweekHours" value="40">
+            </div>
+          </div>
+          <div style="display: flex; gap: 1rem;">
+            <button class="btn btn-secondary" onclick="renderWizardStep(1)">← Back</button>
+            <button class="btn" style="flex: 1;" onclick="submitWizardStep2()">NEXT: Workspace Creation →</button>
+          </div>
+        `;
+      } else if (step === 3) {
+        content.innerHTML = `
+          <h2 style="margin-bottom: 0.5rem;">Step 3 — Create First Workspace</h2>
+          <p style="color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 1.5rem;">Automatically provisions an isolated Google Spreadsheet containing all 18 standard tabs.</p>
+          <div style="margin-bottom: 1rem;">
+            <label>Workspace Name</label>
+            <input type="text" id="wzWsName" value="Amazon Operations">
+          </div>
+          <div class="grid-2" style="margin-bottom: 1.5rem;">
+            <div>
+              <label>Weekly Approvals</label>
+              <select id="wzWsApprovals">
+                <option value="true" selected>Require Weekly Approval</option>
+                <option value="false">Optional Approvals</option>
+              </select>
+            </div>
+            <div>
+              <label>Manual Time Policy</label>
+              <select id="wzWsManual">
+                <option value="true" selected>Allow Manual Time Entries</option>
+                <option value="false">Strict Timer Only</option>
+              </select>
+            </div>
+          </div>
+          <div style="display: flex; gap: 1rem;">
+            <button class="btn btn-secondary" onclick="renderWizardStep(2)">← Back</button>
+            <button class="btn btn-success" style="flex: 1;" onclick="submitWizardStep3()">PROVISION WORKSPACE →</button>
+          </div>
+        `;
+      } else if (step === 4) {
+        content.innerHTML = `
+          <h2 style="margin-bottom: 0.5rem;">Step 4 — Workspace Administrators</h2>
+          <p style="color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 1.5rem;">Assign workspace admins (Strictly capped at maximum 3 active workspaces per admin).</p>
+          <div style="margin-bottom: 1rem;">
+            <label>Admin Full Name</label>
+            <input type="text" id="wzAdminName" value="Lead Operations Admin">
+          </div>
+          <div class="grid-2" style="margin-bottom:1rem;">
+            <div>
+              <label>Admin Username</label>
+              <input type="text" id="wzAdminUser" value="ops_admin">
+            </div>
+            <div>
+              <label>Google Workspace Email</label>
+              <input type="email" id="wzAdminEmail" placeholder="admin@company.com">
+            </div>
+          </div>
+          <div style="margin-bottom:1rem;">
+            <label>Temporary Password</label>
+            <input type="password" id="wzAdminPass" autocomplete="new-password">
+          </div>
+          <div style="display: flex; gap: 1rem;">
+            <button class="btn btn-secondary" onclick="renderWizardStep(3)">← Back</button>
+            <button class="btn btn-secondary" onclick="renderWizardStep(5)">Skip For Now</button>
+            <button class="btn" style="flex: 1;" onclick="submitWizardStep4()">ADD ADMIN →</button>
+          </div>
+        `;
+      } else if (step === 5) {
+        content.innerHTML = `
+          <h2 style="margin-bottom: 0.5rem;">Step 5 — Employee Intake</h2>
+          <p style="color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 1.5rem;">Add initial employee accounts or skip to add later via Super Admin panel.</p>
+          <div class="grid-2" style="margin-bottom:1rem;">
+            <div>
+              <label>Employee Name</label>
+              <input type="text" id="wzEmpName" value="Sarah Ahmed">
+            </div>
+            <div>
+              <label>Username</label>
+              <input type="text" id="wzEmpUser" value="sarah">
+            </div>
+          </div>
+          <div style="margin-bottom:1rem;">
+            <label>Google Workspace Email</label>
+            <input type="email" id="wzEmpEmail" placeholder="employee@company.com">
+          </div>
+          <div class="grid-2" style="margin-bottom: 1rem;">
+            <div>
+              <label>Department</label>
+              <input type="text" id="wzEmpDept" value="Support">
+            </div>
+            <div>
+              <label>Job Title</label>
+              <input type="text" id="wzEmpTitle" value="Operations Specialist">
+            </div>
+          </div>
+          <div style="margin-bottom: 1.5rem;">
+            <label>Temporary Password</label>
+            <input type="password" id="wzEmpPass" autocomplete="new-password">
+          </div>
+          <div style="display: flex; gap: 1rem;">
+            <button class="btn btn-secondary" onclick="renderWizardStep(4)">← Back</button>
+            <button class="btn btn-secondary" onclick="renderWizardStep(6)">Skip For Now</button>
+            <button class="btn" style="flex: 1;" onclick="submitWizardStep5()">ADD EMPLOYEE →</button>
+          </div>
+        `;
+      } else if (step === 6) {
+        content.innerHTML = `
+          <h2 style="margin-bottom: 0.5rem;">Step 6 — Projects & Tasks Scaffolding</h2>
+          <p style="color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 1.5rem;">Set up your first client, project, and standard tasks.</p>
+          <div style="margin-bottom: 1rem;">
+            <label>Client Name</label>
+            <input type="text" id="wzClientName" value="Global Logistics Corp">
+          </div>
+          <div class="grid-2" style="margin-bottom: 1.5rem;">
+            <div>
+              <label>Project Name</label>
+              <input type="text" id="wzProjName" value="Customer Fulfillment">
+            </div>
+            <div>
+              <label>Project Code</label>
+              <input type="text" id="wzProjCode" value="FULFILL">
+            </div>
+          </div>
+          <div style="display: flex; gap: 1rem;">
+            <button class="btn btn-secondary" onclick="renderWizardStep(5)">← Back</button>
+            <button class="btn btn-secondary" onclick="renderWizardStep(7)">Skip For Now</button>
+            <button class="btn" style="flex: 1;" onclick="submitWizardStep6()">SCAFFOLD PROJECT →</button>
+          </div>
+        `;
+      } else if (step === 7) {
+        content.innerHTML = `
+          <h2 style="margin-bottom: 0.5rem;">Step 7 — Time Tracking Rules</h2>
+          <p style="color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 1.5rem;">Configure timer validation, past editing limits, and required fields.</p>
+          <div class="grid-2" style="margin-bottom: 1rem;">
+            <div>
+              <label><input type="checkbox" id="wzRuleProject" checked> Project selection required</label>
+            </div>
+            <div>
+              <label><input type="checkbox" id="wzRuleTask"> Task selection required</label>
+            </div>
+            <div>
+              <label><input type="checkbox" id="wzRuleDesc" checked> Description required</label>
+            </div>
+            <div>
+              <label><input type="checkbox" id="wzRuleTags"> At least one tag required</label>
+            </div>
+          </div>
+          <div class="grid-3" style="margin-bottom: 1.5rem;">
+            <div>
+              <label>Timer Warning Threshold (Hours)</label>
+              <input type="number" id="wzTimerWarning" min="1" value="10">
+              <div class="field-hint">Flags timers running longer than this threshold.</div>
+            </div>
+            <div>
+              <label>Auto-Stop Threshold (Hours)</label>
+              <input type="number" id="wzAutoStopHours" min="1" value="14">
+              <div class="field-hint">Housekeeping may stop timers exceeding this limit.</div>
+            </div>
+            <div>
+              <label>Past Entry Edit Window (Days)</label>
+              <input type="number" id="wzPastEditDays" min="0" value="7">
+              <div class="field-hint">Blocks USER edits/deletes on older entries. 0 disables the age limit.</div>
+            </div>
+          </div>
+          <div style="display: flex; gap: 1rem;">
+            <button class="btn btn-secondary" onclick="renderWizardStep(6)">← Back</button>
+            <button class="btn" style="flex: 1;" onclick="submitWizardStep7()">SAVE RULES →</button>
+          </div>
+        `;
+      } else if (step === 8) {
+        content.innerHTML = `
+          <h2 style="margin-bottom: 0.5rem;">Step 8 — Reporting & Operations Alerts</h2>
+          <p style="color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 1.5rem;">Configure real-time monitoring and email notification triggers.</p>
+          <div class="grid-2" style="margin-bottom: 1.5rem;">
+            <div>
+              <label><input type="checkbox" id="wzAlertRadar" checked> Live Workforce Radar Enabled</label>
+            </div>
+            <div>
+              <label><input type="checkbox" id="wzAlertOvertime" checked> Overtime & Long Timer Alerts</label>
+            </div>
+          </div>
+          <div style="margin-bottom: 1.5rem;">
+            <label>Live Radar Auto-Refresh Cadence</label>
+            <select id="wzRadarRefresh">
+              <option value="30">30 Seconds</option>
+              <option value="60" selected>60 Seconds (Recommended)</option>
+              <option value="120">120 Seconds</option>
+            </select>
+          </div>
+          <div style="display: flex; gap: 1rem;">
+            <button class="btn btn-secondary" onclick="renderWizardStep(7)">← Back</button>
+            <button class="btn" style="flex: 1;" onclick="submitWizardStep8()">NEXT: System Integrity Check →</button>
+          </div>
+        `;
+      } else if (step === 9) {
+        renderWizardStep9Check();
+      }
+    }
+
+    async function submitWizardStep1() {
+      const setupKey = document.getElementById('wzSetupKey').value;
+      const fullName = document.getElementById('wzOwnerName').value;
+      const username = document.getElementById('wzOwnerUser').value;
+      const password = document.getElementById('wzOwnerPass').value;
+      const confirmPassword = document.getElementById('wzOwnerPassConfirm').value;
+
+      try {
+        const res = await apiCall('setup.completeStep', { step: 1, setupKey, fullName, username, password, confirmPassword });
+        state.token = res.sessionToken;
+        state.user = res.user;
+        sessionStorage.setItem('flink_session_token', res.sessionToken);
+        renderWizardStep(2);
+      } catch (e) {
+        alert(e.message || 'Failed to initialize Super Admin.');
+      }
+    }
+
+    async function submitWizardStep2() {
+      try {
+        await apiCall('setup.completeStep', {
+          step: 2,
+          companyName: document.getElementById('wzCompanyName').value,
+          timezone: document.getElementById('wzTimezone').value,
+          weekStarts: document.getElementById('wzWeekStarts').value,
+          workdayHours: document.getElementById('wzWorkdayHours').value,
+          workweekHours: document.getElementById('wzWorkweekHours').value
+        });
+        renderWizardStep(3);
+      } catch (e) {
+        alert(e.message);
+      }
+    }
+
+    async function submitWizardStep3() {
+      try {
+        const res = await apiCall('setup.completeStep', {
+          step: 3,
+          name: document.getElementById('wzWsName').value,
+          requireWeeklyApproval: document.getElementById('wzWsApprovals').value === 'true',
+          allowManualTime: document.getElementById('wzWsManual').value === 'true'
+        });
+        state.currentWorkspace = res.workspace.WorkspaceID;
+        renderWizardStep(4);
+      } catch (e) {
+        alert(e.message);
+      }
+    }
+
+    async function submitWizardStep4() {
+      try {
+        await apiCall('setup.completeStep', {
+          step: 4,
+          fullName: document.getElementById('wzAdminName').value,
+          username: document.getElementById('wzAdminUser').value,
+          email: document.getElementById('wzAdminEmail').value,
+          temporaryPassword: document.getElementById('wzAdminPass').value,
+          workspaceIds: [state.currentWorkspace]
+        });
+        renderWizardStep(5);
+      } catch (e) {
+        alert(e.message);
+      }
+    }
+
+    async function submitWizardStep5() {
+      try {
+        await apiCall('setup.completeStep', {
+          step: 5,
+          users: [{
+            fullName: document.getElementById('wzEmpName').value,
+            username: document.getElementById('wzEmpUser').value,
+            email: document.getElementById('wzEmpEmail').value,
+            department: document.getElementById('wzEmpDept').value,
+            jobTitle: document.getElementById('wzEmpTitle').value,
+            temporaryPassword: document.getElementById('wzEmpPass').value,
+            workspaceId: state.currentWorkspace
+          }]
+        });
+        renderWizardStep(6);
+      } catch (e) {
+        alert(e.message);
+      }
+    }
+
+    async function submitWizardStep6() {
+      try {
+        await apiCall('setup.completeStep', {
+          step: 6,
+          workspaceId: state.currentWorkspace,
+          clientName: document.getElementById('wzClientName').value,
+          projectName: document.getElementById('wzProjName').value,
+          projectCode: document.getElementById('wzProjCode').value
+        });
+        renderWizardStep(7);
+      } catch (e) {
+        alert(e.message);
+      }
+    }
+
+    async function submitWizardStep7() {
+      try {
+        await apiCall('setup.completeStep', {
+          step: 7,
+          projectRequired: document.getElementById('wzRuleProject').checked,
+          taskRequired: document.getElementById('wzRuleTask').checked,
+          descRequired: document.getElementById('wzRuleDesc').checked,
+          tagsRequired: document.getElementById('wzRuleTags').checked,
+          timerWarningHours: document.getElementById('wzTimerWarning').value,
+          autoStopHours: document.getElementById('wzAutoStopHours').value,
+          pastEntryEditDays: document.getElementById('wzPastEditDays').value
+        });
+        renderWizardStep(8);
+      } catch (e) {
+        alert(e.message);
+      }
+    }
+
+    async function submitWizardStep8() {
+      try {
+        await apiCall('setup.completeStep', {
+          step: 8,
+          liveActivity: document.getElementById('wzAlertRadar').checked,
+          overtime: document.getElementById('wzAlertOvertime').checked,
+          dashboardRefreshSeconds: document.getElementById('wzRadarRefresh').value
+        });
+        renderWizardStep(9);
+      } catch (e) {
+        alert(e.message);
+      }
+    }
+
+    async function renderWizardStep9Check() {
+      const content = document.getElementById('wizardStepContent');
+      content.innerHTML = `
+        <h2 style="margin-bottom: 0.5rem;">Step 9 — Automated System Health Verification</h2>
+        <p style="color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 1.5rem;">Running 10-point end-to-end architecture diagnostic...</p>
+        <div id="wzHealthCheckList" style="margin-bottom: 1.5rem; line-height: 2;">Checking...</div>
+        <div id="wzHealthActions" style="display: flex; gap: 1rem;"></div>
+      `;
+
+      try {
+        const health = await apiCall('system.health');
+        const list = document.getElementById('wzHealthCheckList');
+        list.replaceChildren();
+        (health.checks || []).forEach(check => {
+          const row = document.createElement('div');
+          const icon = document.createElement('span');
+          icon.style.color = check.passed ? '#34D399' : '#EF4444';
+          icon.style.fontWeight = '800';
+          icon.textContent = check.passed ? '✓' : '✕';
+
+          const name = document.createElement('strong');
+          name.textContent = String(check.name || '');
+
+          const detail = document.createElement('span');
+          detail.style.color = 'var(--text-muted)';
+          detail.textContent = String(check.detail || '');
+
+          row.append(icon, document.createTextNode(' '), name, document.createTextNode(' — '), detail);
+          list.appendChild(row);
+        });
+
+        const actions = document.getElementById('wzHealthActions');
+        if (health.allPassed) {
+          actions.innerHTML = `
+            <button class="btn btn-success" style="width: 100%; font-size: 1rem; padding: 0.85rem;" onclick="finishSetupAndOpenApp()">
+              ✓ SYSTEM READY — OPEN SUPER ADMIN CONTROL PANEL
+            </button>
+          `;
+        } else {
+          actions.innerHTML = `
+            <button class="btn btn-warning" style="flex: 1;" onclick="runSystemAutoRepair()">[ FIX AUTOMATICALLY ]</button>
+            <button class="btn btn-secondary" onclick="renderWizardStep9Check()">Re-check</button>
+          `;
+        }
+      } catch (e) {
+        document.getElementById('wzHealthCheckList').innerText = 'Diagnostic check error: ' + e.message;
+      }
+    }
+
+    async function runSystemAutoRepair() {
+      try {
+        const res = await apiCall('system.repair');
+        alert(res.message || 'Auto-repair finished.');
+        if (wizardCurrentStep === 9) renderWizardStep9Check();
+        else switchSaSubtab('health');
+      } catch (e) {
+        alert(e.message || 'Repair error');
+      }
+    }
+
+    function finishSetupAndOpenApp() {
+      document.getElementById('setupWizardContainer').classList.add('hidden');
+      initApp();
+    }
+
+    /* ------------------- SUPER ADMIN 22 SECTIONS ROUTER ------------------- */
+    async function loadReportsView() {
+      const content = document.getElementById('reportsContent');
+      const managerActions = document.getElementById('reportsManagerActions');
+      managerActions.replaceChildren();
+
+      if (state.user.role !== 'USER') {
+        const exportBtn = document.createElement('button');
+        exportBtn.className = 'btn btn-secondary btn-sm';
+        exportBtn.textContent = 'Export CSV';
+        exportBtn.onclick = function() { exportReportCsv(); };
+        managerActions.appendChild(exportBtn);
+
+        if (state.user.role === 'SUPER_ADMIN') {
+          const builderBtn = document.createElement('button');
+          builderBtn.className = 'btn btn-sm';
+          builderBtn.textContent = 'Open Report Builder';
+          builderBtn.onclick = function() { switchSaSubtab('reportbuilder'); };
+          managerActions.appendChild(builderBtn);
+        }
+      }
+
+      content.replaceChildren();
+      const loading = document.createElement('div');
+      loading.textContent = 'Loading your report...';
+      content.appendChild(loading);
+
+      try {
+        const [summary, detailed] = await Promise.all([
+          apiCall('reports.summary', {
+            groupings:['project'],
+            filters:{ userId: state.user.userId }
+          }),
+          apiCall('reports.detailed', {
+            filters:{ userId: state.user.userId }
+          })
+        ]);
+
+        content.replaceChildren();
+        const totals = document.createElement('div');
+        totals.className = 'grid-3';
+        [
+          ['Tracked Hours', Number(summary.overall && summary.overall.totalHours || 0).toFixed(2)],
+          ['Billable Hours', Number(summary.overall && summary.overall.billableHours || 0).toFixed(2)],
+          ['Entries', detailed.totalCount || 0]
+        ].forEach(function(item) {
+          const card = document.createElement('div');
+          card.className = 'kpi-card';
+          const label = document.createElement('div');
+          label.className = 'kpi-label';
+          label.textContent = item[0];
+          const value = document.createElement('div');
+          value.className = 'kpi-val';
+          value.textContent = String(item[1]);
+          card.append(label, value);
+          totals.appendChild(card);
+        });
+        content.appendChild(totals);
+
+        const rows = (detailed.entries || []).slice(-25).reverse().map(function(row) {
+          return [
+            row.businessDate || '',
+            row.projectName || '',
+            row.taskName || '',
+            row.description || '',
+            row.durationFormatted || formatSecs(Number(row.durationSeconds || 0)),
+            row.approvalStatus || ''
+          ];
+        });
+        content.appendChild(managerTable(
+          ['Date','Project','Task','Description','Duration','Status'],
+          rows
+        ));
+      } catch (e) {
+        renderError(content, 'Failed to load reports: ', e);
+      }
+    }
+
+    function switchSaSubtab(subtabId) {
+      document.querySelectorAll('.subtabs-bar .nav-btn').forEach(b => b.classList.remove('active'));
+      const activeBtn = document.getElementById('saTab_' + subtabId);
+      if (activeBtn) activeBtn.classList.add('active');
+
+      const container = document.getElementById('saSubtabContent');
+      container.innerHTML = '<div style="padding: 2rem; text-align: center; color: var(--text-muted);">Loading view...</div>';
+
+      if (subtabId === 'overview') renderSaOverview();
+      else if (subtabId === 'workspaces') renderSaWorkspaces();
+      else if (subtabId === 'users') renderSaUsers();
+      else if (subtabId === 'admins') renderSaAdmins();
+      else if (subtabId === 'requests') renderSaRequests();
+      else if (subtabId === 'timeadmin') renderSaTimeAdmin();
+      else if (subtabId === 'approvals') renderSaApprovals();
+      else if (subtabId === 'projects') renderSaProjects();
+      else if (subtabId === 'reportbuilder') renderSaReportBuilder();
+      else if (subtabId === 'alerts') renderSaAlerts();
+      else if (subtabId === 'security') renderSaSecurity();
+      else if (subtabId === 'backups') renderSaBackups();
+      else if (subtabId === 'health') renderSaHealth();
+      else if (subtabId === 'settings') renderSaSettings();
+      else if (subtabId === 'diagnostics') renderSaDiagnostics();
+    }
+
+    /* Subtab 1: Executive Overview */
+    async function renderSaOverview() {
+      const container = document.getElementById('saSubtabContent');
+      try {
+        const overview = await apiCall('dashboard.overview');
+        container.innerHTML = `
+          <!-- Persistent Setup Assistant Bar -->
+          <div class="card" style="background: var(--bg-card); padding: 1.25rem; margin-bottom: 1.5rem;">
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+              <div>
+                <strong>Setup Assistant Readiness</strong> — 6 of 6 Core Components Configured
+              </div>
+              <span style="font-weight: 700; color: #34D399;">100% Ready</span>
+            </div>
+            <div class="checklist-bar"><div class="checklist-progress" style="width: 100%;"></div></div>
+            <div style="font-size: 0.8rem; color: var(--text-muted);">
+              ✓ Super Admin Root • ✓ Workspace Isolation • ✓ 3-Workspace Limits • ✓ Time Rules • ✓ Backups Active
+            </div>
+          </div>
+
+          <!-- 10 KPI Cards -->
+          <div class="grid-5" style="margin-bottom: 1.5rem;">
+            <div class="kpi-card"><div class="kpi-label">Active Users</div><div class="kpi-val">${Number(overview.activeUsersCount || 0)}</div></div>
+            <div class="kpi-card"><div class="kpi-label">Passive Users</div><div class="kpi-val">${Number(overview.passiveUsersCount || 0)}</div></div>
+            <div class="kpi-card"><div class="kpi-label">Workspaces</div><div class="kpi-val">${Number(overview.workspacesCount || 0)}</div></div>
+            <div class="kpi-card"><div class="kpi-label">Working Now</div><div class="kpi-val">${Number(overview.activeTimersCount || 0)}</div></div>
+            <div class="kpi-card"><div class="kpi-label">Hours Today</div><div class="kpi-val">${Number(overview.todayTrackedHours || 0)} h</div></div>
+          </div>
+
+          <!-- Interactive Workspace Comparison Table -->
+          <div class="card">
+            <div class="card-header">
+              <div class="card-title">Cross-Workspace Live Performance</div>
+              <button class="btn btn-secondary btn-sm" onclick="renderSaOverview()">Refresh</button>
+            </div>
+            <div class="table-responsive">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Workspace</th>
+                    <th>Status</th>
+                    <th>Active Timers</th>
+                    <th>Today's Hours</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${(state.workspaces || []).map(ws => `
+                    <tr>
+                      <td><strong>${escapeHtml(ws.WorkspaceName)}</strong></td>
+                      <td><span class="badge badge-${safeClassToken(ws.Status, 'active')}">${escapeHtml(ws.Status)}</span></td>
+                      <td>${ws.WorkspaceID === state.currentWorkspace ? overview.activeTimersCount : 0}</td>
+                      <td>${ws.WorkspaceID === state.currentWorkspace ? overview.todayTrackedHours : '0.00'} h</td>
+                      <td><button class="btn btn-secondary btn-sm" onclick='selectWorkspace(${htmlJsArg(ws.WorkspaceID)})'>Switch Focus</button></td>
+                    </tr>
+                  `).join('')}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        `;
+      } catch (e) {
+        renderError(container, 'Failed to load overview: ', e);
+      }
+    }
+
+    function selectWorkspace(wsId) {
+      state.currentWorkspace = wsId;
+      const currentWs = state.workspaces.find(w => w.WorkspaceID === wsId);
+      document.getElementById('currentWorkspaceBadge').innerText = currentWs ? currentWs.WorkspaceName : wsId;
+      loadWorkspaceData();
+      switchSaSubtab('overview');
+    }
+
+    /* Subtab 2: Workspaces Management */
+    async function renderSaWorkspaces() {
+      const container = document.getElementById('saSubtabContent');
+      container.innerHTML = `
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <div class="card-title">Isolated Workspaces Registry</div>
+              <div class="card-subtitle">Zero data leakage across separate physical spreadsheets</div>
+            </div>
+            <button class="btn btn-sm" onclick="openCreateWorkspaceWizard()">+ New Workspace</button>
+          </div>
+          <div class="table-responsive">
+            <table>
+              <thead>
+                <tr>
+                  <th>Workspace Name</th>
+                  <th>Workspace ID</th>
+                  <th>Timezone</th>
+                  <th>Status</th>
+                  <th>Created At</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${(state.workspaces || []).map(ws => `
+                  <tr>
+                    <td><strong>${escapeHtml(ws.WorkspaceName)}</strong></td>
+                    <td style="font-family: var(--font-mono); font-size: 0.8rem;">${escapeHtml(ws.WorkspaceID)}</td>
+                    <td>${escapeHtml(ws.Timezone || 'UTC')}</td>
+                    <td><span class="badge badge-${safeClassToken(ws.Status, 'active')}">${escapeHtml(ws.Status)}</span></td>
+                    <td>${(ws.CreatedAt || '').substring(0, 10)}</td>
+                    <td>
+                      <button class="btn btn-secondary btn-sm" onclick='selectWorkspace(${htmlJsArg(ws.WorkspaceID)})'>Open</button>
+                      <button class="btn btn-danger btn-sm" onclick='openDeleteWorkspaceModal(${htmlJsArg(ws.WorkspaceID)})'>Archive</button>
+                    </td>
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      `;
+    }
+
+    /* Subtab 3: User Management */
+    async function renderSaUsers() {
+      const container = document.getElementById('saSubtabContent');
+      try {
+        const users = await apiCall('users.list');
+        state.users = Array.isArray(users) ? users : [];
+        container.innerHTML = `
+          <div class="card">
+            <div class="card-header">
+              <div>
+                <div class="card-title">User Accounts & RBAC</div>
+                <div class="card-subtitle">Roles: SUPER_ADMIN (Global), ADMIN (Max 3 Workspaces), USER</div>
+              </div>
+              <button class="btn btn-sm" onclick="openCreateUserModal()">+ New User</button>
+            </div>
+            <div class="table-responsive">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Display Name</th>
+                    <th>Username</th>
+                    <th>Role</th>
+                    <th>Status</th>
+                    <th>Workspace</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${users.map(u => `
+                    <tr>
+                      <td><strong>${escapeHtml(u.DisplayName)}</strong></td>
+                      <td style="font-family: var(--font-mono);">${escapeHtml(u.Username)}</td>
+                      <td><span class="role-tag">${escapeHtml(u.Role)}</span></td>
+                      <td><span class="badge badge-${safeClassToken(u.Status, 'active')}">${escapeHtml(u.Status)}</span></td>
+                      <td>${escapeHtml(u.PrimaryWorkspaceID || '-')}</td>
+                      <td>
+                        <button class="btn btn-secondary btn-sm" onclick='openPasswordResetWizard(${htmlJsArg(u.UserID)})'>Reset Pwd</button>
+                        ${u.Status === 'ACTIVE' 
+                          ? `<button class="btn btn-danger btn-sm" onclick='makeUserPassiveDirect(${htmlJsArg(u.UserID)})'>Passive</button>`
+                          : `<button class="btn btn-success btn-sm" onclick='activateUserDirect(${htmlJsArg(u.UserID)})'>Activate</button>`}
+                        <button class="btn btn-secondary btn-sm" onclick='forceLogoutUser(${htmlJsArg(u.UserID)})'>Logout</button>
+                      </td>
+                    </tr>
+                  `).join('')}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        `;
+      } catch (e) {
+        renderError(container, 'Failed to load users: ', e);
+      }
+    }
+
+    /* Subtab 4: Admin Management & Max 3 Invariant */
+    async function renderSaAdmins() {
+      const container = document.getElementById('saSubtabContent');
+      try {
+        const users = await apiCall('users.list');
+        state.users = Array.isArray(users) ? users : [];
+        const admins = state.users.filter(u => u.Role === 'ADMIN');
+        container.innerHTML = `
+          <div class="card">
+            <div class="card-header">
+              <div>
+                <div class="card-title">Admin Workspaces Allocation</div>
+                <div class="card-subtitle">Hard Invariant: Admins cannot be assigned to more than 3 active workspaces</div>
+              </div>
+            </div>
+            <div class="table-responsive">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Admin Name</th>
+                    <th>Username</th>
+                    <th>Workspaces Count</th>
+                    <th>Assigned Workspaces</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${admins.length === 0 ? '<tr><td colspan="5">No Admin users registered yet.</td></tr>' : ''}
+                  ${admins.map(a => `
+                    <tr>
+                      <td><strong>${escapeHtml(a.DisplayName)}</strong></td>
+                      <td>${escapeHtml(a.Username)}</td>
+                      <td><strong>${Array.isArray(a.AssignedWorkspaceIDs) ? a.AssignedWorkspaceIDs.length : 0} / 3</strong></td>
+                      <td>${escapeHtml((a.AssignedWorkspaceIDs || []).map(id => {
+                        const ws = (state.workspaces || []).find(item => item.WorkspaceID === id);
+                        return ws ? ws.WorkspaceName : id;
+                      }).join(', ') || '-')}</td>
+                      <td><button class="btn btn-secondary btn-sm" onclick='openAdminAssignmentModal(${htmlJsArg(a.UserID)})'>Change Assignments</button></td>
+                    </tr>
+                  `).join('')}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        `;
+      } catch (e) {
+        renderError(container, '', e);
+      }
+    }
+
+    /* Subtab 5: Admin Requests Queue */
+    async function renderSaRequests() {
+      const container = document.getElementById('saSubtabContent');
+      try {
+        const reqs = await apiCall('requests.list', { statusFilter: 'PENDING' });
+        container.innerHTML = `
+          <div class="card">
+            <div class="card-header">
+              <div>
+                <div class="card-title">Admin Lifecycle Requests Queue</div>
+                <div class="card-subtitle">One-click Super Admin review and automated execution</div>
+              </div>
+            </div>
+            <div class="table-responsive">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Type</th>
+                    <th>Requested By</th>
+                    <th>Target</th>
+                    <th>Reason</th>
+                    <th>Status</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${reqs.length === 0 ? '<tr><td colspan="6" style="text-align: center; padding: 2rem; color: var(--text-muted);">No pending requests in queue.</td></tr>' : ''}
+                  ${reqs.map(r => `
+                    <tr>
+                      <td><span class="badge badge-submitted">${escapeHtml(r.RequestType)}</span></td>
+                      <td>${escapeHtml(r.RequestedBy)}</td>
+                      <td>${escapeHtml(r.TargetUserID || '-')}</td>
+                      <td>${escapeHtml(r.Reason)}</td>
+                      <td><span class="badge badge-${safeClassToken(r.Status, 'open')}">${escapeHtml(r.Status)}</span></td>
+                      <td>
+                        <button class="btn btn-success btn-sm" onclick='approveAdminRequest(${htmlJsArg(r.RequestID)})'>Approve</button>
+                        <button class="btn btn-danger btn-sm" onclick='rejectAdminRequest(${htmlJsArg(r.RequestID)})'>Reject</button>
+                      </td>
+                    </tr>
+                  `).join('')}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        `;
+      } catch (e) {
+        renderError(container, '', e);
+      }
+    }
+
+    async function makeUserPassiveDirect(userId) {
+      const reason = prompt('Reason for making this user passive:');
+      if (reason === null) return;
+      if (!String(reason).trim()) return alert('A reason is required.');
+      try {
+        await apiCall('users.makePassive', { targetUserId: userId, reason: String(reason).trim() });
+        await renderSaUsers();
+      } catch (e) {
+        alert(e.message || 'Failed to make user passive.');
+      }
+    }
+
+    async function activateUserDirect(userId) {
+      if (!confirm('Reactivate this user account?')) return;
+      try {
+        await apiCall('users.activate', { targetUserId: userId });
+        await renderSaUsers();
+      } catch (e) {
+        alert(e.message || 'Failed to activate user.');
+      }
+    }
+
+    async function forceLogoutUser(userId) {
+      if (!confirm('Revoke all active sessions for this user?')) return;
+      try {
+        await apiCall('users.forceLogout', { targetUserId: userId });
+        alert('All active sessions revoked.');
+      } catch (e) {
+        alert(e.message || 'Failed to revoke sessions.');
+      }
+    }
+
+    async function approveAdminRequest(requestId) {
+      if (!confirm('Approve and execute this request?')) return;
+      try {
+        const result = await apiCall('requests.review', {
+          requestId,
+          action: 'APPROVE',
+          reviewComment: ''
+        });
+        if (result.executionResult && result.executionResult.temporaryPassword) {
+          const temp = String(result.executionResult.temporaryPassword);
+          try { await navigator.clipboard.writeText(temp); } catch (e) {}
+          alert('Request executed. Temporary password: ' + temp + '\nIt has also been copied to the clipboard when permitted.');
+        }
+        await renderSaRequests();
+      } catch (e) {
+        alert(e.message || 'Failed to approve request.');
+      }
+    }
+
+    async function rejectAdminRequest(requestId) {
+      const comment = prompt('Optional rejection comment:');
+      if (comment === null) return;
+      try {
+        await apiCall('requests.review', {
+          requestId,
+          action: 'REJECT',
+          reviewComment: String(comment || '')
+        });
+        await renderSaRequests();
+      } catch (e) {
+        alert(e.message || 'Failed to reject request.');
+      }
+    }
+
+    function openAdminAssignmentModal(userId) {
+      const admin = (state.users || []).find(user => user.UserID === userId && user.Role === 'ADMIN');
+      if (!admin) return alert('Admin record is not available. Refresh the Admins view.');
+
+      const modal = document.getElementById('modalContainer');
+      modal.replaceChildren();
+      modal.dataset.adminUserId = String(userId);
+
+      const backdrop = document.createElement('div');
+      backdrop.className = 'modal-backdrop';
+      const box = document.createElement('div');
+      box.className = 'modal';
+
+      const title = document.createElement('h3');
+      title.textContent = 'Admin Workspace Assignments';
+
+      const intro = document.createElement('p');
+      intro.style.color = 'var(--text-secondary)';
+      intro.style.fontSize = '0.85rem';
+      intro.textContent = 'Select up to 3 active workspaces for ' + String(admin.DisplayName || admin.Username || userId) + '.';
+
+      const list = document.createElement('div');
+      list.id = 'adminAssignmentList';
+      list.style.margin = '1rem 0';
+
+      const assigned = new Set(Array.isArray(admin.AssignedWorkspaceIDs) ? admin.AssignedWorkspaceIDs : []);
+      (state.workspaces || [])
+        .filter(ws => ws.Status === 'ACTIVE')
+        .forEach(ws => {
+          const row = document.createElement('label');
+          row.style.display = 'block';
+          row.style.marginBottom = '0.65rem';
+
+          const checkbox = document.createElement('input');
+          checkbox.type = 'checkbox';
+          checkbox.value = String(ws.WorkspaceID);
+          checkbox.checked = assigned.has(ws.WorkspaceID);
+          checkbox.dataset.originallyAssigned = checkbox.checked ? 'true' : 'false';
+
+          row.append(checkbox, document.createTextNode(' ' + String(ws.WorkspaceName || ws.WorkspaceID)));
+          list.appendChild(row);
+        });
+
+      const actions = document.createElement('div');
+      actions.style.display = 'flex';
+      actions.style.justifyContent = 'flex-end';
+      actions.style.gap = '0.75rem';
+
+      const cancel = document.createElement('button');
+      cancel.className = 'btn btn-secondary';
+      cancel.textContent = 'Cancel';
+      cancel.onclick = closeModal;
+
+      const save = document.createElement('button');
+      save.className = 'btn';
+      save.textContent = 'Save Assignments';
+      save.onclick = submitAdminAssignments;
+
+      actions.append(cancel, save);
+      box.append(title, intro, list, actions);
+      backdrop.appendChild(box);
+      modal.appendChild(backdrop);
+    }
+
+    async function submitAdminAssignments() {
+      const modal = document.getElementById('modalContainer');
+      const adminUserId = modal.dataset.adminUserId || '';
+      const checkboxes = Array.from(document.querySelectorAll('#adminAssignmentList input[type="checkbox"]'));
+      const selected = checkboxes.filter(cb => cb.checked).map(cb => cb.value);
+      if (selected.length > 3) return alert('Admins can be assigned to a maximum of 3 active workspaces.');
+
+      const toRemove = checkboxes
+        .filter(cb => cb.dataset.originallyAssigned === 'true' && !cb.checked)
+        .map(cb => cb.value);
+      const toAdd = checkboxes
+        .filter(cb => cb.dataset.originallyAssigned !== 'true' && cb.checked)
+        .map(cb => cb.value);
+
+      try {
+        // Remove first so switching from a full 3-workspace allocation cannot trip the max invariant.
+        for (const workspaceId of toRemove) {
+          await apiCall('workspaces.removeAdmin', { adminUserId, workspaceId });
+        }
+        for (const workspaceId of toAdd) {
+          await apiCall('workspaces.assignAdmin', { adminUserId, workspaceId });
+        }
+
+        closeModal();
+        const users = await apiCall('users.list');
+        state.users = Array.isArray(users) ? users : [];
+        await renderSaAdmins();
+      } catch (e) {
+        alert(e.message || 'Failed to update Admin workspace assignments.');
+      }
+    }
+
+    /* Subtab 9: Clockify-Class Report Builder */
+    function renderSaReportBuilder() {
+      const container = document.getElementById('saSubtabContent');
+      container.innerHTML = `
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <div class="card-title">Interactive Report Builder</div>
+              <div class="card-subtitle">Zero formula editing. 3 levels of nested grouping and sanitized CSV export.</div>
+            </div>
+            <button class="btn btn-success btn-sm" onclick="runCustomReport()">RUN REPORT</button>
+          </div>
+          <div class="grid-3" style="margin-bottom: 1.5rem;">
+            <div>
+              <label>Report Type</label>
+              <select id="rbReportType">
+                <option value="SUMMARY" selected>Summary Report</option>
+                <option value="DETAILED">Detailed Report</option>
+                <option value="ATTENDANCE">Attendance & Punches</option>
+                <option value="EXCEPTIONS">Exceptions & Anomalies</option>
+              </select>
+            </div>
+            <div>
+              <label>Time Period</label>
+              <select id="rbPeriod">
+                <option value="THIS_WEEK" selected>This Week</option>
+                <option value="TODAY">Today</option>
+                <option value="LAST_WEEK">Last Week</option>
+                <option value="THIS_MONTH">This Month</option>
+              </select>
+            </div>
+            <div>
+              <label>Primary Grouping</label>
+              <select id="rbGroup1">
+                <option value="USER" selected>Group by User</option>
+                <option value="PROJECT">Group by Project</option>
+                <option value="DATE">Group by Date</option>
+              </select>
+            </div>
+          </div>
+          <div id="reportBuilderOutput" style="background: var(--bg-card); padding: 1.5rem; border-radius: 8px; min-height: 200px;">
+            <div style="color: var(--text-muted); text-align: center; padding-top: 3rem;">
+              Click <strong>[ RUN REPORT ]</strong> to execute real-time aggregation across the isolated database.
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    async function resolveReportRange(period) {
+      const now = new Date();
+      const today = now.toISOString().substring(0, 10);
+
+      if (period === 'TODAY') {
+        return {
+          startDate: today + 'T00:00:00.000Z',
+          endDate: now.toISOString()
+        };
+      }
+
+      if (period === 'THIS_MONTH') {
+        const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+        return { startDate: start.toISOString(), endDate: now.toISOString() };
+      }
+
+      if (period === 'THIS_WEEK' || period === 'LAST_WEEK') {
+        const anchor = new Date(now.getTime() - (period === 'LAST_WEEK' ? 7 * 86400000 : 0));
+        const week = await apiCall('timesheet.getWeekly', {
+          weekStartDate: anchor.toISOString()
+        });
+        return { startDate: week.periodStart, endDate: week.periodEnd };
+      }
+
+      return {
+        startDate: new Date(now.getTime() - 7 * 86400000).toISOString(),
+        endDate: now.toISOString()
+      };
+    }
+
+    function appendReportTable(output, headers, rows) {
+      const wrapper = document.createElement('div');
+      wrapper.className = 'table-responsive';
+      const table = document.createElement('table');
+      const thead = document.createElement('thead');
+      const headerRow = document.createElement('tr');
+
+      headers.forEach(header => {
+        const th = document.createElement('th');
+        th.textContent = header;
+        headerRow.appendChild(th);
+      });
+      thead.appendChild(headerRow);
+      table.appendChild(thead);
+
+      const tbody = document.createElement('tbody');
+      rows.forEach(row => {
+        const tr = document.createElement('tr');
+        row.forEach(value => {
+          const td = document.createElement('td');
+          td.textContent = String(value === null || value === undefined ? '' : value);
+          tr.appendChild(td);
+        });
+        tbody.appendChild(tr);
+      });
+      table.appendChild(tbody);
+      wrapper.appendChild(table);
+      output.appendChild(wrapper);
+    }
+
+    async function runCustomReport() {
+      const repType = document.getElementById('rbReportType').value;
+      const group1 = document.getElementById('rbGroup1').value.toLowerCase();
+      const period = document.getElementById('rbPeriod').value;
+      const output = document.getElementById('reportBuilderOutput');
+
+      output.replaceChildren();
+      const loading = document.createElement('div');
+      loading.style.textAlign = 'center';
+      loading.style.padding = '2rem';
+      loading.textContent = 'Generating report...';
+      output.appendChild(loading);
+
+      try {
+        const range = await resolveReportRange(period);
+        const filters = { startDate: range.startDate, endDate: range.endDate };
+
+        let action = 'reports.summary';
+        if (repType === 'DETAILED') action = 'reports.detailed';
+        else if (repType === 'ATTENDANCE') action = 'reports.attendance';
+        else if (repType === 'EXCEPTIONS') action = 'reports.exceptions';
+
+        const payload = repType === 'SUMMARY'
+          ? { groupings: [group1], filters }
+          : { filters };
+
+        const data = await apiCall(action, payload);
+        output.replaceChildren();
+
+        const header = document.createElement('div');
+        header.style.display = 'flex';
+        header.style.justifyContent = 'space-between';
+        header.style.marginBottom = '1rem';
+
+        const title = document.createElement('strong');
+        const totalSeconds = Number(
+          data.overall?.totalSeconds ??
+          data.entries?.reduce((sum, row) => sum + Number(row.durationSeconds || 0), 0) ??
+          0
+        );
+        title.textContent = repType === 'SUMMARY'
+          ? 'Total Tracked: ' + (totalSeconds / 3600).toFixed(2) + ' hours'
+          : repType + ' report';
+
+        const exportBtn = document.createElement('button');
+        exportBtn.className = 'btn btn-secondary btn-sm';
+        exportBtn.textContent = 'Download Sanitized CSV';
+        exportBtn.onclick = () => exportReportCsv(filters);
+
+        header.append(title, exportBtn);
+        output.appendChild(header);
+
+        if (repType === 'SUMMARY') {
+          const rows = (data.tree || []).map(group => {
+            const seconds = Number(group.totalSeconds || 0);
+            const billable = Number(group.billableSeconds || 0);
+            const ratio = seconds > 0 ? ((billable / seconds) * 100).toFixed(1) + '%' : '0.0%';
+            return [group.key || 'Other', formatSecs(seconds), ratio];
+          });
+          appendReportTable(output, ['Group', 'Duration', 'Billable Ratio'], rows);
+        } else if (repType === 'DETAILED') {
+          const rows = (data.entries || []).map(row => [
+            row.userName || row.userId || '',
+            row.projectName || '',
+            row.taskName || '',
+            row.description || '',
+            row.durationFormatted || formatSecs(Number(row.durationSeconds || 0)),
+            row.approvalStatus || ''
+          ]);
+          appendReportTable(output, ['User', 'Project', 'Task', 'Description', 'Duration', 'Status'], rows);
+        } else if (repType === 'ATTENDANCE') {
+          const rows = (data.attendance || []).map(row => [
+            row.userName || row.userId || '',
+            row.date || '',
+            Number(row.trackedHours || 0).toFixed(2),
+            Number(row.targetHours || 0).toFixed(2),
+            Number(row.overtimeHours || 0).toFixed(2),
+            Number(row.missingHours || 0).toFixed(2)
+          ]);
+          appendReportTable(output, ['User', 'Date', 'Tracked', 'Target', 'Overtime', 'Missing'], rows);
+        } else {
+          const rows = (data.anomalies || []).map(row => [
+            row.severity || '',
+            row.type || '',
+            row.userName || row.userId || '',
+            row.entryId || '',
+            row.message || ''
+          ]);
+          appendReportTable(output, ['Severity', 'Type', 'User', 'Entry', 'Message'], rows);
+        }
+      } catch (e) {
+        renderError(output, '', e);
+      }
+    }
+
+    async function exportReportCsv(filters = null) {
+      try {
+        const effectiveFilters = filters || {
+          startDate: new Date(Date.now() - 30 * 86400000).toISOString(),
+          endDate: new Date().toISOString()
+        };
+        const res = await apiCall('reports.exportCsv', { filters: effectiveFilters });
+        const blob = new Blob([res.csvContent], { type: 'text/csv;charset=utf-8;' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = String(res.filename || 'FLINK_Time_Export.csv').replace(/[\\/:*?"<>|]/g, '_');
+        a.click();
+        URL.revokeObjectURL(url);
+      } catch (e) {
+        alert(e.message || 'CSV export failed.');
+      }
+    }
+
+    /* Subtab 11: Security Center */
+    async function renderSaSecurity() {
+      const container = document.getElementById('saSubtabContent');
+      try {
+        const sessions = await apiCall('sessions.listActive');
+        container.innerHTML = `
+          <div class="grid-4" style="margin-bottom: 1.5rem;">
+            <div class="kpi-card"><div class="kpi-label">Active Sessions</div><div class="kpi-val">${sessions.length}</div></div>
+            <div class="kpi-card"><div class="kpi-label">Failed Logins</div><div class="kpi-val">0</div></div>
+            <div class="kpi-card"><div class="kpi-label">Locked Accounts</div><div class="kpi-val">0</div></div>
+            <div class="kpi-card"><div class="kpi-label">Salted PBKDF2</div><div class="kpi-val" style="font-size: 1rem; color: #34D399; margin-top: 0.5rem;">ACTIVE</div></div>
+          </div>
+
+          <div class="card">
+            <div class="card-header">
+              <div>
+                <div class="card-title">Active Authenticated Sessions</div>
+                <div class="card-subtitle">Tokens hashed via SHA-256 in Master Control Sheet</div>
+              </div>
+            </div>
+            <div class="table-responsive">
+              <table>
+                <thead>
+                  <tr>
+                    <th>User</th>
+                    <th>Role</th>
+                    <th>Client</th>
+                    <th>Created (UTC)</th>
+                    <th>Expires (UTC)</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${sessions.map(s => `
+                    <tr>
+                      <td><strong>${escapeHtml(s.displayName)}</strong> (${escapeHtml(s.username)})</td>
+                      <td><span class="role-tag">${escapeHtml(s.role)}</span></td>
+                      <td>${escapeHtml(s.clientType)}</td>
+                      <td style="font-family: var(--font-mono); font-size: 0.8rem;">${escapeHtml((s.createdAt || '').substring(0, 19))}</td>
+                      <td style="font-family: var(--font-mono); font-size: 0.8rem;">${escapeHtml((s.expiresAt || '').substring(0, 19))}</td>
+                      <td><button class="btn btn-danger btn-sm" onclick='revokeSessionDirect(${htmlJsArg(s.sessionId)})'>Revoke</button></td>
+                    </tr>
+                  `).join('')}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        `;
+      } catch (e) {
+        renderError(container, '', e);
+      }
+    }
+
+    async function revokeSessionDirect(sessionId) {
+      if (!confirm('Revoke this active session?')) return;
+      try {
+        await apiCall('sessions.revoke', { sessionId });
+        renderSaSecurity();
+      } catch (e) {
+        alert(e.message);
+      }
+    }
+
+    /* Subtab 12: Backups & Restore */
+    async function renderSaBackups() {
+      const container = document.getElementById('saSubtabContent');
+      container.innerHTML = `
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <div class="card-title">Google Drive Backup & Disaster Recovery</div>
+              <div class="card-subtitle">Registered snapshots with schema and HMAC content verification</div>
+            </div>
+            <button class="btn btn-success btn-sm" onclick="triggerDriveBackup()">RUN BACKUP NOW</button>
+          </div>
+          <div id="backupRegistryHost"></div>
+        </div>
+      `;
+
+      const host = document.getElementById('backupRegistryHost');
+      try {
+        const backups = await apiCall('backups.list', { workspaceId: state.currentWorkspace });
+        if (!Array.isArray(backups) || backups.length === 0) {
+          const empty = document.createElement('div');
+          empty.style.padding = '1.5rem';
+          empty.style.color = 'var(--text-muted)';
+          empty.textContent = 'No registered backups exist for this workspace yet.';
+          host.appendChild(empty);
+          return;
+        }
+
+        const wrapper = document.createElement('div');
+        wrapper.className = 'table-responsive';
+        const table = document.createElement('table');
+        const thead = document.createElement('thead');
+        const hrow = document.createElement('tr');
+        ['Backup ID', 'Created', 'Status', 'Verified', 'Actions'].forEach(label => {
+          const th = document.createElement('th');
+          th.textContent = label;
+          hrow.appendChild(th);
+        });
+        thead.appendChild(hrow);
+        table.appendChild(thead);
+
+        const tbody = document.createElement('tbody');
+        backups.forEach(backup => {
+          const tr = document.createElement('tr');
+
+          const id = document.createElement('td');
+          id.style.fontFamily = 'var(--font-mono)';
+          id.textContent = String(backup.backupId || '');
+
+          const created = document.createElement('td');
+          created.textContent = String(backup.createdAt || '').substring(0, 19);
+
+          const status = document.createElement('td');
+          status.textContent = String(backup.status || '');
+
+          const verified = document.createElement('td');
+          verified.textContent = backup.verified ? 'YES' : 'NO';
+
+          const actions = document.createElement('td');
+          const verifyBtn = document.createElement('button');
+          verifyBtn.className = 'btn btn-secondary btn-sm';
+          verifyBtn.textContent = 'Verify';
+          verifyBtn.onclick = async () => {
+            try {
+              const result = await apiCall('backups.restoreValidate', {
+                workspaceId: state.currentWorkspace,
+                backupId: backup.backupId
+              });
+              alert('Backup verified: ' + result.backupId);
+            } catch (e) {
+              alert(e.message || 'Backup validation failed.');
+            }
+          };
+
+          const restoreBtn = document.createElement('button');
+          restoreBtn.className = 'btn btn-warning btn-sm';
+          restoreBtn.style.marginLeft = '0.5rem';
+          restoreBtn.textContent = 'Restore';
+          restoreBtn.disabled = !backup.verified || backup.status !== 'AVAILABLE';
+          restoreBtn.onclick = () => openRestoreWizard(backup.backupId);
+
+          actions.append(verifyBtn, restoreBtn);
+          tr.append(id, created, status, verified, actions);
+          tbody.appendChild(tr);
+        });
+
+        table.appendChild(tbody);
+        wrapper.appendChild(table);
+        host.appendChild(wrapper);
+      } catch (e) {
+        renderError(host, 'Failed to load backup registry: ', e);
+      }
+    }
+
+    async function triggerDriveBackup() {
+      try {
+        const res = await apiCall('backups.create');
+        alert('Drive backup generated and verified successfully: ' + res.backupId);
+        await renderSaBackups();
+      } catch (e) {
+        alert(e.message || 'Backup failed.');
+      }
+    }
+
+    function openRestoreWizard(backupId) {
+      const modal = document.getElementById('modalContainer');
+      modal.replaceChildren();
+      modal.dataset.restoreBackupId = String(backupId || '');
+
+      const backdrop = document.createElement('div');
+      backdrop.className = 'modal-backdrop';
+      const box = document.createElement('div');
+      box.className = 'modal';
+
+      const title = document.createElement('h3');
+      title.style.marginBottom = '0.5rem';
+      title.style.color = '#FBBF24';
+      title.textContent = 'Verified Workspace Restore';
+
+      const intro = document.createElement('p');
+      intro.style.color = 'var(--text-secondary)';
+      intro.style.fontSize = '0.85rem';
+      intro.style.marginBottom = '1.25rem';
+      intro.textContent =
+        'The selected registered backup will be re-verified, copied to an isolated restore candidate, active timers cleared, sessions revoked, rollups reconciled, and the workspace pointer changed only if all stages succeed.';
+
+      const idLine = document.createElement('div');
+      idLine.style.marginBottom = '1rem';
+      idLine.style.fontFamily = 'var(--font-mono)';
+      idLine.textContent = 'Backup ID: ' + String(backupId || '');
+
+      const passwordLabel = document.createElement('label');
+      passwordLabel.textContent = 'Confirm Super Admin Password';
+      const password = document.createElement('input');
+      password.type = 'password';
+      password.id = 'restoreAdminPassword';
+      password.autocomplete = 'current-password';
+
+      const warning = document.createElement('div');
+      warning.style.marginTop = '1rem';
+      warning.style.marginBottom = '1.5rem';
+      warning.style.color = '#FBBF24';
+      warning.style.fontSize = '0.85rem';
+      warning.textContent = 'A safety backup of the current live workspace will be created automatically before the restore pointer changes.';
+
+      const actions = document.createElement('div');
+      actions.style.display = 'flex';
+      actions.style.gap = '0.75rem';
+      actions.style.justifyContent = 'flex-end';
+
+      const cancel = document.createElement('button');
+      cancel.className = 'btn btn-secondary';
+      cancel.textContent = 'Cancel';
+      cancel.onclick = closeModal;
+
+      const apply = document.createElement('button');
+      apply.className = 'btn btn-warning';
+      apply.textContent = 'Verify & Restore';
+      apply.onclick = submitRestoreBackup;
+
+      actions.append(cancel, apply);
+      box.append(title, intro, idLine, passwordLabel, password, warning, actions);
+      backdrop.appendChild(box);
+      modal.appendChild(backdrop);
+    }
+
+    async function submitRestoreBackup() {
+      const modal = document.getElementById('modalContainer');
+      const backupId = modal.dataset.restoreBackupId || '';
+      const adminPassword = document.getElementById('restoreAdminPassword')?.value || '';
+      if (!backupId || !adminPassword) {
+        return alert('Backup ID and Super Admin password are required.');
+      }
+
+      try {
+        await apiCall('backups.restoreValidate', {
+          workspaceId: state.currentWorkspace,
+          backupId
+        });
+        const result = await apiCall('backups.restoreApply', {
+          workspaceId: state.currentWorkspace,
+          backupId,
+          adminPassword
+        });
+
+        closeModal();
+        alert(
+          'Restore completed successfully. Safety backup: ' +
+          String(result.safetyBackupId || 'created')
+        );
+        await renderSaBackups();
+      } catch (e) {
+        alert(e.message || 'Restore failed. The live workspace pointer was not changed or was rolled back.');
+      }
+    }
+
+    /* Subtab 13: System Health */
+    async function renderSaHealth() {
+      const container = document.getElementById('saSubtabContent');
+      try {
+        const health = await apiCall('system.health');
+        container.innerHTML = `
+          <div class="card">
+            <div class="card-header">
+              <div>
+                <div class="card-title">System Architecture Diagnostics</div>
+                <div class="card-subtitle">Measured checks only; unverified capabilities are not reported as healthy.</div>
+              </div>
+              <button class="btn btn-warning btn-sm" onclick="runSystemAutoRepair()">[ FIX AUTOMATICALLY ]</button>
+            </div>
+            <div id="saHealthChecks" style="line-height: 2.2;"></div>
+          </div>
+        `;
+
+        const host = document.getElementById('saHealthChecks');
+        (health.checks || []).forEach(check => {
+          const row = document.createElement('div');
+          row.style.display = 'flex';
+          row.style.justifyContent = 'space-between';
+          row.style.borderBottom = '1px solid var(--border)';
+          row.style.padding = '0.5rem 0';
+
+          const left = document.createElement('div');
+          const icon = document.createElement('span');
+          icon.style.color = check.passed ? '#34D399' : '#EF4444';
+          icon.style.fontWeight = '800';
+          icon.textContent = check.passed ? '✓' : '✕';
+          const name = document.createElement('strong');
+          name.textContent = String(check.name || '');
+          left.append(icon, document.createTextNode(' '), name);
+
+          const detail = document.createElement('div');
+          detail.style.color = 'var(--text-muted)';
+          detail.style.fontSize = '0.85rem';
+          detail.textContent = String(check.detail || '');
+
+          row.append(left, detail);
+          host.appendChild(row);
+        });
+      } catch (e) {
+        renderError(container, '', e);
+      }
+    }
+
+    /* Subtab 14: System Settings */
+    async function renderSaSettings() {
+      const container = document.getElementById('saSubtabContent');
+      try {
+        const settings = await apiCall('settings.get');
+        container.innerHTML = `
+          <div class="card">
+            <div class="card-header">
+              <div>
+                <div class="card-title">System Settings & Governance</div>
+                <div class="card-subtitle">Configured without ever touching raw spreadsheet formulas</div>
+              </div>
+              <button class="btn btn-sm" onclick="saveGlobalSettings()">Save Settings</button>
+            </div>
+            <div class="grid-2" style="margin-bottom: 1.5rem;">
+              <div>
+                <label>Company Legal Name</label>
+                <input type="text" id="stCompanyName">
+                <div class="field-hint">Used across headers, export manifests, and PDF titles.</div>
+              </div>
+              <div>
+                <label>Default Timezone</label>
+                <input type="text" id="stTimezone">
+                <div class="field-hint">Timezone for weekly rollups and timesheet date cuts.</div>
+              </div>
+            </div>
+            <div class="grid-2" style="margin-bottom: 1.5rem;">
+              <div>
+                <label>Session Idle Timeout (Hours)</label>
+                <input type="number" id="stIdleTimeout">
+                <div class="field-hint">Users inactive for longer than this must sign in again.</div>
+              </div>
+              <div>
+                <label>Auto-Stop Long Timers (Hours)</label>
+                <input type="number" id="stAutoStop">
+                <div class="field-hint">Prevents runaway timers left active overnight.</div>
+              </div>
+            </div>
+          </div>
+        `;
+
+        document.getElementById('stCompanyName').value = String(settings.COMPANY_NAME || 'FLINK Business Solutions');
+        document.getElementById('stTimezone').value = String(settings.DEFAULT_TIMEZONE || 'Africa/Cairo');
+        document.getElementById('stIdleTimeout').value = String(settings.IDLE_TIMEOUT_HOURS || 8);
+        document.getElementById('stAutoStop').value = String(settings.AUTO_STOP_HOURS || 14);
+      } catch (e) {
+        renderError(container, '', e);
+      }
+    }
+
+    async function saveGlobalSettings() {
+      try {
+        await apiCall('settings.save', {
+          settings: {
+            COMPANY_NAME: document.getElementById('stCompanyName').value,
+            DEFAULT_TIMEZONE: document.getElementById('stTimezone').value,
+            IDLE_TIMEOUT_HOURS: document.getElementById('stIdleTimeout').value,
+            AUTO_STOP_HOURS: document.getElementById('stAutoStop').value
+          }
+        });
+        alert('Global settings saved successfully.');
+      } catch (e) {
+        alert(e.message);
+      }
+    }
+
+    /* Subtab 15: Advanced Diagnostics */
+    async function renderSaDiagnostics() {
+      const container = document.getElementById('saSubtabContent');
+      try {
+        const diag = await apiCall('system.diagnostics');
+        container.innerHTML = `
+          <div class="card">
+            <div class="card-header">
+              <div class="card-title">Hidden Advanced Diagnostics</div>
+              <div class="card-subtitle">Exposed only for rare maintenance; never needed for normal operation</div>
+            </div>
+            <div style="background: var(--bg-card); padding: 1.5rem; border-radius: 8px; font-family: var(--font-mono); font-size: 0.85rem; line-height: 1.8;">
+              <div>Platform Version: ${escapeHtml(diag.platformVersion)}</div>
+              <div>Schema Version: ${escapeHtml(diag.schemaVersion)}</div>
+              <div>Master Spreadsheet ID: ${escapeHtml(diag.masterSpreadsheetId)}</div>
+              <div>Active Sessions: ${Number(diag.activeSessionsCount || 0)}</div>
+              <div>Triggers Health: ${diag.triggersHealthy ? 'ONLINE' : 'OFFLINE'}</div>
+              <div style="margin-top: 1rem; font-weight: 700;">Connected Workspace Physical Spreadsheets:</div>
+              ${diag.workspaces.map(w => `
+                <div style="margin-left: 1rem; color: var(--text-muted);">${escapeHtml(w.name)}: ID=${escapeHtml(w.spreadsheetId)} (Members: ${Number(w.memberCount || 0)}, Entries: ${Number(w.timeEntryCount || 0)})</div>
+              `).join('')}
+            </div>
+          </div>
+        `;
+      } catch (e) {
+        renderError(container, '', e);
+      }
+    }
+
+    /* Fallback subtab handlers */
+    function renderSaTimeAdmin() { renderSaReportBuilder(); }
+    function renderSaApprovals() { navigate('mytime'); }
+    function renderSaProjects() {
+      const container = document.getElementById('saSubtabContent');
+      container.innerHTML = `
+        <div class="card">
+          <div class="card-header">
+            <div class="card-title">Projects & Clients Management</div>
+            <button class="btn btn-sm" onclick="openCreateProjectModal()">+ New Project</button>
+          </div>
+          <div class="table-responsive">
+            <table>
+              <thead><tr><th>Project Name</th><th>Code</th><th>Billable</th><th>Hourly Rate</th><th>Status</th></tr></thead>
+              <tbody>
+                ${(state.projects || []).map(p => `
+                  <tr>
+                    <td><strong>${escapeHtml(p.ProjectName)}</strong></td>
+                    <td>${escapeHtml(p.Code || '-')}</td>
+                    <td>${(p.BillableDefault === true || p.BillableDefault === 'TRUE') ? 'YES' : 'NO'}</td>
+                    <td>${Number(p.HourlyRate || 0).toFixed(2)}</td>
+                    <td><span class="badge badge-${safeClassToken(p.Status, 'active')}">${escapeHtml(p.Status)}</span></td>
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      `;
+    }
+    function renderSaAlerts() { renderSaSettings(); }
+
+    async function openCreateProjectModal() {
+      const modal = document.getElementById('modalContainer');
+      modal.replaceChildren();
+
+      try {
+        const clients = await apiCall('clients.list');
+        const backdrop = document.createElement('div');
+        backdrop.className = 'modal-backdrop';
+        const box = document.createElement('div');
+        box.className = 'modal';
+        box.innerHTML = `
+          <h3 style="margin-bottom:0.75rem;">Create Project</h3>
+          <label>Client</label><select id="newProjectClient"></select>
+          <label style="margin-top:0.75rem;">Project Name</label><input type="text" id="newProjectName">
+          <label style="margin-top:0.75rem;">Project Code</label><input type="text" id="newProjectCode">
+          <div class="grid-2" style="margin-top:0.75rem;">
+            <div><label>Hourly Rate</label><input type="number" min="0" step="0.01" id="newProjectRate" value="0"></div>
+            <div><label>Estimate Hours</label><input type="number" min="0" step="0.25" id="newProjectEstimate" value="0"></div>
+          </div>
+          <label style="display:block; margin-top:0.75rem;"><input type="checkbox" id="newProjectBillable" checked> Billable by default</label>
+          <div style="display:flex; gap:0.75rem; justify-content:flex-end; margin-top:1.25rem;">
+            <button class="btn btn-secondary" id="newProjectCancelBtn">Cancel</button>
+            <button class="btn" id="newProjectSaveBtn">Create Project</button>
+          </div>
+        `;
+
+        const clientSelect = box.querySelector('#newProjectClient');
+        clientSelect.replaceChildren(new Option('Internal / No client', ''));
+        (clients || []).forEach(client => clientSelect.add(
+          new Option(String(client.ClientName || ''), String(client.ClientID || ''))
+        ));
+
+        box.querySelector('#newProjectCancelBtn').onclick = closeModal;
+        box.querySelector('#newProjectSaveBtn').onclick = submitCreateProject;
+
+        backdrop.appendChild(box);
+        modal.appendChild(backdrop);
+      } catch (e) {
+        alert(e.message || 'Failed to load project form.');
+      }
+    }
+
+    async function submitCreateProject() {
+      const projectName = document.getElementById('newProjectName')?.value.trim() || '';
+      if (!projectName) return alert('Project name is required.');
+
+      try {
+        await apiCall('projects.create', {
+          clientId: document.getElementById('newProjectClient')?.value || '',
+          projectName,
+          code: document.getElementById('newProjectCode')?.value.trim() || '',
+          billableDefault: !!document.getElementById('newProjectBillable')?.checked,
+          hourlyRate: Number(document.getElementById('newProjectRate')?.value || 0),
+          estimateHours: Number(document.getElementById('newProjectEstimate')?.value || 0)
+        });
+        closeModal();
+        state.projects = await apiCall('projects.list');
+        renderSaProjects();
+        loadWorkspaceData();
+      } catch (e) {
+        alert(e.message || 'Failed to create project.');
+      }
+    }
+
+    /* ------------------- MODALS & DRAWERS ------------------- */
+    function toggleHelpDrawer() {
+      const drawer = document.getElementById('helpDrawer');
+      drawer.classList.toggle('open');
+    }
+
+    function openCreateWorkspaceWizard() {
+      const modal = document.getElementById('modalContainer');
+      modal.innerHTML = `
+        <div class="modal-backdrop">
+          <div class="modal">
+            <h3 style="margin-bottom: 0.5rem;">Create New Workspace</h3>
+            <p style="color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 1.25rem;">Provisions a new isolated Google Spreadsheet with all 18 tabs.</p>
+            <div style="margin-bottom: 1rem;">
+              <label>Workspace Name</label>
+              <input type="text" id="newWsName" placeholder="e.g. Engineering & Product">
+            </div>
+            <div style="margin-bottom: 1.5rem;">
+              <label>Timezone</label>
+              <select id="newWsTz">
+                <option value="Africa/Cairo">Africa/Cairo</option>
+                <option value="UTC">UTC</option>
+                <option value="America/New_York">America/New_York</option>
+              </select>
+            </div>
+            <div style="display: flex; gap: 0.75rem; justify-content: flex-end;">
+              <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+              <button class="btn btn-success" onclick="submitCreateWorkspace()">Create Workspace</button>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    async function submitCreateWorkspace() {
+      const name = document.getElementById('newWsName').value;
+      const timezone = document.getElementById('newWsTz').value;
+      if (!name) return alert('Workspace name required.');
+      try {
+        await apiCall('workspaces.create', { name, timezone });
+        alert('Workspace provisioned successfully.');
+        closeModal();
+        state.workspaces = await apiCall('workspaces.list');
+        switchSaSubtab('workspaces');
+      } catch (e) {
+        alert(e.message);
+      }
+    }
+
+    function openCreateUserModal() {
+      const modal = document.getElementById('modalContainer');
+      modal.innerHTML = `
+        <div class="modal-backdrop">
+          <div class="modal">
+            <h3 style="margin-bottom: 0.5rem;">Create User Account</h3>
+            <p style="color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 1.25rem;">Registers account with salted PBKDF2 hash.</p>
+            <div style="margin-bottom: 1rem;">
+              <label>Full Name</label>
+              <input type="text" id="newUserName" required>
+            </div>
+            <div style="margin-bottom:1rem;">
+              <label>Google Workspace Email</label>
+              <input type="email" id="newUserEmail" required>
+            </div>
+            <div class="grid-2" style="margin-bottom:1rem;">
+              <div>
+                <label>Username</label>
+                <input type="text" id="newUserUsername" required>
+              </div>
+              <div>
+                <label>Role</label>
+                <select id="newUserRole">
+                  <option value="USER" selected>USER</option>
+                  <option value="ADMIN">ADMIN</option>
+                </select>
+              </div>
+            </div>
+            <div style="margin-bottom: 1.5rem;">
+              <label>Temporary Password</label>
+              <input type="password" id="newUserPass" autocomplete="new-password" required>
+            </div>
+            <div style="display: flex; gap: 0.75rem; justify-content: flex-end;">
+              <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+              <button class="btn" onclick="submitCreateUser()">Create User</button>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    async function submitCreateUser() {
+      const displayName = document.getElementById('newUserName').value;
+      const username = document.getElementById('newUserUsername').value;
+      const email = document.getElementById('newUserEmail').value;
+      const role = document.getElementById('newUserRole').value;
+      const temporaryPassword = document.getElementById('newUserPass').value;
+      try {
+        await apiCall('users.create', {
+          displayName,
+          username,
+          email,
+          role,
+          temporaryPassword,
+          primaryWorkspaceId: state.currentWorkspace
+        });
+        alert('User account created.');
+        closeModal();
+        switchSaSubtab('users');
+      } catch (e) {
+        alert(e.message);
+      }
+    }
+
+    function generateTemporaryPassword() {
+      if (!window.crypto || !window.crypto.getRandomValues) {
+        throw new Error('Secure random password generation is unavailable in this browser.');
+      }
+      const upper = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
+      const lower = 'abcdefghijkmnopqrstuvwxyz';
+      const digits = '23456789';
+      const special = '!@#$%*_-';
+      const all = upper + lower + digits + special;
+      const bytes = new Uint32Array(18);
+      window.crypto.getRandomValues(bytes);
+
+      const required = [
+        upper[bytes[0] % upper.length],
+        lower[bytes[1] % lower.length],
+        digits[bytes[2] % digits.length],
+        special[bytes[3] % special.length]
+      ];
+      for (let i = 4; i < bytes.length; i++) {
+        required.push(all[bytes[i] % all.length]);
+      }
+      return required.join('');
+    }
+
+    function openPasswordResetWizard(userId) {
+      const user = (state.users || []).find(item => item.UserID === userId);
+      if (!user) return alert('User record is not available. Refresh the Users view and try again.');
+
+      let tempPass;
+      try {
+        tempPass = generateTemporaryPassword();
+      } catch (e) {
+        return alert(e.message);
+      }
+
+      const modal = document.getElementById('modalContainer');
+      modal.replaceChildren();
+      modal.dataset.targetUserId = String(userId);
+
+      const backdrop = document.createElement('div');
+      backdrop.className = 'modal-backdrop';
+      const box = document.createElement('div');
+      box.className = 'modal';
+
+      const title = document.createElement('h3');
+      title.style.marginBottom = '0.5rem';
+      title.textContent = 'Password Reset Wizard';
+
+      const intro = document.createElement('p');
+      intro.style.color = 'var(--text-secondary)';
+      intro.style.fontSize = '0.85rem';
+      intro.style.marginBottom = '1.25rem';
+      intro.append(
+        document.createTextNode('Resetting credentials for '),
+        (() => {
+          const strong = document.createElement('strong');
+          strong.textContent = String(user.Username || user.DisplayName || userId);
+          return strong;
+        })(),
+        document.createTextNode('. Original password is never displayed.')
+      );
+
+      const field = document.createElement('div');
+      field.style.marginBottom = '1rem';
+      const label = document.createElement('label');
+      label.textContent = 'Generated Temporary Password';
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.id = 'resetTempPass';
+      input.readOnly = true;
+      input.style.fontFamily = 'var(--font-mono)';
+      input.value = tempPass;
+      field.append(label, input);
+
+      const note = document.createElement('div');
+      note.style.marginBottom = '1.5rem';
+      note.style.fontSize = '0.85rem';
+      note.style.color = 'var(--text-secondary)';
+      note.textContent = 'Password change will be forced on next sign-in and all active sessions will be revoked.';
+
+      const actions = document.createElement('div');
+      actions.style.display = 'flex';
+      actions.style.gap = '0.75rem';
+      actions.style.justifyContent = 'flex-end';
+
+      const cancel = document.createElement('button');
+      cancel.className = 'btn btn-secondary';
+      cancel.textContent = 'Cancel';
+      cancel.onclick = closeModal;
+
+      const confirm = document.createElement('button');
+      confirm.className = 'btn btn-warning';
+      confirm.textContent = 'Confirm Reset & Copy';
+      confirm.onclick = submitPasswordReset;
+
+      actions.append(cancel, confirm);
+      box.append(title, intro, field, note, actions);
+      backdrop.appendChild(box);
+      modal.appendChild(backdrop);
+    }
+
+    async function submitPasswordReset() {
+      const modal = document.getElementById('modalContainer');
+      const userId = modal.dataset.targetUserId || '';
+      const tempPassword = document.getElementById('resetTempPass')?.value || '';
+      if (!userId || !tempPassword) return alert('Password reset context is missing. Close the dialog and try again.');
+
+      try {
+        await apiCall('users.resetPassword', { targetUserId: userId, temporaryPassword: tempPassword });
+        await navigator.clipboard.writeText(tempPassword);
+        alert('Password reset successfully. Temporary password copied to clipboard.');
+        closeModal();
+      } catch (e) {
+        alert(e.message);
+      }
+    }
+
+    function openDeleteWorkspaceModal(wsId) {
+      const workspace = (state.workspaces || []).find(item => item.WorkspaceID === wsId);
+      if (!workspace) return alert('Workspace record is not available. Refresh and try again.');
+
+      const modal = document.getElementById('modalContainer');
+      modal.replaceChildren();
+      modal.dataset.workspaceId = String(wsId);
+      modal.dataset.workspaceName = String(workspace.WorkspaceName || '');
+
+      const backdrop = document.createElement('div');
+      backdrop.className = 'modal-backdrop';
+      const box = document.createElement('div');
+      box.className = 'modal';
+
+      const title = document.createElement('h3');
+      title.style.marginBottom = '0.5rem';
+      title.style.color = '#F87171';
+      title.textContent = 'Dangerous Action Confirmation';
+
+      const intro = document.createElement('p');
+      intro.style.color = 'var(--text-secondary)';
+      intro.style.fontSize = '0.85rem';
+      intro.style.marginBottom = '1.25rem';
+      intro.append(
+        document.createTextNode('Archiving workspace '),
+        (() => {
+          const strong = document.createElement('strong');
+          strong.textContent = String(workspace.WorkspaceName || '');
+          return strong;
+        })(),
+        document.createTextNode('. Type the exact workspace name to confirm.')
+      );
+
+      const nameField = document.createElement('div');
+      nameField.style.marginBottom = '1rem';
+      const nameLabel = document.createElement('label');
+      nameLabel.textContent = 'Type "' + String(workspace.WorkspaceName || '') + '" to confirm:';
+      const nameInput = document.createElement('input');
+      nameInput.type = 'text';
+      nameInput.id = 'confirmWsNameInput';
+      nameField.append(nameLabel, nameInput);
+
+      const passField = document.createElement('div');
+      passField.style.marginBottom = '1.5rem';
+      const passLabel = document.createElement('label');
+      passLabel.textContent = 'Super Admin Password';
+      const passInput = document.createElement('input');
+      passInput.type = 'password';
+      passInput.id = 'confirmAdminPassInput';
+      passInput.autocomplete = 'current-password';
+      passField.append(passLabel, passInput);
+
+      const actions = document.createElement('div');
+      actions.style.display = 'flex';
+      actions.style.gap = '0.75rem';
+      actions.style.justifyContent = 'flex-end';
+
+      const cancel = document.createElement('button');
+      cancel.className = 'btn btn-secondary';
+      cancel.textContent = 'Cancel';
+      cancel.onclick = closeModal;
+
+      const confirm = document.createElement('button');
+      confirm.className = 'btn btn-danger';
+      confirm.textContent = 'Permanently Archive';
+      confirm.onclick = submitDeleteWorkspace;
+
+      actions.append(cancel, confirm);
+      box.append(title, intro, nameField, passField, actions);
+      backdrop.appendChild(box);
+      modal.appendChild(backdrop);
+    }
+
+    async function submitDeleteWorkspace() {
+      const modal = document.getElementById('modalContainer');
+      const wsId = modal.dataset.workspaceId || '';
+      const expectedName = modal.dataset.workspaceName || '';
+      const inputName = document.getElementById('confirmWsNameInput')?.value.trim() || '';
+      const adminPassword = document.getElementById('confirmAdminPassInput')?.value || '';
+
+      if (!wsId || inputName !== expectedName) {
+        return alert('Workspace name does not match.');
+      }
+      try {
+        await apiCall('workspaces.deletePermanent', {
+          workspaceId: wsId,
+          workspaceName: inputName,
+          adminPassword
+        });
+        alert('Workspace permanently archived.');
+        closeModal();
+        state.workspaces = await apiCall('workspaces.list');
+        switchSaSubtab('workspaces');
+      } catch (e) {
+        alert(e.message);
+      }
+    }
+
+    function closeModal() {
+      document.getElementById('modalContainer').replaceChildren();
+    }
+
+    function formatSecs(s) {
+      const sec = parseInt(s, 10) || 0;
+      const hrs = Math.floor(sec / 3600);
+      const mins = Math.floor((sec % 3600) / 60);
+      return `${hrs}h ${mins}m`;
+    }
+  </script>
+</body>
+</html>

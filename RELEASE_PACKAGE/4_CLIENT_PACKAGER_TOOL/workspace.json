@@ -1,5 +1,0 @@
-{
-  "backend_url": "https://script.google.com/macros/s/YOUR_DEPLOYMENT_ID_HERE/exec",
-  "workspace_name": "Primary Workspace",
-  "note": "Replace YOUR_DEPLOYMENT_ID_HERE with your actual Apps Script web app deployment URL"
-}
