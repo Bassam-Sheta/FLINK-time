@@ -59,6 +59,7 @@ function install(rows) {
     listTasks() { return []; }
   };
 
+  delete global.TrackingPolicyService;
   delete require.cache[require.resolve(policyPath)];
   global.TrackingPolicyService = require(policyPath).TrackingPolicyService;
   return global.TrackingPolicyService;
