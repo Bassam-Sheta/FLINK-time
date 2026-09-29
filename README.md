@@ -15,20 +15,20 @@ apps-script/
 
 That is the complete deployable application:
 - **1 Google Apps Script backend:** `Code.gs`
-- **3 Google Sites embed pages:** `User.html`, `Admin.html`, `SuperAdmin.html`
+- **3 role-specific HTML portals:** `User.html`, `Admin.html`, `SuperAdmin.html`
 - **1 Apps Script manifest:** `appsscript.json`
+
+For clickjacking protection, only the Employee portal is intended to be embedded in Google Sites. Admin and Super Admin portals should be opened directly from their Apps Script Web App URLs.
 
 No Windows EXEs, packagers, launchers, standalone desktop controllers, or `RELEASE_PACKAGE/` tree are part of the supported system.
 
-## Google Sites embed URLs
+## Portal URLs
 
 Deploy the Apps Script project once as a Web App. Use the same `/exec` deployment with these query strings:
 
-- Employee portal: `<WEB_APP_EXEC_URL>?view=user`
-- Admin / Manager portal: `<WEB_APP_EXEC_URL>?view=admin`
-- Super Admin portal: `<WEB_APP_EXEC_URL>?view=superadmin`
-
-Embed each URL on the matching Google Sites page.
+- Employee portal: `<WEB_APP_EXEC_URL>?view=user` — may be embedded in Google Sites.
+- Admin / Manager portal: `<WEB_APP_EXEC_URL>?view=admin` — open directly; do not embed.
+- Super Admin portal: `<WEB_APP_EXEC_URL>?view=superadmin` — open directly; do not embed.
 
 ## Access model
 
@@ -50,9 +50,20 @@ Embed each URL on the matching Google Sites page.
    - Execute as: **Me**
    - Access: **Anyone in your Google Workspace domain**
 7. Open `?view=superadmin` first and complete the setup wizard.
-8. Embed the three role URLs in Google Sites.
+8. Embed only the Employee portal in Google Sites. Distribute direct links for Admin and Super Admin.
 
 Do not deploy this production build as public `Anyone` access.
+
+## Production data-access boundary
+
+The web app executes as the deployment owner, so application RBAC assumes that normal users cannot edit the underlying data stores directly.
+
+- Do **not** grant ordinary users Editor access to the Master Control Sheet, workspace Sheets, backup files, or Apps Script project.
+- Use a dedicated deployment/automation account for production where possible.
+- Restrict direct edit access to explicitly authorized platform administrators.
+- Treat direct Sheet/Script editor access as equivalent to privileged backend access because it can bypass application-level RBAC.
+
+High-risk Super Admin actions require fresh password + TOTP step-up authentication and are blocked if the privileged audit trail cannot be written.
 
 ## Test
 
