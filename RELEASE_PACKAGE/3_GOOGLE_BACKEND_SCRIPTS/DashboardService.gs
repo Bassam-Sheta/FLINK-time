@@ -151,6 +151,7 @@ const DashboardService = {
     let totalTrackedSecondsToday = 0;
     let totalTrackedSecondsThisWeek = 0;
     let pendingApprovalsCount = 0;
+    const periodSummaries = [];
 
     for (const ws of targets) {
       try {
@@ -161,6 +162,12 @@ const DashboardService = {
         );
         totalTrackedSecondsToday += totals.todaySeconds;
         totalTrackedSecondsThisWeek += totals.weekSeconds;
+        periodSummaries.push({
+          workspaceId: ws.WorkspaceID,
+          businessDate: totals.today,
+          weekStart: totals.weekStart,
+          weekEnd: totals.weekEnd
+        });
 
         const timesheets = SheetRepository.listTimesheets(
           ws.WorkspaceID,
@@ -210,6 +217,13 @@ const DashboardService = {
       workingNow: liveRadar.workers,
       todayTrackedHours: +(totalTrackedSecondsToday / 3600).toFixed(2),
       weekTrackedHours: +(totalTrackedSecondsThisWeek / 3600).toFixed(2),
+      currentBusinessDate:
+        periodSummaries.length === 1 ? periodSummaries[0].businessDate : '',
+      currentWeekStart:
+        periodSummaries.length === 1 ? periodSummaries[0].weekStart : '',
+      currentWeekEnd:
+        periodSummaries.length === 1 ? periodSummaries[0].weekEnd : '',
+      workspacePeriods: periodSummaries,
       pendingApprovalsCount,
       pendingRequestsCount
     };
