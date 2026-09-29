@@ -224,7 +224,8 @@ const SetupService = {
         userId: adminUserId,
         username: cleanUsername,
         displayName: accountRecord.DisplayName,
-        role: CONSTANTS.ROLES.SUPER_ADMIN
+        role: CONSTANTS.ROLES.SUPER_ADMIN,
+        email: googleEmail
       },
       sessionToken: session.sessionToken
     };
