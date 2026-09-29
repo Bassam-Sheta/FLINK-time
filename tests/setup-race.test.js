@@ -21,7 +21,7 @@ function fixture({ lockThrows = false } = {}) {
   const accounts = [];
   const props = new Map([
     ['FLINK_SETUP_KEY_HASH', 'SETUP-HASH'],
-    ['FLINK_SETUP_KEY_CREATED_AT', '2026-09-28T00:00:00.000Z']
+    ['FLINK_SETUP_KEY_CREATED_AT', new Date().toISOString()]
   ]);
   let lockAcquireCalls = 0;
   let createAccountCalls = 0;
@@ -37,7 +37,8 @@ function fixture({ lockThrows = false } = {}) {
     ROLES: { SUPER_ADMIN: 'SUPER_ADMIN' },
     ACCOUNT_STATUS: { ACTIVE: 'ACTIVE', DELETED: 'DELETED' },
     MASTER_TABS: { ACCOUNTS: 'Accounts' },
-    AUDIT_EVENTS: { USER_CREATED: 'USER_CREATED' }
+    AUDIT_EVENTS: { USER_CREATED: 'USER_CREATED' },
+    LIMITS: { SETUP_KEY_TTL_MINUTES: 15 }
   };
   global.Validation = {
     assertRequired(obj, names) {

@@ -108,6 +108,7 @@ function loadFixture() {
   delete require.cache[require.resolve(servicePath)];
   const AuthService = require(servicePath).AuthService;
   AuthService._mfaChallengeMemory = {};
+  AuthService._mfaEnrollmentMemory = {};
 
   return {
     AuthService,
@@ -211,9 +212,19 @@ test('MFA enrollment consumes the confirmation TOTP timestep', () => {
   fx.cred.PendingTotpSecret = 'PENDING-SECRET';
   fx.cred.MfaEnabled = false;
   fx.cred.LastSuccessfulTotpStep = '';
+  fx.AuthService._storeMfaEnrollment('USR-1', {
+    sessionId: 'S1',
+    expiresAtMs: Date.now() + 60000,
+    replacing: false
+  });
 
   const result = fx.AuthService.confirmMfa(
-    { userId: 'USR-1', role: 'USER', user: fx.account },
+    {
+      userId: 'USR-1',
+      role: 'USER',
+      user: fx.account,
+      session: { SessionID: 'S1', ClientType: 'WEB', ClientLabel: 'worker@example.com' }
+    },
     '123456'
   );
 
@@ -221,4 +232,29 @@ test('MFA enrollment consumes the confirmation TOTP timestep', () => {
   assert.equal(fx.cred.MfaEnabled, true);
   assert.equal(fx.cred.PendingTotpSecret, '');
   assert.equal(fx.cred.LastSuccessfulTotpStep, 123456);
+});
+
+test('MFA enrollment confirmation is rejected from another session', () => {
+  const fx = loadFixture();
+  fx.cred.PendingTotpSecret = 'PENDING-SECRET';
+  fx.cred.MfaEnabled = false;
+  fx.AuthService._storeMfaEnrollment('USR-1', {
+    sessionId: 'S1',
+    expiresAtMs: Date.now() + 60000,
+    replacing: false
+  });
+
+  assert.throws(
+    () => fx.AuthService.confirmMfa(
+      {
+        userId: 'USR-1',
+        role: 'USER',
+        user: fx.account,
+        session: { SessionID: 'S2', ClientType: 'WEB', ClientLabel: 'worker@example.com' }
+      },
+      '123456'
+    ),
+    err => err instanceof AppError && err.code === 'AUTH_REQUIRED'
+  );
+  assert.equal(fx.cred.PendingTotpSecret, '');
 });

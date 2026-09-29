@@ -28,8 +28,8 @@ function fixture(lastSeenAgeMinutes, options = {}) {
     ExpiresAt: options.expiresAt || new Date(now + 7 * 60 * 60 * 1000).toISOString(),
     AbsoluteExpiresAt: options.absoluteExpiresAt || new Date(now + 23 * 60 * 60 * 1000).toISOString(),
     Revoked: false,
-    ClientType: 'PORTABLE_WINDOWS',
-    ClientLabel: ''
+    ClientType: 'WEB',
+    ClientLabel: 'user@example.com'
   };
 
   global.AppError = AppError;
