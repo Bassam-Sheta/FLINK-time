@@ -659,57 +659,32 @@
       </div>
     </div>
 
-    <!-- 5. ADMIN / SUPER ADMIN DASHBOARD -->
+    <!-- 5. MANAGER / ADMIN WORKSPACE -->
     <div id="adminDashboardView" class="hidden">
-      <!-- 10 KPI Cards -->
-      <div class="grid-5" style="margin-bottom: 1.5rem;">
-        <div class="kpi-card">
-          <div class="kpi-label">Working Now</div>
-          <div class="kpi-val" id="adminWorkingNowCount">0</div>
-        </div>
-        <div class="kpi-card">
-          <div class="kpi-label">Hours Today</div>
-          <div class="kpi-val" id="adminTodayTeamHours">0.0 h</div>
-        </div>
-        <div class="kpi-card">
-          <div class="kpi-label">Hours This Week</div>
-          <div class="kpi-val" id="adminWeekHours">0.0 h</div>
-        </div>
-        <div class="kpi-card">
-          <div class="kpi-label">Pending Approvals</div>
-          <div class="kpi-val" id="adminPendingApprovalsCount">0</div>
-        </div>
-        <div class="kpi-card">
-          <div class="kpi-label">Pending Requests</div>
-          <div class="kpi-val" id="adminPendingRequestsCount">0</div>
-        </div>
-      </div>
-
-      <!-- Live Activity Radar -->
-      <div class="card">
+      <div class="card" style="padding:1.25rem 1.5rem; margin-bottom:1.25rem;">
         <div class="card-header">
           <div>
-            <div class="card-title">Live Workforce Radar</div>
-            <div class="card-subtitle">Real-time status across authorized workspaces (Auto-refreshes every 60s)</div>
+            <div class="card-title">Manager Workspace</div>
+            <div class="card-subtitle">Operational control across assigned workspaces only</div>
           </div>
-          <button class="btn btn-secondary btn-sm" onclick="loadAdminDashboard()">Refresh Radar</button>
+          <div>
+            <label for="managerWorkspaceSelect">Workspace Scope</label>
+            <select id="managerWorkspaceSelect" onchange="onManagerWorkspaceChange()"></select>
+          </div>
         </div>
-        <div class="table-responsive">
-          <table>
-            <thead>
-              <tr>
-                <th>Employee</th>
-                <th>Workspace</th>
-                <th>Project</th>
-                <th>Started (UTC)</th>
-                <th>Elapsed</th>
-                <th>Activity Description</th>
-              </tr>
-            </thead>
-            <tbody id="adminLiveRadarBody"></tbody>
-          </table>
+        <div class="subtabs-bar" id="managerTabs">
+          <button class="nav-btn active" id="mgrTab_overview" onclick="switchManagerTab('overview')">Overview</button>
+          <button class="nav-btn" id="mgrTab_workspaces" onclick="switchManagerTab('workspaces')">My Workspaces</button>
+          <button class="nav-btn" id="mgrTab_live" onclick="switchManagerTab('live')">Live Activity</button>
+          <button class="nav-btn" id="mgrTab_timesheets" onclick="switchManagerTab('timesheets')">Timesheets</button>
+          <button class="nav-btn" id="mgrTab_approvals" onclick="switchManagerTab('approvals')">Approvals</button>
+          <button class="nav-btn" id="mgrTab_reports" onclick="switchManagerTab('reports')">Reports</button>
+          <button class="nav-btn" id="mgrTab_users" onclick="switchManagerTab('users')">Users</button>
+          <button class="nav-btn" id="mgrTab_requests" onclick="switchManagerTab('requests')">Requests</button>
+          <button class="nav-btn" id="mgrTab_alerts" onclick="switchManagerTab('alerts')">Alerts</button>
         </div>
       </div>
+      <div id="managerContent"></div>
     </div>
 
     <!-- 6. SUPER ADMIN UNIFIED CONTROL CENTER (22 SECTIONS) -->
