@@ -4580,7 +4580,7 @@ var MasterRepository = (typeof global !== 'undefined' && global.MasterRepository
         prevHash = rows[rows.length - 1].RecordHash;
       }
 
-      const record = {
+      const record = Validation.sanitizeRow({
         AuditID: auditId,
         TimestampUTC: timestamp,
         ActorUserID: auditData.ActorUserID || '',
@@ -4596,7 +4596,7 @@ var MasterRepository = (typeof global !== 'undefined' && global.MasterRepository
         ClientType: auditData.ClientType || 'WEB',
         PreviousHash: prevHash,
         RecordHash: ''
-      };
+      });
       record.RecordHash = SecurityService.computeAuditRecordHashV2(
         prevHash,
         record,
@@ -5156,7 +5156,7 @@ var SheetRepository = (typeof global !== 'undefined' && global.SheetRepository) 
         prevHash = rows[rows.length - 1].RecordHash;
       }
 
-      const record = {
+      const record = Validation.sanitizeRow({
         AuditID: auditId,
         TimestampUTC: timestamp,
         ActorUserID: auditData.ActorUserID || '',
@@ -5170,7 +5170,7 @@ var SheetRepository = (typeof global !== 'undefined' && global.SheetRepository) 
         ClientType: auditData.ClientType || 'WEB',
         PreviousHash: prevHash,
         RecordHash: ''
-      };
+      });
       record.RecordHash = SecurityService.computeAuditRecordHashV2(
         prevHash,
         record,
@@ -11954,7 +11954,8 @@ var IntegrityService = (typeof global !== 'undefined' && global.IntegrityService
 var JobService = (typeof global !== 'undefined' && global.JobService) || {
   _scheduledTriggerSpecs: [
     { handler: 'scheduledHousekeeping_', hour: 1, purpose: 'Expired session cleanup' },
-    { handler: 'scheduledRollups_', hour: 2, purpose: 'Rollup reconciliation' }
+    { handler: 'scheduledRollups_', hour: 2, purpose: 'Rollup reconciliation' },
+    { handler: 'scheduledAuditCheckpoints_', hour: 3, purpose: 'Audit checkpoint anchoring' }
   ],
 
   getScheduledTriggerStatus() {
@@ -12055,6 +12056,8 @@ var JobService = (typeof global !== 'undefined' && global.JobService) || {
     let expiredSessionsCount = 0;
     let purgedSessionsCount = 0;
     let purgedMfaChallengesCount = 0;
+    let purgedMfaEnrollmentsCount = 0;
+    let purgedStepUpsCount = 0;
 
     try {
       const { rows: sessions } = MasterRepository.getTableData(CONSTANTS.MASTER_TABS.SESSIONS);
@@ -12113,16 +12116,54 @@ var JobService = (typeof global !== 'undefined' && global.JobService) || {
         const props = PropertiesService.getScriptProperties();
         const all = props.getProperties();
         for (const [key, raw] of Object.entries(all)) {
-          if (!key.startsWith('FLINK_MFA_CHALLENGE_')) continue;
-          try {
-            const challenge = JSON.parse(raw);
-            if (Number(challenge.expiresAtMs || 0) < now) {
+          if (key.startsWith('FLINK_MFA_CHALLENGE_')) {
+            try {
+              const challenge = JSON.parse(raw);
+              if (Number(challenge.expiresAtMs || 0) < now) {
+                props.deleteProperty(key);
+                purgedMfaChallengesCount++;
+              }
+            } catch (e) {
               props.deleteProperty(key);
               purgedMfaChallengesCount++;
             }
-          } catch (e) {
-            props.deleteProperty(key);
-            purgedMfaChallengesCount++;
+            continue;
+          }
+
+          if (key.startsWith('FLINK_MFA_ENROLLMENT_')) {
+            let expired = false;
+            try {
+              const enrollment = JSON.parse(raw);
+              expired = Number(enrollment.expiresAtMs || 0) < now;
+            } catch (e) {
+              expired = true;
+            }
+            if (expired) {
+              props.deleteProperty(key);
+              purgedMfaEnrollmentsCount++;
+              const userId = key.substring('FLINK_MFA_ENROLLMENT_'.length);
+              try {
+                const cred = MasterRepository.getCredentials(userId);
+                if (cred && cred.PendingTotpSecret) {
+                  MasterRepository.updateCredentials(userId, { PendingTotpSecret: '' });
+                }
+              } catch (cleanupErr) {}
+            }
+            continue;
+          }
+
+          if (key.startsWith('FLINK_STEP_UP_')) {
+            let expired = false;
+            try {
+              const stepUp = JSON.parse(raw);
+              expired = Number(stepUp.expiresAtMs || 0) < now;
+            } catch (e) {
+              expired = true;
+            }
+            if (expired) {
+              props.deleteProperty(key);
+              purgedStepUpsCount++;
+            }
           }
         }
       }
@@ -12136,17 +12177,20 @@ var JobService = (typeof global !== 'undefined' && global.JobService) || {
         EndedAt: new Date().toISOString(),
         DurationMs: Date.now() - startMs,
         ItemsProcessed:
-          expiredSessionsCount + purgedSessionsCount + purgedMfaChallengesCount,
+          expiredSessionsCount + purgedSessionsCount + purgedMfaChallengesCount +
+          purgedMfaEnrollmentsCount + purgedStepUpsCount,
         Status: CONSTANTS.JOB_STATUS.COMPLETED,
         LogDetails:
-          `Housekeeping revoked ${expiredSessionsCount} expired sessions, purged ${purgedSessionsCount} retained session rows, and removed ${purgedMfaChallengesCount} stale MFA challenges.`
+          `Housekeeping revoked ${expiredSessionsCount} expired sessions, purged ${purgedSessionsCount} retained session rows, removed ${purgedMfaChallengesCount} stale MFA challenges, ${purgedMfaEnrollmentsCount} stale MFA enrollments, and ${purgedStepUpsCount} expired step-up grants.`
       });
 
       return {
         ok: true,
         expiredSessionsCount,
         purgedSessionsCount,
-        purgedMfaChallengesCount
+        purgedMfaChallengesCount,
+        purgedMfaEnrollmentsCount,
+        purgedStepUpsCount
       };
     } catch (e) {
       this.logJobRun({
@@ -12200,6 +12244,56 @@ var JobService = (typeof global !== 'undefined' && global.JobService) || {
     });
 
     return { ok: true, workspacesProcessed: results.length, details: results };
+  },
+
+  dispatchAuditCheckpoints() {
+    this._beginJobExecution();
+    const runId = Validation.generateId('RUN');
+    const startMs = Date.now();
+    const results = [];
+
+    const scopes = [{ workspaceId: null, label: 'MASTER' }];
+    for (const ws of MasterRepository.listWorkspaces()) {
+      if (ws.Status === CONSTANTS.WORKSPACE_STATUS.ACTIVE) {
+        scopes.push({ workspaceId: ws.WorkspaceID, label: ws.WorkspaceID });
+      }
+    }
+
+    for (const scope of scopes) {
+      try {
+        const checkpoint = AuditService.createAuditCheckpoint(scope.workspaceId);
+        results.push({ scope: scope.label, ok: true, checkpoint });
+      } catch (err) {
+        results.push({
+          scope: scope.label,
+          ok: false,
+          error: String(err && err.message ? err.message : err)
+        });
+      }
+    }
+
+    const allOk = results.every(result => result.ok);
+    this.logJobRun({
+      RunID: runId,
+      JobID: 'JOB_AUDIT_CHECKPOINTS',
+      JobType: 'AUDIT_CHECKPOINT',
+      WorkspaceID: 'ALL',
+      StartedAt: new Date(startMs).toISOString(),
+      EndedAt: new Date().toISOString(),
+      DurationMs: Date.now() - startMs,
+      ItemsProcessed: results.length,
+      Status: allOk ? CONSTANTS.JOB_STATUS.COMPLETED : CONSTANTS.JOB_STATUS.FAILED,
+      LogDetails: `Anchored audit checkpoints for ${results.filter(r => r.ok).length}/${results.length} scopes.`
+    });
+
+    if (!allOk) {
+      throw new AppError(
+        ERROR_CODES.CRYPTO_FAILURE,
+        'One or more audit checkpoint scopes could not be anchored.',
+        500
+      );
+    }
+    return { ok: true, scopesProcessed: results.length, details: results };
   },
 
   /**
@@ -12401,6 +12495,10 @@ function scheduledHousekeeping_() {
 
 function scheduledRollups_() {
   return JobService.dispatchRollups();
+}
+
+function scheduledAuditCheckpoints_() {
+  return JobService.dispatchAuditCheckpoints();
 }
 
 /* ===== BackupAndAuditServices.gs ===== */
@@ -13031,6 +13129,48 @@ var AuditService = (typeof global !== 'undefined' && global.AuditService) || {
     }
   },
 
+  _computeSnapshotHash(rows, count = null) {
+    const take = count === null ? rows.length : Math.max(0, Number(count) || 0);
+    const normalized = (rows || []).slice(0, take).map(row => ({
+      AuditID: String(row.AuditID || ''),
+      TimestampUTC: String(row.TimestampUTC || ''),
+      ActorUserID: String(row.ActorUserID || ''),
+      ActorRole: String(row.ActorRole || ''),
+      WorkspaceID: String(row.WorkspaceID || ''),
+      EntityType: String(row.EntityType || ''),
+      EntityID: String(row.EntityID || ''),
+      Action: String(row.Action || ''),
+      BeforeJSON: typeof row.BeforeJSON === 'object' ? JSON.stringify(row.BeforeJSON) : String(row.BeforeJSON || ''),
+      AfterJSON: typeof row.AfterJSON === 'object' ? JSON.stringify(row.AfterJSON) : String(row.AfterJSON || ''),
+      Reason: String(row.Reason || ''),
+      CorrelationID: String(row.CorrelationID || ''),
+      ClientType: String(row.ClientType || ''),
+      PreviousHash: String(row.PreviousHash || ''),
+      RecordHash: String(row.RecordHash || '')
+    }));
+    return SecurityService.computeAuditHash('SNAPSHOT', normalized);
+  },
+
+  requirePrivilegedActionAudit(authContext, action, workspaceId = '') {
+    const ok = MasterRepository.logGlobalAudit({
+      ActorUserID: authContext.userId,
+      ActorRole: authContext.role,
+      WorkspaceID: workspaceId || 'MASTER',
+      EntityType: 'PRIVILEGED_ACTION',
+      EntityID: action,
+      Action: 'PRIVILEGED_ACTION_AUTHORIZED',
+      Reason: 'Fresh step-up authentication verified before privileged mutation'
+    });
+    if (!ok) {
+      throw new AppError(
+        ERROR_CODES.CRYPTO_FAILURE,
+        'Security audit trail is unavailable. Privileged action blocked.',
+        503
+      );
+    }
+    return true;
+  },
+
   /**
    * Creates an external, tamper-evident checkpoint root hash for the audit trail.
    * Stored outside Google Sheets in ScriptProperties (inaccessible to spreadsheet editors).
@@ -13045,6 +13185,10 @@ var AuditService = (typeof global !== 'undefined' && global.AuditService) || {
     const dateStr = new Date().toISOString().split('T')[0];
     const lastHash = verification.lastRecordHash || 'GENESIS';
     const rootHash = SecurityService.computeAuditCheckpoint(scope, dateStr, lastHash, verification.count);
+    const rows = workspaceId
+      ? (SheetRepository.getTableData(workspaceId, CONSTANTS.WORKSPACE_TABS.AUDIT_LOG).rows || [])
+      : (MasterRepository.getTableData(CONSTANTS.MASTER_TABS.GLOBAL_AUDIT).rows || []);
+    const snapshotHash = this._computeSnapshotHash(rows, verification.count);
 
     const checkpointKey = (CONSTANTS.SECURITY.CHECKPOINT_PROPERTY_PREFIX || 'FLINK_AUDIT_CHECKPOINT_') + `${scope}_${dateStr}`;
 
@@ -13062,6 +13206,7 @@ var AuditService = (typeof global !== 'undefined' && global.AuditService) || {
         lastHash,
         count: verification.count,
         rootHash,
+        snapshotHash,
         checkpointAt: new Date().toISOString()
       }));
     } catch (e) {
@@ -13077,6 +13222,7 @@ var AuditService = (typeof global !== 'undefined' && global.AuditService) || {
       scope,
       date: dateStr,
       rootHash,
+      snapshotHash,
       count: verification.count,
       lastHash,
       checkpointKey
@@ -13280,6 +13426,19 @@ var AuditService = (typeof global !== 'undefined' && global.AuditService) || {
               message:
                 `Audit checkpoint ${key} does not match the recorded chain prefix.`
             };
+          }
+
+          if (cp.snapshotHash) {
+            const expectedSnapshot = this._computeSnapshotHash(rows, count);
+            if (!SecurityService.constantTimeEquals(expectedSnapshot, String(cp.snapshotHash))) {
+              return {
+                ok: false,
+                verified: false,
+                scope: scopeName,
+                message:
+                  `Audit checkpoint ${key} detected mutation within the sealed audit prefix.`
+              };
+            }
           }
 
           checkpointVerified = true;
