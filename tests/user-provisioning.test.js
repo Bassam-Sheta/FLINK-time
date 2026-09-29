@@ -6,7 +6,7 @@ const path = require('node:path');
 
 const servicePath = path.resolve(
   __dirname,
-  '../apps-script/Admin.gs'
+  '../apps-script/Code.gs'
 );
 
 class AppError extends Error {
@@ -108,7 +108,7 @@ test('new user is rolled back when workspace member provisioning fails', () => {
 test('account row is rolled back when credential creation fails', () => {
   const repoPath = path.resolve(
     __dirname,
-    '../apps-script/Data.gs'
+    '../apps-script/Code.gs'
   );
   const calls = [];
 

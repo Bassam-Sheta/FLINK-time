@@ -6,61 +6,34 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 
-const backendDir = path.resolve(
-  __dirname,
-  '../apps-script'
-);
+const appDir = path.resolve(__dirname, '../apps-script');
 
-function deployableGsFiles() {
-  return fs.readdirSync(backendDir)
-    .filter(name => name.endsWith('.gs'))
-    .sort();
-}
-
-test('every deployable Apps Script .gs file parses as JavaScript', () => {
-  const files = deployableGsFiles();
-
-  assert.deepEqual(files, ['Admin.gs','Business.gs','Code.gs','Data.gs','Security.gs'], 'deployable backend must remain consolidated to five .gs files');
-
-  const failures = [];
-  for (const file of files) {
-    const source = fs.readFileSync(path.join(backendDir, file), 'utf8');
-    try {
-      new vm.Script(source, { filename: file });
-    } catch (err) {
-      failures.push(file + ': ' + err.message);
-    }
-  }
-
-  assert.deepEqual(failures, []);
+test('deployable Apps Script layout is exactly one backend plus three portals and manifest', () => {
+  const files = fs.readdirSync(appDir).sort();
+  assert.deepEqual(files, [
+    'Admin.html',
+    'Code.gs',
+    'SuperAdmin.html',
+    'User.html',
+    'appsscript.json'
+  ]);
 });
 
-test('all five consolidated .gs files load together in one Apps Script-like global namespace', () => {
-  const loadOrder = ['Code.gs','Security.gs','Data.gs','Business.gs','Admin.gs'];
+test('the single Code.gs backend parses and loads in an Apps Script-like global namespace', () => {
+  const source = fs.readFileSync(path.join(appDir, 'Code.gs'), 'utf8');
+  assert.doesNotThrow(() => new vm.Script(source, { filename: 'Code.gs' }));
+
   const context = vm.createContext({
     console: { log() {}, warn() {}, error() {} }
   });
-
-  const failures = [];
-  for (const file of loadOrder) {
-    let source = fs.readFileSync(path.join(backendDir, file), 'utf8');
-    // Node-only export guards are harmless in Apps Script but module is absent
-    // in this VM, matching the Apps Script global environment.
-    try {
-      new vm.Script(source, { filename: file }).runInContext(context);
-    } catch (err) {
-      failures.push(file + ': ' + err.message);
-      break;
-    }
-  }
-
-  assert.deepEqual(failures, [], 'consolidated backend files must coexist in the shared Apps Script global namespace');
+  new vm.Script(source, { filename: 'Code.gs' }).runInContext(context);
 
   const coreTypes = vm.runInContext("({" +
     "CONSTANTS:typeof CONSTANTS," +
     "ERROR_CODES:typeof ERROR_CODES," +
     "AppError:typeof AppError," +
     "Validation:typeof Validation," +
+    "IdentityService:typeof IdentityService," +
     "SecurityService:typeof SecurityService," +
     "MasterRepository:typeof MasterRepository," +
     "SheetRepository:typeof SheetRepository," +
@@ -92,17 +65,36 @@ test('all five consolidated .gs files load together in one Apps Script-like glob
   const missing = Object.entries(coreTypes)
     .filter(([, type]) => type === 'undefined')
     .map(([name]) => name);
-
-  assert.deepEqual(missing, [], 'all core backend globals must be defined after consolidated load');
+  assert.deepEqual(missing, []);
 });
 
-test('deployable Apps Script folder contains no legacy controller or binaries', () => {
-  assert.equal(fs.existsSync(path.join(backendDir, 'admin_ui.html')), false);
-  assert.equal(fs.readdirSync(backendDir).some(name => name.toLowerCase().endsWith('.exe')), false);
+test('Code.gs routes the three Google Sites embed views explicitly', () => {
+  const source = fs.readFileSync(path.join(appDir, 'Code.gs'), 'utf8');
+  assert.match(source, /user:\s*'User'/);
+  assert.match(source, /admin:\s*'Admin'/);
+  assert.match(source, /superadmin:\s*'SuperAdmin'/);
+  assert.match(source, /Unknown portal view/);
+});
+
+test('legacy package tree and executable artifacts are absent from active source', () => {
+  const repoRoot = path.resolve(__dirname, '..');
+  assert.equal(fs.existsSync(path.join(repoRoot, 'RELEASE_PACKAGE')), false);
+
+  function walk(dir) {
+    return fs.readdirSync(dir, { withFileTypes: true }).flatMap(entry => {
+      const full = path.join(dir, entry.name);
+      return entry.isDirectory() ? walk(full) : [full];
+    });
+  }
+
+  const executables = walk(repoRoot).filter(file =>
+    file.toLowerCase().endsWith('.exe')
+  );
+  assert.deepEqual(executables, []);
 });
 
 test('modern API has no public system.bootstrap route', () => {
-  const source = fs.readFileSync(path.join(backendDir, 'Code.gs'), 'utf8');
+  const source = fs.readFileSync(path.join(appDir, 'Code.gs'), 'utf8');
   assert.equal(source.includes("'system.bootstrap'"), false);
   assert.equal(source.includes('handleDesktopAndControllerAction'), false);
 });

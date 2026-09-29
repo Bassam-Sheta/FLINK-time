@@ -1,52 +1,55 @@
 # FLINK Time & Workforce Platform
 
-FLINK Time is a Google Workspace-native time tracking and workforce management application.
+Final Google Workspace-native architecture.
 
-## Source layout
-
-Only the modern source-first application is kept in the active repository:
+## Deployable application
 
 ```
 apps-script/
   Code.gs
-  Security.gs
-  Data.gs
-  Business.gs
-  Admin.gs
-  App.html
+  User.html
+  Admin.html
+  SuperAdmin.html
   appsscript.json
-
-tests/
-SYSTEM_SPEC.md
-README.md
-package.json
-.github/workflows/stabilization-tests.yml
 ```
 
-The old Windows portable tracker, packager, standalone desktop Admin Controller, bundled executables, launchers, and legacy release-package tree are retired from the active branch. They are not part of the supported stabilized architecture.
+That is the complete deployable application:
+- **1 Google Apps Script backend:** `Code.gs`
+- **3 Google Sites embed pages:** `User.html`, `Admin.html`, `SuperAdmin.html`
+- **1 Apps Script manifest:** `appsscript.json`
 
-## Architecture
+No Windows EXEs, packagers, launchers, standalone desktop controllers, or `RELEASE_PACKAGE/` tree are part of the supported system.
 
-- Google Sites or the direct Apps Script web app provides the browser UI.
-- One Apps Script deployment is the only API/backend.
-- Google Sheets stores master/workspace data.
-- Google Drive stores managed backups/reports.
-- Script Properties stores application secrets.
-- USER, ADMIN, and SUPER_ADMIN roles share the same authenticated backend and UI codebase.
-- Browser sessions are additionally bound to the server-observed Google Workspace email.
+## Google Sites embed URLs
 
-## Deploy
+Deploy the Apps Script project once as a Web App. Use the same `/exec` deployment with these query strings:
 
-1. Create the Master Control Google Sheet.
-2. Open Extensions > Apps Script.
-3. Create the five `.gs` files and one HTML file from `apps-script/`.
-4. Enable the manifest and copy `apps-script/appsscript.json`.
-5. Run `initializeInstallation()` once from the Apps Script editor and retain the one-time setup key.
+- Employee portal: `<WEB_APP_EXEC_URL>?view=user`
+- Admin / Manager portal: `<WEB_APP_EXEC_URL>?view=admin`
+- Super Admin portal: `<WEB_APP_EXEC_URL>?view=superadmin`
+
+Embed each URL on the matching Google Sites page.
+
+## Access model
+
+- `User.html` accepts USER, ADMIN, and SUPER_ADMIN accounts but exposes the employee-facing Timer / My Time / Reports / Account navigation.
+- `Admin.html` accepts ADMIN and SUPER_ADMIN accounts and exposes Manager / Reports / Account.
+- `SuperAdmin.html` accepts only SUPER_ADMIN and exposes Admin Console / Manager / Reports / Account.
+- Server-side RBAC remains authoritative for every API action.
+- WEB sessions are bound to the server-observed Google Workspace email.
+
+## Deployment
+
+1. Create/open the Master Control Google Sheet.
+2. Open **Extensions → Apps Script**.
+3. Create `Code.gs`, `User.html`, `Admin.html`, and `SuperAdmin.html` from `apps-script/`.
+4. Enable the manifest and paste `appsscript.json`.
+5. Run `initializeInstallation()` once as the deployment owner and save the one-time setup key.
 6. Deploy as a Web App:
    - Execute as: **Me**
    - Access: **Anyone in your Google Workspace domain**
-7. Open the `/exec` URL and complete Setup Step 1 using the one-time key.
-8. Embed the same web-app URL into the appropriate Google Sites pages if desired.
+7. Open `?view=superadmin` first and complete the setup wizard.
+8. Embed the three role URLs in Google Sites.
 
 Do not deploy this production build as public `Anyone` access.
 
@@ -55,5 +58,3 @@ Do not deploy this production build as public `Anyone` access.
 ```bash
 npm test
 ```
-
-The GitHub Actions stabilization workflow runs the same regression suite for the stabilization pull request.

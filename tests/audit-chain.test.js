@@ -7,7 +7,7 @@ const path = require('node:path');
 
 const servicePath = path.resolve(
   __dirname,
-  '../apps-script/Admin.gs'
+  '../apps-script/Code.gs'
 );
 
 function hash(previousHash, payload) {

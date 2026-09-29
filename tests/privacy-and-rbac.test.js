@@ -6,11 +6,11 @@ const path = require('node:path');
 
 const timeEntryPath = path.resolve(
   __dirname,
-  '../apps-script/Business.gs'
+  '../apps-script/Code.gs'
 );
 const authzPath = path.resolve(
   __dirname,
-  '../apps-script/Security.gs'
+  '../apps-script/Code.gs'
 );
 
 class AppError extends Error {
@@ -188,7 +188,7 @@ test('non-super-admin workspace DTO excludes physical storage identifiers', () =
 
   const workspacePath = path.resolve(
     __dirname,
-    '../apps-script/Data.gs'
+    '../apps-script/Code.gs'
   );
   delete require.cache[require.resolve(workspacePath)];
   const { WorkspaceService } = require(workspacePath);
@@ -204,7 +204,7 @@ test('user DTO never leaks repository row index', () => {
   installCommon();
   const userPath = path.resolve(
     __dirname,
-    '../apps-script/Admin.gs'
+    '../apps-script/Code.gs'
   );
   global.MasterRepository = {
     getTableData(tab) {

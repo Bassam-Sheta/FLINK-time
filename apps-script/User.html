@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>FLINK Time & Workforce Platform</title>
+  <title>FLINK Time — Employee</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
@@ -774,6 +774,43 @@
 
   <!-- CORE FRONTEND ENGINE SCRIPT -->
   <script>
+    const EMBED_MODE = 'USER';
+
+    function embedRoleAllowed(role) {
+      const normalized = String(role || '').toUpperCase();
+      if (EMBED_MODE === 'USER') {
+        return ['USER', 'ADMIN', 'SUPER_ADMIN'].includes(normalized);
+      }
+      if (EMBED_MODE === 'ADMIN') {
+        return ['ADMIN', 'SUPER_ADMIN'].includes(normalized);
+      }
+      return normalized === 'SUPER_ADMIN';
+    }
+
+    function embedDefaultView() {
+      if (EMBED_MODE === 'ADMIN') return 'admin';
+      if (EMBED_MODE === 'SUPER_ADMIN') return 'superadmin';
+      return 'timer';
+    }
+
+    function embedAllowedViews() {
+      if (EMBED_MODE === 'ADMIN') return new Set(['admin', 'reports', 'account']);
+      if (EMBED_MODE === 'SUPER_ADMIN') return new Set(['superadmin', 'admin', 'reports', 'account']);
+      return new Set(['timer', 'mytime', 'reports', 'account']);
+    }
+
+    function showEmbedAccessDenied() {
+      document.getElementById('setupWizardContainer').classList.add('hidden');
+      document.getElementById('appHeader').classList.add('hidden');
+      const login = document.getElementById('loginView');
+      login.classList.remove('hidden');
+      const alertBox = document.getElementById('loginAlert');
+      alertBox.textContent =
+        'This Google Sites page is for ' + EMBED_MODE +
+        ' access. Your FLINK role is ' + String(state.user && state.user.role || 'UNKNOWN') + '.';
+      alertBox.classList.remove('hidden');
+    }
+
     // State Container
     const state = {
       token: sessionStorage.getItem('flink_session_token') || '',
@@ -891,8 +928,14 @@
         state.setupStatus = setup;
 
         if (!setup.initialized && !state.token) {
-          // Uninitialized installation: render Welcome / Setup Wizard
-          document.getElementById('setupWizardContainer').classList.remove('hidden');
+          if (EMBED_MODE === 'SUPER_ADMIN') {
+            document.getElementById('setupWizardContainer').classList.remove('hidden');
+          } else {
+            showLogin();
+            const alertBox = document.getElementById('loginAlert');
+            alertBox.textContent = 'FLINK Time setup is not complete. Open the Super Admin Google Sites page first.';
+            alertBox.classList.remove('hidden');
+          }
           return;
         }
       } catch (e) {}
@@ -946,6 +989,10 @@
     }
 
     async function initApp() {
+      if (!embedRoleAllowed(state.user && state.user.role)) {
+        showEmbedAccessDenied();
+        return;
+      }
       document.getElementById('loginView').classList.add('hidden');
       document.getElementById('setupWizardContainer').classList.add('hidden');
       document.getElementById('appHeader').classList.remove('hidden');
@@ -965,25 +1012,37 @@
       } catch (e) {}
 
       buildNavigation();
-      navigate('timer');
-      loadWorkspaceData();
+      navigate(embedDefaultView());
+      if (EMBED_MODE === 'USER') loadWorkspaceData();
     }
 
     function buildNavigation() {
       const nav = document.getElementById('navLinks');
       nav.replaceChildren();
-      const links = [
-        { id: 'timer', label: 'Timer' },
-        { id: 'mytime', label: 'My Time' },
-        { id: 'reports', label: 'Reports' },
-        { id: 'account', label: 'Account' }
-      ];
-      if (state.user.role === 'ADMIN' || state.user.role === 'SUPER_ADMIN') {
-        links.splice(2, 0, { id: 'admin', label: 'Manager' });
+
+      let links;
+      if (EMBED_MODE === 'ADMIN') {
+        links = [
+          { id: 'admin', label: 'Manager' },
+          { id: 'reports', label: 'Reports' },
+          { id: 'account', label: 'Account' }
+        ];
+      } else if (EMBED_MODE === 'SUPER_ADMIN') {
+        links = [
+          { id: 'superadmin', label: 'Admin Console' },
+          { id: 'admin', label: 'Manager' },
+          { id: 'reports', label: 'Reports' },
+          { id: 'account', label: 'Account' }
+        ];
+      } else {
+        links = [
+          { id: 'timer', label: 'Timer' },
+          { id: 'mytime', label: 'My Time' },
+          { id: 'reports', label: 'Reports' },
+          { id: 'account', label: 'Account' }
+        ];
       }
-      if (state.user.role === 'SUPER_ADMIN') {
-        links.splice(3, 0, { id: 'superadmin', label: 'Admin Console' });
-      }
+
       links.forEach(link => {
         const btn = document.createElement('button');
         btn.className = 'nav-btn';
@@ -995,6 +1054,9 @@
     }
 
     function navigate(viewId) {
+      if (!embedAllowedViews().has(viewId)) {
+        viewId = embedDefaultView();
+      }
       document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
       const activeBtn = document.getElementById('navBtn_' + viewId);
       if (activeBtn) activeBtn.classList.add('active');

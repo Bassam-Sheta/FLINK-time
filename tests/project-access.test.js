@@ -6,11 +6,11 @@ const path = require('node:path');
 
 const policyPath = path.resolve(
   __dirname,
-  '../apps-script/Security.gs'
+  '../apps-script/Code.gs'
 );
 const masterDataPath = path.resolve(
   __dirname,
-  '../apps-script/Business.gs'
+  '../apps-script/Code.gs'
 );
 
 class AppError extends Error {

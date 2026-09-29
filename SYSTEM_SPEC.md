@@ -1,71 +1,60 @@
-# FLINK Time — Canonical System Specification
+# FLINK Time — Final Canonical System Specification
 
-## 1. Supported topology
-
-The production system is one Google Workspace-native application:
+## Final topology
 
 ```
-Google Sites / Browser
-        |
-        v
-Google Apps Script Web App
-        |
-        +--> Master Sheet
-        +--> Workspace Sheets
-        +--> Google Drive
-        +--> Script Properties
+Google Sites
+  ├── Employee page   -> Apps Script /exec?view=user
+  ├── Admin page      -> Apps Script /exec?view=admin
+  └── Super Admin page-> Apps Script /exec?view=superadmin
+                              |
+                              v
+                           Code.gs
+                              |
+             +----------------+----------------+
+             |                |                |
+        Master Sheet     Workspace Sheets   Google Drive
+                                             + Script Properties
 ```
 
-There is no supported portable Windows tracker, client packager, second REST backend, or standalone desktop Admin Controller in the stabilized source tree.
+## Deployable source contract
 
-## 2. Deployable source files
+The production application intentionally has only:
+1. `Code.gs` — all backend/API/security/data/business/admin logic.
+2. `User.html` — employee Google Sites embed.
+3. `Admin.html` — Admin/Manager Google Sites embed.
+4. `SuperAdmin.html` — Super Admin Google Sites embed.
+5. `appsscript.json` — Apps Script manifest.
 
-The complete deployable application is intentionally consolidated to seven files:
+No other `.gs` file is required for deployment.
 
-- `Code.gs` — constants, errors, validation, HTTP/API gateway, dispatcher.
-- `Security.gs` — Google identity binding, password/MFA, sessions, RBAC, tracking policy.
-- `Data.gs` — Drive access, repositories, workspace routing/lifecycle, timezone data services.
-- `Business.gs` — clients/projects/tasks/tags, timers, time entries, timesheets, approvals, reports, rollups, dashboards.
-- `Admin.gs` — user lifecycle, Admin requests, setup, integrity, jobs, backups/audit, export/migration.
-- `App.html` — single-page USER/ADMIN/SUPER_ADMIN GUI.
-- `appsscript.json` — Apps Script manifest.
+## Role surfaces
 
-## 3. Identity and authentication
+### USER portal
+Timer, My Time, self-scoped Reports, Account.
 
-Production deployment is domain-restricted and executes as the deploying account so staff do not need direct spreadsheet permissions.
+### ADMIN portal
+Manager workspace, assigned-workspace Reports, Account.
 
-For WEB sessions, FLINK Time reads the server-observed Google Workspace email using `Session.getActiveUser().getEmail()`. That email must match the FLINK account Email before a WEB session is issued or accepted.
+### SUPER_ADMIN portal
+Super Admin control center, Manager workspace, Reports, Account, first-run setup.
 
-Authentication also includes password verification, failed-login throttling/lockout, optional TOTP MFA, idle timeout, absolute timeout, password-version/session revocation, and forced-password-change rules.
+Client-side portal separation is a usability layer only. Server-side `ACTION_PERMISSIONS`, session validation, workspace ACLs, and role checks remain the security authority.
 
-## 4. Roles
+## Authentication
+- Google Workspace domain-restricted web app.
+- Server-observed Google Workspace email must match the FLINK account email.
+- Password hashing, failed-login throttling/lockout, session idle/absolute expiry, password-version invalidation, forced password change, and MFA rules remain in `Code.gs`.
 
-- `USER` — own timer, own entries, own weekly timesheet, self-scoped reports, account/security.
-- `ADMIN` — operational management for assigned workspaces only; maximum three active workspaces; submits lifecycle requests rather than executing Super Admin-only mutations.
-- `SUPER_ADMIN` — global governance and lifecycle control.
+## Data integrity
+- UTC storage.
+- Workspace-local timezone/date/week interpretation.
+- One active timer per user.
+- Idempotent timer operations.
+- Optimistic concurrency for time-entry mutation.
+- Immutable timesheet submission membership.
+- Explicit timesheet state machine.
+- Canonical rollup rebuild from raw TimeEntries.
 
-## 5. Data model
-
-- UTC is the storage time model.
-- Workspace timezone determines business date/week boundaries and local display.
-- Workspace operational data remains physically isolated by workspace spreadsheet.
-- Master control stores identity, credentials metadata, workspace registry/access, sessions, requests, global configuration and audit/control data.
-- Passwords are stored as salted one-way hashes, never reversible plaintext/encryption.
-
-## 6. Time integrity
-
-- One active timer per user across active accessible workspaces.
-- Timer start/stop operations support idempotency.
-- Time-entry updates/deletes require optimistic-concurrency versions.
-- Submitted/approved entries are locked against ordinary mutation.
-- Timesheet submission captures immutable membership snapshots.
-- Approval/rejection/reopen follow the explicit state machine.
-- Rollups can be rebuilt canonically from raw TimeEntries.
-
-## 7. Browser identity-binding requirement
-
-The deployment must remain restricted to the Google Workspace domain. FLINK Time requires the server-observed Google Workspace email to match the FLINK account Email. A mismatched or missing Google identity fails authentication or revokes an existing WEB session.
-
-## 8. Repository policy
-
-The active branch is source-first. Compiled `.exe` artifacts, build outputs, temporary packaging folders, and legacy launchers are not committed to the stabilized source tree. If a desktop client is ever reintroduced, its real source and reproducible build pipeline must be reviewed separately before binaries are published as release artifacts.
+## Repository policy
+The active source is source-first. Compiled executables, temporary packaging output, legacy desktop clients, and duplicate Apps Script modules are not committed.

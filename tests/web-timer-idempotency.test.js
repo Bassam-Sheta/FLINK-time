@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const html = fs.readFileSync(
-  path.resolve(__dirname, '../apps-script/App.html'),
+  path.resolve(__dirname, '../apps-script/User.html'),
   'utf8'
 );
 

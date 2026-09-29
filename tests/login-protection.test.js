@@ -6,7 +6,7 @@ const path = require('node:path');
 
 const authPath = path.resolve(
   __dirname,
-  '../apps-script/Security.gs'
+  '../apps-script/Code.gs'
 );
 
 class AppError extends Error {

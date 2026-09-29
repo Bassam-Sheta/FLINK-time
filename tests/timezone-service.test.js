@@ -6,7 +6,7 @@ const path = require('node:path');
 
 const servicePath = path.resolve(
   __dirname,
-  '../apps-script/Data.gs'
+  '../apps-script/Code.gs'
 );
 
 class AppError extends Error {

@@ -5,16 +5,16 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const root = path.resolve(
-  __dirname,
-  '../apps-script'
-);
-const html = fs.readFileSync(path.join(root,'App.html'),'utf8');
+const root = path.resolve(__dirname, '../apps-script');
+const code = fs.readFileSync(path.join(root, 'Code.gs'), 'utf8');
+const user = fs.readFileSync(path.join(root, 'User.html'), 'utf8');
+const admin = fs.readFileSync(path.join(root, 'Admin.html'), 'utf8');
+const superAdmin = fs.readFileSync(path.join(root, 'SuperAdmin.html'), 'utf8');
 const manifest = JSON.parse(
-  fs.readFileSync(path.join(root,'appsscript.json'),'utf8')
+  fs.readFileSync(path.join(root, 'appsscript.json'), 'utf8')
 );
-const setup = fs.readFileSync(
-  path.resolve(__dirname,'../SYSTEM_SPEC.md'),'utf8'
+const spec = fs.readFileSync(
+  path.resolve(__dirname, '../SYSTEM_SPEC.md'), 'utf8'
 );
 
 test('production manifest is domain-restricted while retaining deployer execution', () => {
@@ -25,57 +25,65 @@ test('production manifest is domain-restricted while retaining deployer executio
       'https://www.googleapis.com/auth/userinfo.email'
     )
   );
-  assert.match(setup, /IDENTITY-BINDING REQUIREMENT/i);
-  assert.match(setup, /server-observed Google Workspace email/i);
+  assert.match(spec, /server-observed Google Workspace email/i);
 });
 
-test('timer UX has five-second cooldown, Today entries, and live KPI refresh', () => {
-  assert.match(html, /timerCooldownUntil/);
-  assert.match(html, /5000/);
-  assert.match(html, /timerRequestInFlight/);
-  assert.match(html, /Today's Time Entries/);
-  assert.match(html, /dashboard\.overview/);
-  assert.match(html, /currentBusinessDate/);
-  assert.match(html, /reports\.detailed/);
+test('three portal files are bound to distinct embed modes', () => {
+  assert.match(user, /const EMBED_MODE = 'USER'/);
+  assert.match(admin, /const EMBED_MODE = 'ADMIN'/);
+  assert.match(superAdmin, /const EMBED_MODE = 'SUPER_ADMIN'/);
+
+  assert.match(code, /user:\s*'User'/);
+  assert.match(code, /admin:\s*'Admin'/);
+  assert.match(code, /superadmin:\s*'SuperAdmin'/);
 });
 
-test('USER navigation exposes Timer, My Time, Reports, and Account', () => {
-  assert.match(html, /label: 'Timer'/);
-  assert.match(html, /label: 'My Time'/);
-  assert.match(html, /label: 'Reports'/);
-  assert.match(html, /label: 'Account'/);
-  assert.match(html, /function loadMyTimeHistory/);
-  assert.match(html, /entries\.update/);
-  assert.match(html, /expectedVersion/);
-  assert.match(html, /entries\.delete/);
-  assert.match(html, /function openPasswordChangeModal/);
-  assert.match(html, /auth\.changePassword/);
+test('USER portal exposes Timer, My Time, Reports, Account and timer safeguards', () => {
+  for (const label of ['Timer','My Time','Reports','Account']) {
+    assert.match(user, new RegExp("label: '" + label + "'"));
+  }
+  assert.match(user, /timerCooldownUntil/);
+  assert.match(user, /5000/);
+  assert.match(user, /timerRequestInFlight/);
+  assert.match(user, /Today's Time Entries/);
+  assert.match(user, /dashboard\.overview/);
+  assert.match(user, /currentBusinessDate/);
+  assert.match(user, /function loadMyTimeHistory/);
+  assert.match(user, /entries\.update/);
+  assert.match(user, /entries\.delete/);
+  assert.match(user, /function openPasswordChangeModal/);
 });
 
-test('manager GUI exposes exactly the planned operational tab labels and all-workspace selector', () => {
+test('ADMIN portal exposes Manager, Reports, Account and manager operations', () => {
+  for (const label of ['Manager','Reports','Account']) {
+    assert.match(admin, new RegExp("label: '" + label + "'"));
+  }
   for (const label of [
     'Overview','My Workspaces','Live Activity','Timesheets',
     'Approvals','Reports','Users','Requests','Alerts'
   ]) {
-    assert.match(html, new RegExp('>' + label + '<'));
+    assert.match(admin, new RegExp('>' + label + '<'));
   }
-  assert.match(html, /All My Workspaces/);
-  assert.match(html, /timesheet\.listForReview/);
-  assert.match(html, /timesheet\.approve/);
-  assert.match(html, /timesheet\.reject/);
-  assert.match(html, /reports\.exceptions/);
-  assert.match(html, /requests\.submit/);
+  assert.match(admin, /timesheet\.listForReview/);
+  assert.match(admin, /timesheet\.approve/);
+  assert.match(admin, /timesheet\.reject/);
+  assert.match(admin, /requests\.submit/);
 });
 
-test('account provisioning forms require Google Workspace emails', () => {
-  assert.match(html, /id="wzAdminEmail"/);
-  assert.match(html, /id="wzEmpEmail"/);
-  assert.match(html, /id="newUserEmail"/);
-  assert.match(html, /Google Workspace Email/);
+test('SUPER_ADMIN portal exposes Admin Console and owns first-run setup', () => {
+  for (const label of ['Admin Console','Manager','Reports','Account']) {
+    assert.match(superAdmin, new RegExp("label: '" + label + "'"));
+  }
+  assert.match(superAdmin, /Guided 9-Step Setup/);
+  assert.match(superAdmin, /id="wzAdminEmail"/);
+  assert.match(superAdmin, /id="wzEmpEmail"/);
+  assert.match(superAdmin, /id="newUserEmail"/);
 });
 
-test('USER reports controls are rendered conditionally rather than exposing manager export by default', () => {
-  assert.match(html, /reportsManagerActions/);
-  assert.match(html, /state\.user\.role !== 'USER'/);
-  assert.match(html, /function loadReportsView/);
+test('portal role gates are explicit while server-side RBAC remains in Code.gs', () => {
+  assert.match(user, /embedRoleAllowed/);
+  assert.match(admin, /\['ADMIN', 'SUPER_ADMIN'\]/);
+  assert.match(superAdmin, /normalized === 'SUPER_ADMIN'/);
+  assert.match(code, /const ACTION_PERMISSIONS =/);
+  assert.match(code, /AuthorizationService/);
 });

@@ -4,7 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');
 
-const servicePath = path.resolve(__dirname, '../apps-script/Security.gs');
+const servicePath = path.resolve(__dirname, '../apps-script/Code.gs');
 
 class AppError extends Error {
   constructor(code, message, statusCode = 400) {
