@@ -115,6 +115,7 @@
 
       case 'auth.logout':
         state.loggedOut = true;
+        localStorage.setItem('flink_mock_server_logout', '1');
         return { ok: true };
 
       case 'workspaces.list':
