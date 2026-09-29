@@ -440,6 +440,9 @@
     <div class="logo-badge">
       <span>FLINK</span> TIME
       <span class="tag-workspace" id="currentWorkspaceBadge">Primary Workspace</span>
+      <select id="userWorkspaceSelect" class="tag-workspace hidden"
+        onchange="changeUserWorkspace(this.value)"
+        aria-label="Active workspace"></select>
     </div>
     <nav class="nav-links" id="navLinks"></nav>
     <div class="user-pill">
@@ -452,6 +455,9 @@
 
   <!-- MAIN APP CONTAINER -->
   <main>
+    <div id="appNotice" class="hidden" role="alert"
+      style="margin-bottom:1rem; padding:0.85rem 1rem; border-radius:6px;
+      background:rgba(239,68,68,0.16); color:#FCA5A5; border:1px solid rgba(239,68,68,0.35);"></div>
     <!-- 1. FIRST-RUN SETUP WIZARD & DEPLOYMENT ASSISTANT -->
     <div id="setupWizardContainer" class="hidden">
       <!-- Welcome Hero -->
@@ -1074,13 +1080,34 @@
       try {
         state.workspaces = await apiCall('workspaces.list');
         if (state.workspaces.length > 0) {
-          const preferredWorkspaceId = state.user.primaryWorkspaceId || '';
-          const preferredExists = state.workspaces.some(w => w.WorkspaceID === preferredWorkspaceId);
-          state.currentWorkspace = preferredExists ? preferredWorkspaceId : state.workspaces[0].WorkspaceID;
-          const currentWs = state.workspaces.find(w => w.WorkspaceID === state.currentWorkspace);
-          document.getElementById('currentWorkspaceBadge').innerText = currentWs ? currentWs.WorkspaceName : state.currentWorkspace;
+          let preferredWorkspaceId = state.user.primaryWorkspaceId || '';
+          let preferredExists = state.workspaces.some(w => w.WorkspaceID === preferredWorkspaceId);
+          if (!preferredExists) preferredWorkspaceId = state.workspaces[0].WorkspaceID;
+
+          // If this user already has a timer running in another assigned
+          // workspace, restore focus there so the browser never "loses" it.
+          try {
+            const radar = await apiCall('dashboard.radar', {}, '');
+            const ownActive = Array.isArray(radar.workers)
+              ? radar.workers.find(worker => worker.userId === state.user.userId)
+              : null;
+            if (
+              ownActive &&
+              state.workspaces.some(w => w.WorkspaceID === ownActive.workspaceId)
+            ) {
+              preferredWorkspaceId = ownActive.workspaceId;
+            }
+          } catch (radarError) {}
+
+          state.currentWorkspace = preferredWorkspaceId;
+          updateWorkspaceDisplay();
+          renderUserWorkspaceControl();
+        } else {
+          showAppNotice('No active workspace is assigned to your account. Contact your Admin.');
         }
-      } catch (e) {}
+      } catch (e) {
+        showAppNotice('Could not load your workspaces. ' + (e.message || 'Please retry.'));
+      }
 
       buildNavigation();
       navigate(embedDefaultView());
@@ -1128,6 +1155,7 @@
       if (!embedAllowedViews().has(viewId)) {
         viewId = embedDefaultView();
       }
+      clearAppNotice();
       document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
       const activeBtn = document.getElementById('navBtn_' + viewId);
       if (activeBtn) activeBtn.classList.add('active');
@@ -1160,6 +1188,89 @@
       }
     }
 
+    function showAppNotice(message) {
+      const notice = document.getElementById('appNotice');
+      if (!notice) return;
+      notice.textContent = String(message || 'Something went wrong.');
+      notice.classList.remove('hidden');
+    }
+
+    function clearAppNotice() {
+      const notice = document.getElementById('appNotice');
+      if (!notice) return;
+      notice.textContent = '';
+      notice.classList.add('hidden');
+    }
+
+    function updateWorkspaceDisplay() {
+      const currentWs = (state.workspaces || []).find(
+        w => w.WorkspaceID === state.currentWorkspace
+      );
+      const label = currentWs
+        ? String(currentWs.WorkspaceName || currentWs.WorkspaceID)
+        : String(state.currentWorkspace || '-');
+      const badge = document.getElementById('currentWorkspaceBadge');
+      const timerLabel = document.getElementById('userActiveWsName');
+      if (badge) badge.textContent = label;
+      if (timerLabel) timerLabel.textContent = label;
+    }
+
+    function renderUserWorkspaceControl() {
+      const select = document.getElementById('userWorkspaceSelect');
+      const badge = document.getElementById('currentWorkspaceBadge');
+      if (!select || !badge) return;
+
+      select.replaceChildren();
+      (state.workspaces || []).forEach(ws => {
+        select.add(new Option(
+          String(ws.WorkspaceName || ws.WorkspaceID),
+          String(ws.WorkspaceID)
+        ));
+      });
+      select.value = state.currentWorkspace || '';
+
+      if ((state.workspaces || []).length > 1) {
+        select.classList.remove('hidden');
+        badge.classList.add('hidden');
+      } else {
+        select.classList.add('hidden');
+        badge.classList.remove('hidden');
+      }
+    }
+
+    async function changeUserWorkspace(workspaceId) {
+      const select = document.getElementById('userWorkspaceSelect');
+      if (!workspaceId || workspaceId === state.currentWorkspace) return;
+
+      if (state.activeTimer) {
+        if (select) select.value = state.currentWorkspace;
+        alert('Stop your active timer before switching workspaces.');
+        return;
+      }
+
+      if (!(state.workspaces || []).some(ws => ws.WorkspaceID === workspaceId)) {
+        if (select) select.value = state.currentWorkspace;
+        showAppNotice('That workspace is not assigned to your account.');
+        return;
+      }
+
+      state.currentWorkspace = workspaceId;
+      updateWorkspaceDisplay();
+      clearAppNotice();
+
+      await loadWorkspaceData();
+      await recoverActiveTimer();
+      await loadRecentEntries();
+
+      if (!document.getElementById('timesheetView').classList.contains('hidden')) {
+        await loadTimesheet();
+        await loadMyTimeHistory();
+      }
+      if (!document.getElementById('reportsView').classList.contains('hidden')) {
+        await loadReportsView();
+      }
+    }
+
     function logout() {
       apiCall('auth.logout').catch(() => {});
       sessionStorage.removeItem('flink_session_token');
@@ -1188,7 +1299,9 @@
         state.tags.forEach(tag => {
           tagSelect.add(new Option(String(tag.TagName || ''), String(tag.TagID || '')));
         });
-      } catch (e) {}
+      } catch (e) {
+        showAppNotice('Could not load projects or tags. ' + (e.message || 'Please retry.'));
+      }
     }
 
     async function onTimerProjectChange() {
@@ -1208,14 +1321,26 @@
       if (!state.currentWorkspace) return;
       try {
         const timer = await apiCall('timer.getActive');
+        const btn = document.getElementById('timerToggleBtn');
+        const clock = document.getElementById('timerClockDisplay');
+
         if (timer) {
           state.activeTimer = timer;
           startLocalClock(timer.startedAtUTC);
-          const btn = document.getElementById('timerToggleBtn');
           btn.innerText = 'STOP';
           btn.className = 'btn btn-danger';
+        } else {
+          state.activeTimer = null;
+          if (state.timerInterval) clearInterval(state.timerInterval);
+          state.timerInterval = null;
+          clock.classList.remove('running');
+          clock.innerText = '00:00:00';
+          btn.innerText = 'START';
+          btn.className = 'btn btn-success';
         }
-      } catch (e) {}
+      } catch (e) {
+        showAppNotice('Could not restore your active timer. ' + (e.message || 'Please retry.'));
+      }
     }
 
     function startLocalClock(startedAtUtcStr) {
@@ -1392,7 +1517,7 @@
           tbody.appendChild(tr);
         });
       } catch (e) {
-        console.error('Failed to load today entries', e);
+        showAppNotice('Could not load today\'s entries. ' + (e.message || 'Please retry.'));
       }
     }
 
@@ -1556,7 +1681,7 @@
           tbody.appendChild(tr);
         });
       } catch (e) {
-        console.error('Failed to load timesheet', e);
+        showAppNotice('Could not load your timesheet. ' + (e.message || 'Please retry.'));
       }
     }
 
@@ -1638,7 +1763,7 @@
             tbody.appendChild(tr);
           });
       } catch (e) {
-        console.error('Failed to load My Time history', e);
+        showAppNotice('Could not load My Time history. ' + (e.message || 'Please retry.'));
       }
     }
 
@@ -2890,6 +3015,7 @@
         ));
       } catch (e) {
         renderError(content, 'Failed to load reports: ', e);
+        showAppNotice('Could not load reports. ' + (e.message || 'Please retry.'));
       }
     }
 
