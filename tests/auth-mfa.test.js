@@ -136,6 +136,26 @@ test('correct password does not record completed login before MFA succeeds', () 
   );
 });
 
+test('bad MFA failures are not cleared by restarting the password stage', () => {
+  const fx = loadFixture();
+  global.SecurityService.verifyTotpWithStep = () => ({ valid: false, timeStep: 123456 });
+
+  const first = fx.AuthService.login('worker', 'Password123!', 'WEB');
+  assert.throws(
+    () => fx.AuthService.verifyMfa(first.mfaChallengeToken, '000000', 'WEB'),
+    err => err instanceof AppError && err.code === 'AUTH_REQUIRED'
+  );
+  assert.equal(fx.cred.FailedLoginCount, 1);
+
+  const second = fx.AuthService.login('worker', 'Password123!', 'WEB');
+  assert.equal(second.mfaRequired, true);
+  assert.equal(
+    fx.cred.FailedLoginCount,
+    1,
+    'correct password must not erase prior MFA failures before MFA succeeds'
+  );
+});
+
 test('successful MFA consumes challenge, records login success, and rejects challenge reuse', () => {
   const fx = loadFixture();
   const first = fx.AuthService.login('worker', 'Password123!', 'WEB');
