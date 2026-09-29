@@ -26,6 +26,7 @@ function loadFixture() {
     Role: 'USER',
     Status: 'ACTIVE',
     PrimaryWorkspaceID: 'W1',
+    Email: 'worker@example.com',
     MustChangePassword: false
   };
   const cred = {
@@ -50,13 +51,24 @@ function loadFixture() {
   global.CONSTANTS = {
     ROLES: { SUPER_ADMIN: 'SUPER_ADMIN', ADMIN: 'ADMIN', USER: 'USER' },
     ACCOUNT_STATUS: { ACTIVE: 'ACTIVE', LOCKED: 'LOCKED', PASSIVE: 'PASSIVE' },
-    LIMITS: { MAX_FAILED_LOGIN_ATTEMPTS: 5, LOCKOUT_DURATION_MINUTES: 15 },
+    LIMITS: {
+      MAX_FAILED_LOGIN_ATTEMPTS: 5,
+      LOCKOUT_DURATION_MINUTES: 15,
+      LOGIN_RETRY_DELAYS_SECONDS: [0, 0, 0, 0, 0]
+    },
     AUDIT_EVENTS: {
       LOGIN_FAIL: 'LOGIN_FAIL',
       LOGIN_SUCCESS: 'LOGIN_SUCCESS',
       ACCOUNT_LOCK: 'ACCOUNT_LOCK',
+      LOGIN_THROTTLED: 'LOGIN_THROTTLED',
+      IDENTITY_MISMATCH: 'IDENTITY_MISMATCH',
       MFA_VERIFIED: 'MFA_VERIFIED'
     }
+  };
+  global.IdentityService = {
+    normalizeEmail(v) { return String(v || '').trim().toLowerCase(); },
+    getCurrentGoogleEmail() { return 'worker@example.com'; },
+    assertAccountIdentity() { return 'worker@example.com'; }
   };
   global.SecurityService = {
     verifyPassword() { return true; },
