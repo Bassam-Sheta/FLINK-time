@@ -164,6 +164,7 @@ const SetupService = {
     }
 
     const cleanUsername = String(payload.username).trim().toLowerCase();
+    const googleEmail = IdentityService.getCurrentGoogleEmail(true);
     const adminUserId = Validation.generateId('USR');
     const hash = SecurityService.hashPassword(payload.password);
     const now = new Date().toISOString();
@@ -175,7 +176,7 @@ const SetupService = {
       Role: CONSTANTS.ROLES.SUPER_ADMIN,
       Status: CONSTANTS.ACCOUNT_STATUS.ACTIVE,
       PrimaryWorkspaceID: '',
-      Email: payload.email || `${cleanUsername}@flink.local`,
+      Email: googleEmail,
       CreatedAt: now,
       CreatedBy: 'SETUP_WIZARD',
       UpdatedAt: now,
@@ -190,6 +191,7 @@ const SetupService = {
       PasswordVersion: 1,
       PasswordChangedAt: now,
       FailedLoginCount: 0,
+      LastFailedAt: '',
       LockUntil: ''
     });
 
@@ -209,7 +211,11 @@ const SetupService = {
     props.deleteProperty('FLINK_SETUP_KEY_CREATED_AT');
 
     // Automatically issue session for immediate progression
-    const session = SessionService.createSession(adminUserId, 'SETUP_WIZARD');
+    const session = SessionService.createSession(
+      adminUserId,
+      'SETUP_WIZARD',
+      googleEmail
+    );
 
     return {
       ok: true,
@@ -268,7 +274,10 @@ const SetupService = {
       return { ok: true, message: 'Admin creation skipped.' };
     }
 
-    Validation.assertRequired(payload, ['fullName', 'username', 'temporaryPassword', 'workspaceIds']);
+    Validation.assertRequired(
+      payload,
+      ['fullName', 'username', 'email', 'temporaryPassword', 'workspaceIds']
+    );
 
     const workspaceIds = Array.isArray(payload.workspaceIds) ? payload.workspaceIds : [payload.workspaceIds];
     if (workspaceIds.length > CONSTANTS.LIMITS.ADMIN_MAX_ACTIVE_WORKSPACES) {
@@ -282,6 +291,7 @@ const SetupService = {
     const adminUser = UserService.createUser(authContext, {
       username: payload.username,
       displayName: payload.fullName,
+      email: Validation.validateEmail(payload.email),
       role: CONSTANTS.ROLES.ADMIN,
       primaryWorkspaceId: workspaceIds[0] || '',
       temporaryPassword: payload.temporaryPassword,
@@ -309,9 +319,17 @@ const SetupService = {
 
     for (const u of usersToCreate) {
       if (!u.username || !u.fullName) continue;
+      if (!u.email) {
+        throw new AppError(
+          ERROR_CODES.VALIDATION_ERROR,
+          `email is required for user ${u.username}.`,
+          400
+        );
+      }
       const created = UserService.createUser(authContext, {
         username: u.username,
         displayName: u.fullName,
+        email: Validation.validateEmail(u.email),
         role: CONSTANTS.ROLES.USER,
         primaryWorkspaceId: u.workspaceId || '',
         department: u.department || '',
