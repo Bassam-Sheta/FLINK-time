@@ -21,6 +21,8 @@ test('high-risk Super Admin actions require short-lived server-bound step-up aut
   assert.match(src, /const PRIVILEGED_STEP_UP_ACTIONS = new Set\(\[/);
   assert.match(src, /AuthService\.assertStepUp\(authContext, payload\.stepUpToken \|\| ''\)/);
   assert.match(src, /requirePrivilegedActionAudit\(authContext, action, wsId \|\| ''\)/);
+  assert.match(src, /'users\.assignWorkspace'/);
+  assert.match(src, /_deleteStepUp\(authContext\.session\.SessionID\)/);
   assert.match(src, /SessionService\.revokeSession\(rawSessionToken\)/);
   assert.match(src, /Super Admin MFA must be enabled before high-risk administrative actions/);
 });
@@ -73,6 +75,16 @@ test('setup configuration writers close after installation', () => {
   assert.match(block, /step >= 2 && step <= 8/);
   assert.match(block, /SETUP_COMPLETE/);
   assert.match(block, /Setup wizard configuration steps are closed after installation/);
+});
+
+test('existing installations reconcile new security triggers through system repair', () => {
+  const src = source();
+  const repairStart = src.indexOf('repairSystem(authContext)');
+  const diagnosticsStart = src.indexOf('getAdvancedDiagnostics(authContext)', repairStart);
+  const repair = src.slice(repairStart, diagnosticsStart);
+  assert.match(repair, /JobService\.ensureScheduledTriggers\(\)/);
+  assert.match(src, /legacyHandlers = new Set\(\['scheduledHousekeeping', 'scheduledRollups'\]\)/);
+  assert.match(src, /removedLegacy/);
 });
 
 test('audit records are canonicalized before hashing and checkpoints are scheduled', () => {
