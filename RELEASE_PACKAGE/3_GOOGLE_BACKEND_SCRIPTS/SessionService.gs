@@ -8,7 +8,39 @@ const SessionService = {
   /**
    * Creates and registers a new authenticated session
    */
-  createSession(userId, clientType = 'WEB') {
+  createSession(userId, clientType = 'WEB', clientLabel = '') {
+    const normalizedClientType = String(clientType || 'WEB').toUpperCase();
+    let verifiedClientLabel = String(clientLabel || '').trim();
+
+    if (
+      normalizedClientType === 'WEB' ||
+      normalizedClientType === 'SETUP_WIZARD'
+    ) {
+      const account = MasterRepository.findAccountById(userId);
+      if (!account) {
+        throw new AppError(
+          ERROR_CODES.AUTH_REQUIRED,
+          'User account could not be resolved for session creation.',
+          401
+        );
+      }
+      const verifiedEmail = IdentityService.assertAccountIdentity(
+        account,
+        normalizedClientType
+      );
+      if (
+        verifiedClientLabel &&
+        IdentityService.normalizeEmail(verifiedClientLabel) !== verifiedEmail
+      ) {
+        throw new AppError(
+          ERROR_CODES.AUTH_REQUIRED,
+          'Verified Google Workspace identity changed before session creation.',
+          401
+        );
+      }
+      verifiedClientLabel = verifiedEmail;
+    }
+
     const rawToken = SecurityService.generateSessionToken();
     const tokenHash = SecurityService.hashToken(rawToken);
     const now = new Date();
@@ -23,7 +55,8 @@ const SessionService = {
       SessionID: sessionId,
       UserID: userId,
       TokenHash: tokenHash,
-      ClientType: clientType,
+      ClientType: normalizedClientType,
+      ClientLabel: verifiedClientLabel,
       CreatedAt: now.toISOString(),
       LastSeenAt: now.toISOString(),
       ExpiresAt: expiresAt.toISOString(),
@@ -112,6 +145,40 @@ const SessionService = {
         RevokedAt: new Date().toISOString()
       });
       throw new AppError(ERROR_CODES.ACCOUNT_PASSIVE, 'Account is inactive or suspended.', 403);
+    }
+
+    const normalizedClientType = String(session.ClientType || '').toUpperCase();
+    if (
+      normalizedClientType === 'WEB' ||
+      normalizedClientType === 'SETUP_WIZARD'
+    ) {
+      try {
+        const currentGoogleEmail = IdentityService.assertAccountIdentity(
+          user,
+          normalizedClientType
+        );
+        const boundGoogleEmail = IdentityService.normalizeEmail(
+          session.ClientLabel || ''
+        );
+        if (!boundGoogleEmail || boundGoogleEmail !== currentGoogleEmail) {
+          throw new AppError(
+            ERROR_CODES.AUTH_REQUIRED,
+            'Session identity binding does not match the active Google account.',
+            401
+          );
+        }
+      } catch (identityErr) {
+        MasterRepository.updateSession(session.SessionID, {
+          Revoked: true,
+          RevokedAt: new Date().toISOString(),
+          RevokeReason: 'GOOGLE_IDENTITY_MISMATCH'
+        });
+        throw new AppError(
+          ERROR_CODES.AUTH_REQUIRED,
+          'Google Workspace identity changed. Please sign in again.',
+          401
+        );
+      }
     }
 
     // Persist activity at a coarse interval instead of writing to Sheets on
