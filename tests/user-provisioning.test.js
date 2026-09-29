@@ -128,6 +128,10 @@ test('account row is rolled back when credential creation fails', () => {
   global.WORKSPACE_SCHEMA = {};
   global.SecurityService = {};
   global.Validation = {};
+  // Previous tests intentionally install a MasterRepository mock. This test
+  // exercises the real consolidated repository implementation, so remove the
+  // stale injected dependency before requiring Data.gs.
+  delete global.MasterRepository;
 
   delete require.cache[require.resolve(repoPath)];
   const { MasterRepository } = require(repoPath);
