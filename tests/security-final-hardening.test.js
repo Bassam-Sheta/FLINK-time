@@ -79,8 +79,8 @@ test('setup configuration writers close after installation', () => {
 
 test('existing installations reconcile new security triggers through system repair', () => {
   const src = source();
-  const repairStart = src.indexOf('repairSystem(authContext)');
-  const diagnosticsStart = src.indexOf('getAdvancedDiagnostics(authContext)', repairStart);
+  const repairStart = src.indexOf('  repairSystem(authContext) {');
+  const diagnosticsStart = src.indexOf('  getAdvancedDiagnostics(authContext) {', repairStart);
   const repair = src.slice(repairStart, diagnosticsStart);
   assert.match(repair, /JobService\.ensureScheduledTriggers\(\)/);
   assert.match(src, /legacyHandlers = new Set\(\['scheduledHousekeeping', 'scheduledRollups'\]\)/);
