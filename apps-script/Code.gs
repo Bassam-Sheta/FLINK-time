@@ -945,11 +945,16 @@ const PRIVILEGED_STEP_UP_ACTIONS = new Set([
   'users.forceLogout',
   'users.assignWorkspace',
   'requests.review',
+  'timesheet.reopen',
+  'system.health',
   'system.repair',
   'settings.save',
   'sessions.revoke',
   'backups.create',
-  'backups.restoreApply'
+  'backups.restoreApply',
+  'jobs.dispatchHousekeeping',
+  'jobs.dispatchRollups',
+  'integrity.audit'
 ]);
 
 /**
