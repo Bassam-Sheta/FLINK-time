@@ -1702,7 +1702,7 @@ var SecurityService = (typeof global !== 'undefined' && global.SecurityService) 
       if (pepper) return pepper;
       throw new AppError(
         ERROR_CODES.CRYPTO_FAILURE,
-        'Server cryptographic secret is not initialized. Run initializeInstallation_() as the deployment owner.',
+        'Server cryptographic secret is not initialized. Open the Master Sheet and choose FLINK Time → Prepare Installation.',
         500
       );
     }
