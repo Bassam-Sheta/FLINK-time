@@ -459,59 +459,70 @@
         <div style="font-size: 2.5rem; font-weight: 800; letter-spacing: -0.03em; margin-bottom: 0.5rem;">
           Welcome to <span style="background: linear-gradient(135deg, #3B82F6, #60A5FA); -webkit-background-clip: text; -webkit-text-fill-color: transparent;">FLINK Time</span>
         </div>
-        <p style="color: var(--text-secondary); font-size: 1.05rem; line-height: 1.5; margin-bottom: 2.5rem;">
-          A commercial-grade, multi-tenant workforce monitoring and time tracking platform built directly on Google Workspace. Zero servers, zero spreadsheet formula editing, pure GUI governance.
+        <p style="color: var(--text-secondary); font-size: 1.05rem; line-height: 1.5; margin-bottom: 2rem;">
+          You are at the final installation stage. No code, npm, command line, or setup key is required here.
         </p>
-        <div class="grid-2" style="margin-bottom: 2.5rem; text-align: left;">
+        <div class="grid-2" style="margin-bottom: 2rem; text-align: left;">
           <div class="card" style="margin-bottom: 0; background: var(--bg-card); padding: 1.25rem;">
-            <div style="font-weight: 700; color: #60A5FA; margin-bottom: 0.4rem;">Deployment Assistant</div>
-            <div style="font-size: 0.8rem; color: var(--text-secondary);">Step-by-step instructions to embed this Web App full-page in Google Sites.</div>
+            <div style="font-weight: 700; color: #60A5FA; margin-bottom: 0.4rem;">Before you start</div>
+            <div style="font-size: 0.8rem; color: var(--text-secondary);">Open the Master Sheet and choose <strong>FLINK Time → Prepare Installation</strong> once.</div>
           </div>
           <div class="card" style="margin-bottom: 0; background: var(--bg-card); padding: 1.25rem;">
             <div style="font-weight: 700; color: #34D399; margin-bottom: 0.4rem;">Guided 9-Step Setup</div>
-            <div style="font-size: 0.8rem; color: var(--text-secondary);">Provisions root Super Admin, multi-tab workspace database, and company rules.</div>
+            <div style="font-size: 0.8rem; color: var(--text-secondary);">Create the Super Admin, first workspace, users, projects, and company rules through the GUI.</div>
           </div>
         </div>
         <div style="display: flex; gap: 1rem; justify-content: center;">
-          <button class="btn btn-secondary" onclick="showDeploymentAssistant()">Deployment Assistant</button>
-          <button class="btn" style="padding: 0.75rem 2rem; font-size: 1rem;" onclick="startSetupWizard()">[ START SETUP ]</button>
+          <button class="btn btn-secondary" onclick="showDeploymentAssistant()">Installation Help</button>
+          <button class="btn" style="padding: 0.75rem 2rem; font-size: 1rem;" onclick="startSetupWizard()">START SETUP</button>
         </div>
       </div>
 
-      <!-- Deployment Assistant Page -->
+      <!-- Installation Help Page -->
       <div id="deploymentAssistantView" class="card hidden" style="max-width: 760px; margin: 2rem auto;">
         <div class="card-header">
           <div>
-            <div class="card-title">FLINK Time Deployment Assistant</div>
-            <div class="card-subtitle">Google Sites Full-Page Embedding Guide</div>
+            <div class="card-title">FLINK Time Installation Help</div>
+            <div class="card-subtitle">Simple first-run checklist</div>
           </div>
-          <button class="btn btn-secondary btn-sm" onclick="hideDeploymentAssistant()">Back to Setup</button>
+          <button class="btn btn-secondary btn-sm" onclick="hideDeploymentAssistant()">Back</button>
         </div>
+
         <div class="card" style="background: var(--bg-card); margin-bottom: 1.5rem;">
-          <div style="font-weight: 700; margin-bottom: 0.75rem;">System Environment Checks</div>
-          <div style="font-size: 0.85rem; line-height: 1.8;">
-            <div><span style="color: #34D399;">✓</span> Google Apps Script Runtime: Authorized V8 Engine</div>
-            <div><span style="color: #34D399;">✓</span> Master Sheet Repository: Connected & Bootstrapped</div>
-            <div><span style="color: #34D399;">✓</span> Google Drive Storage: Ready for Automated Backups</div>
-            <div><span style="color: #34D399;">✓</span> Frame Embedding Mode: ALLOWALL Enabled</div>
+          <div style="font-weight: 700; margin-bottom: 0.75rem;">If you can see this page, the Web App is already deployed.</div>
+          <div style="font-size: 0.85rem; line-height: 1.8; color: var(--text-secondary);">
+            <div><span style="color: #34D399;">✓</span> No setup key is required.</div>
+            <div><span style="color: #34D399;">✓</span> No command line or npm is required.</div>
+            <div><span style="color: #34D399;">✓</span> Step 1 automatically verifies the Google account that prepared and deployed this installation.</div>
           </div>
         </div>
+
         <div style="margin-bottom: 1.5rem;">
-          <div style="font-weight: 700; margin-bottom: 0.5rem;">Web App URL</div>
+          <div style="font-weight: 700; margin-bottom: 0.5rem;">Current Web App</div>
           <div style="display: flex; gap: 0.5rem;">
-            <input type="text" id="deployWebAppUrl" value="https://script.google.com/macros/s/CURRENT/exec" readonly>
-            <button class="btn btn-secondary" onclick="copyDeployUrl()">COPY URL</button>
+            <input type="text" id="deployWebAppUrl" readonly>
+            <button class="btn btn-secondary" onclick="copyDeployUrl()">COPY</button>
           </div>
         </div>
-        <ol style="padding-left: 1.25rem; font-size: 0.875rem; color: var(--text-secondary); line-height: 1.8; margin-bottom: 2rem;">
-          <li>Open your company's <strong>Google Sites</strong> portal.</li>
-          <li>Click the <strong>Insert</strong> tab on the right sidebar and select <strong>Embed</strong>.</li>
-          <li>Select <strong>By URL</strong> and paste the copied Apps Script Web App URL.</li>
-          <li>Choose <strong>Full Page Embed</strong> so FLINK fills the entire window seamlessly.</li>
-          <li>Click <strong>Publish</strong> on Google Sites.</li>
-          <li>Return here and click <strong>[ I HAVE DONE THIS ]</strong> to continue software setup.</li>
-        </ol>
-        <button class="btn btn-success" style="width: 100%;" onclick="startSetupWizard()">I HAVE DONE THIS — PROCEED TO SETUP</button>
+
+        <div class="card" style="background: var(--bg-card); margin-bottom: 1.5rem;">
+          <div style="font-weight: 700; margin-bottom: 0.75rem;">What to do</div>
+          <ol style="padding-left: 1.25rem; font-size: 0.875rem; color: var(--text-secondary); line-height: 1.9; margin: 0;">
+            <li>Open the FLINK Time Master Sheet.</li>
+            <li>Choose <strong>FLINK Time → Prepare Installation</strong>.</li>
+            <li>Return here while signed in with the same Google Workspace account.</li>
+            <li>Click <strong>Start Setup</strong> and complete the guided steps.</li>
+          </ol>
+        </div>
+
+        <div class="card" style="background: var(--bg-card); margin-bottom: 1.5rem;">
+          <div style="font-weight: 700; margin-bottom: 0.75rem;">Portal rule</div>
+          <div style="font-size: 0.85rem; color: var(--text-secondary); line-height: 1.7;">
+            The Employee portal may be embedded in Google Sites. Admin and Super Admin must be opened directly from their Web App links.
+          </div>
+        </div>
+
+        <button class="btn btn-success" style="width: 100%;" onclick="startSetupWizard()">START SETUP</button>
       </div>
 
       <!-- 9-Step Setup Wizard Card -->
@@ -1035,7 +1046,7 @@
           } else {
             showLogin();
             const alertBox = document.getElementById('loginAlert');
-            alertBox.textContent = 'FLINK Time setup is not complete. Open the Super Admin Google Sites page first.';
+            alertBox.textContent = 'FLINK Time setup is not complete. Open the direct Super Admin Web App link first.';
             alertBox.classList.remove('hidden');
           }
           return;
@@ -2420,9 +2431,15 @@
       renderWizardStep(1);
     }
 
+    function currentWebAppBaseUrl() {
+      return String(window.location.href || '').split('#')[0].split('?')[0];
+    }
+
     function showDeploymentAssistant() {
       document.getElementById('setupWelcomeScreen').classList.add('hidden');
       document.getElementById('deploymentAssistantView').classList.remove('hidden');
+      const url = document.getElementById('deployWebAppUrl');
+      if (url) url.value = currentWebAppBaseUrl();
     }
 
     function hideDeploymentAssistant() {
@@ -2454,11 +2471,11 @@
       const content = document.getElementById('wizardStepContent');
       if (step === 1) {
         content.innerHTML = `
-          <h2 style="margin-bottom: 0.5rem;">Step 1 — System Owner Registration</h2>
-          <p style="color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 1.5rem;">Create the root Super Admin account. First run requires the one-time installation key generated by the private server function initializeInstallation_().</p>
-          <div style="margin-bottom: 1rem;">
-            <label>One-Time Installation Key</label>
-            <input type="password" id="wzSetupKey" autocomplete="off" required>
+          <h2 style="margin-bottom: 0.5rem;">Step 1 — Create the System Owner</h2>
+          <p style="color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 1rem;">Create the root Super Admin account. FLINK Time will verify your signed-in Google Workspace identity automatically.</p>
+          <div class="card" style="background: var(--bg-card); padding: 1rem; margin-bottom: 1rem; font-size: 0.82rem; color: var(--text-secondary);">
+            <strong style="color: var(--text-primary);">Security check:</strong>
+            You must be signed in with the same Google account that owns the Master Sheet and deployed this Web App. No setup key is needed.
           </div>
           <div style="margin-bottom: 1rem;">
             <label>Full Name</label>
@@ -2711,14 +2728,13 @@
     }
 
     async function submitWizardStep1() {
-      const setupKey = document.getElementById('wzSetupKey').value;
       const fullName = document.getElementById('wzOwnerName').value;
       const username = document.getElementById('wzOwnerUser').value;
       const password = document.getElementById('wzOwnerPass').value;
       const confirmPassword = document.getElementById('wzOwnerPassConfirm').value;
 
       try {
-        const res = await apiCall('setup.completeStep', { step: 1, setupKey, fullName, username, password, confirmPassword });
+        const res = await apiCall('setup.completeStep', { step: 1, fullName, username, password, confirmPassword });
         state.token = res.sessionToken;
         state.user = res.user;
         sessionStorage.setItem('flink_session_token', res.sessionToken);
