@@ -2318,6 +2318,7 @@ var SessionService = (typeof global !== 'undefined' && global.SessionService) ||
   createSession(userId, clientType = 'WEB', clientLabel = '') {
     const normalizedClientType = String(clientType || 'WEB').toUpperCase();
     let verifiedClientLabel = String(clientLabel || '').trim();
+    let sessionAccount = null;
 
     if (
       normalizedClientType !== 'WEB' &&
@@ -2338,6 +2339,7 @@ var SessionService = (typeof global !== 'undefined' && global.SessionService) ||
         ? MasterRepository.getUserAuthBundle(userId)
         : { account: MasterRepository.findAccountById(userId), accesses: [] };
       const account = accountBundle.account;
+      sessionAccount = account;
       if (!account) {
         throw new AppError(
           ERROR_CODES.AUTH_REQUIRED,
@@ -2384,7 +2386,10 @@ var SessionService = (typeof global !== 'undefined' && global.SessionService) ||
       AbsoluteExpiresAt: absoluteExpiresAt.toISOString(),
       Revoked: false,
       RevokedAt: '',
-      AccountEpoch: Number(account.SessionEpoch) > 0 ? Number(account.SessionEpoch) : 1
+      AccountEpoch:
+        sessionAccount && Number(sessionAccount.SessionEpoch) > 0
+          ? Number(sessionAccount.SessionEpoch)
+          : 1
     };
 
     MasterRepository.createSession(sessionRecord);
