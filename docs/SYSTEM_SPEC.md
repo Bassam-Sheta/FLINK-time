@@ -20,13 +20,13 @@ Google Sites / Direct Web App Access
 ## Deployable source contract
 
 The production application intentionally has only:
-1. `Code.gs` — all backend/API/security/data/business/admin logic.
-2. `User.html` — employee Google Sites embed.
-3. `Admin.html` — Admin/Manager Google Sites embed.
-4. `SuperAdmin.html` — Super Admin Google Sites embed.
+1. `Code.gs` — backend/API/security/data/business/admin logic plus the bound-Sheet installer menu.
+2. `User.html` — employee portal; Google Sites embedding is allowed.
+3. `Admin.html` — Admin/Manager portal; direct Web App access only.
+4. `SuperAdmin.html` — Super Admin portal and first-run wizard; direct Web App access only.
 5. `appsscript.json` — Apps Script manifest.
 
-No other `.gs` file is required for deployment.
+No other `.gs` file is required for deployment. npm, Node.js, Playwright, GitHub Actions, and repository tests are development-only.
 
 ## Role surfaces
 
@@ -42,9 +42,11 @@ Super Admin control center, Manager workspace, Reports, Account, first-run setup
 Client-side portal separation is a usability layer only. Server-side `ACTION_PERMISSIONS`, session validation, workspace ACLs, and role checks remain the security authority.
 
 ## Authentication
-- Browser RPC allowlist: only `handleClientRequest` is the application RPC bridge; internal routing/dispatcher/setup/trigger functions end in `_` and are not callable through `google.script.run`.
+- `handleClientRequest` is the application RPC bridge. `onOpen` is the only additional public simple-trigger function and only adds the harmless FLINK Time menu to the bound Sheet; every installer menu handler ends in `_` and is unavailable through `google.script.run`.
 - Google Workspace domain-restricted web app.
 - Server-observed Google Workspace email must match the FLINK account email.
+- First-run root creation is owner-bound: **FLINK Time → Prepare Installation** records the Master Sheet owner, then Setup Step 1 requires both the active Google identity and the execute-as-deployer identity to match that prepared owner.
+- Normal installation does not use or expose a one-time setup key. Legacy setup-key properties are deleted after successful root creation if they exist.
 - Password hashing, failed-login throttling/lockout, session idle/absolute expiry, password-version invalidation, forced password change, and MFA rules remain in `Code.gs`.
 - High-risk Super Admin mutations require a short-lived step-up grant created only after fresh password + TOTP verification. Step-up rotates the authenticated session and is bound to the replacement SessionID.
 - The sole root SUPER_ADMIN is a protected trust anchor: generic CRUD cannot demote it, deactivate it, re-bind its Google Workspace identity, or disable its MFA.
@@ -69,7 +71,16 @@ Client-side portal separation is a usability layer only. Server-side `ACTION_PER
 - Checkpoints include a full-prefix snapshot HMAC so legacy audit fields become sealed against later mutation.
 - Privileged mutations require a successful pre-action audit write; if the security audit trail is unavailable, the mutation is blocked.
 
-## Repository policy
+## Installation and repository policy
+
+The customer-facing installation path is:
+
+1. copy the Master Sheet in My Drive;
+2. choose **FLINK Time → Prepare Installation**;
+3. deploy the Web App as **Me** to the Google Workspace domain;
+4. choose **FLINK Time → Open FLINK Time**;
+5. open Super Admin and complete the GUI wizard.
+
 The active source is source-first. Compiled executables, temporary packaging output, legacy desktop clients, and duplicate Apps Script modules are not committed.
 
 
