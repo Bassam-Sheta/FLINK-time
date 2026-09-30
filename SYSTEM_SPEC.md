@@ -71,3 +71,12 @@ Client-side portal separation is a usability layer only. Server-side `ACTION_PER
 
 ## Repository policy
 The active source is source-first. Compiled executables, temporary packaging output, legacy desktop clients, and duplicate Apps Script modules are not committed.
+
+
+## Request-cost hardening (WP1 in progress)
+
+Authenticated request paths no longer require whole-table scans for session token, account ID/username, credentials, or workspace-ID lookups. These hot-path reads use bounded TextFinder column searches followed by a single-row read.
+
+Session validation uses a 5-minute ScriptCache entry keyed by the session token hash. Cache is an accelerator only: cache misses fall back to the durable Sessions sheet. Any durable session update/revocation invalidates the cached token, and mass revocation evicts all affected cached token hashes.
+
+This is the first WP1 slice. Session/account epoch invalidation, call-budget instrumentation, row trimming/migration, and bounded workspace TimeEntries reads remain in the same work package before WP1 is considered complete.
