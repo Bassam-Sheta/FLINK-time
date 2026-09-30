@@ -28,6 +28,7 @@ function fixture(lastSeenAgeMinutes, options = {}) {
     ExpiresAt: options.expiresAt || new Date(now + 7 * 60 * 60 * 1000).toISOString(),
     AbsoluteExpiresAt: options.absoluteExpiresAt || new Date(now + 23 * 60 * 60 * 1000).toISOString(),
     Revoked: false,
+    AccountEpoch: options.sessionEpoch || 1,
     ClientType: 'WEB',
     ClientLabel: 'user@example.com'
   };
@@ -65,7 +66,8 @@ function fixture(lastSeenAgeMinutes, options = {}) {
         Username: 'user',
         Email: 'user@example.com',
         Role: 'USER',
-        Status: options.accountStatus || 'ACTIVE'
+        Status: options.accountStatus || 'ACTIVE',
+        SessionEpoch: options.accountEpoch || 1
       };
     },
     updateSession(_id, updates) { writes.push({ ...updates }); },
@@ -138,4 +140,14 @@ test('deleted/missing account revokes orphaned session', () => {
     err => err instanceof AppError && err.code === 'AUTH_REQUIRED'
   );
   assert.equal(fx.writes.at(-1).Revoked, true);
+});
+
+
+test('account epoch bump invalidates a warm legacy session immediately', () => {
+  const fx = fixture(1, { accountEpoch: 2, sessionEpoch: 1 });
+
+  assert.throws(
+    () => fx.SessionService.validateSession('TOKEN'),
+    err => err instanceof AppError && err.code === 'AUTH_REQUIRED'
+  );
 });
