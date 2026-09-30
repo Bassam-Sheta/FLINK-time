@@ -86,3 +86,13 @@ test('housekeeping retains invalid sessions for seven days then batch deletes co
   assert.doesNotMatch(block, /MasterRepository\.deleteRow\(/);
   assert.match(block, /purgeRows\[j\]\._rowIndex === low - 1/);
 });
+
+
+test('schema repair trims only unused sheet capacity and never populated extra columns', () => {
+  const src = source();
+  assert.match(src, /function trimSheetToSchema_\(sheet, columnCount, minimumRows = 1000\)/);
+  assert.match(src, /lastColumn <= columnCount/);
+  assert.match(src, /sheet\.deleteColumns\(columnCount \+ 1, columnsTrimmed\)/);
+  assert.match(src, /const targetRows = Math\.max\(Number\(minimumRows\) \|\| 1000, lastRow\)/);
+  assert.match(src, /trimSheetToSchema_\(sheet, columns\.length, 1000\)/);
+});
