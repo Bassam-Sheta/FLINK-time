@@ -14,7 +14,7 @@ const manifest = JSON.parse(
   fs.readFileSync(path.join(root, 'appsscript.json'), 'utf8')
 );
 const spec = fs.readFileSync(
-  path.resolve(__dirname, '../SYSTEM_SPEC.md'), 'utf8'
+  path.resolve(__dirname, '../docs/SYSTEM_SPEC.md'), 'utf8'
 );
 
 test('production manifest is domain-restricted while retaining deployer execution', () => {

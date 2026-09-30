@@ -13,14 +13,30 @@ apps-script/
   appsscript.json
 ```
 
-That is the complete deployable application:
+That is the **complete production application**:
 - **1 Google Apps Script backend:** `Code.gs`
 - **3 role-specific HTML portals:** `User.html`, `Admin.html`, `SuperAdmin.html`
 - **1 Apps Script manifest:** `appsscript.json`
 
+Nothing outside `apps-script/` is required in the Google Apps Script deployment.
+
 For clickjacking protection, only the Employee portal is intended to be embedded in Google Sites. Admin and Super Admin portals should be opened directly from their Apps Script Web App URLs.
 
 No Windows EXEs, packagers, launchers, standalone desktop controllers, or `RELEASE_PACKAGE/` tree are part of the supported system.
+
+## Repository layout
+
+```
+apps-script/      Production Apps Script application (5 files)
+tests/            Development-only regression/security/browser tests
+.github/workflows GitHub CI only
+docs/             Architecture and security planning documents
+package.json      Local/CI test runner metadata only
+playwright.config.js Browser-test configuration only
+README.md         This guide
+```
+
+**npm/Node.js/Playwright are development and CI tools only. They are not part of the running FLINK Time application and are never deployed to Google Apps Script.**
 
 ## Portal URLs
 
@@ -65,8 +81,14 @@ The web app executes as the deployment owner, so application RBAC assumes that n
 
 High-risk Super Admin actions require fresh password + TOTP step-up authentication and are blocked if the privileged audit trail cannot be written.
 
-## Test
+## Development tests
+
+GitHub Actions runs the regression and browser tests automatically for pull requests and changes to `main`.
+
+Local testing is optional:
 
 ```bash
 npm test
 ```
+
+The test tooling does not change the production deployment contract: production remains the five files under `apps-script/`.

@@ -1,0 +1,16 @@
+# Node / test tooling
+node_modules/
+test-results/
+playwright-report/
+blob-report/
+coverage/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
