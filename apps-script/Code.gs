@@ -7266,7 +7266,9 @@ var TimeEntryService = (typeof global !== 'undefined' && global.TimeEntryService
         EntrySource: CONSTANTS.ENTRY_SOURCE.MANUAL,
         ManualEntry: true,
         Status: 'ACTIVE',
-        ApprovalStatus: CONSTANTS.TIMESHEET_STATUS.OPEN,
+        ApprovalStatus: Flags.isOn('FEATURE_TIMESHEET_APPROVAL', workspaceId)
+          ? CONSTANTS.TIMESHEET_STATUS.OPEN
+          : 'NOT_REQUIRED',
         TimesheetID: '',
         Locked: false,
         CreatedAt: now,
@@ -7275,7 +7277,9 @@ var TimeEntryService = (typeof global !== 'undefined' && global.TimeEntryService
         UpdatedBy: authContext.userId,
         DeletedAt: '',
         DeletedBy: '',
-        Version: 1
+        Version: 1,
+        OriginalProjectID: tracking.projectId || '',
+        ProjectChangeCount: 0
       };
 
       SheetRepository.createTimeEntry(workspaceId, timeEntry);
@@ -7353,10 +7357,15 @@ var TimeEntryService = (typeof global !== 'undefined' && global.TimeEntryService
         TrackingPolicyService.assertEntryEditableByAge(workspaceId, entry);
       }
 
-      // Locking check
-      if (entry.Locked === true || entry.Locked === 'TRUE' || 
+      // Approval locking exists only when the approval feature is explicitly enabled.
+      if (
+        Flags.isOn('FEATURE_TIMESHEET_APPROVAL', workspaceId) &&
+        (
+          entry.Locked === true || entry.Locked === 'TRUE' ||
           entry.ApprovalStatus === CONSTANTS.TIMESHEET_STATUS.APPROVED ||
-          entry.ApprovalStatus === CONSTANTS.TIMESHEET_STATUS.SUBMITTED) {
+          entry.ApprovalStatus === CONSTANTS.TIMESHEET_STATUS.SUBMITTED
+        )
+      ) {
         throw new AppError(ERROR_CODES.ENTRY_LOCKED, 'This time entry is locked, pending approval, or part of an approved timesheet.', 403);
       }
 
@@ -7388,10 +7397,20 @@ var TimeEntryService = (typeof global !== 'undefined' && global.TimeEntryService
         { manual: false, enforceRequired: true }
       );
 
+      const projectChanged =
+        updates.projectId !== undefined &&
+        String(tracking.projectId || '') !== String(entry.ProjectID || '');
+      if (projectChanged && authContext.role === CONSTANTS.ROLES.USER) {
+        Flags.assertOn(
+          'ALLOW_USER_PROJECT_SWITCH',
+          workspaceId,
+          'Project switching is disabled for this workspace.'
+        );
+      }
+
       const allowed = {};
       if (updates.projectId !== undefined) {
         allowed.ProjectID = tracking.projectId;
-        const projectChanged = String(tracking.projectId || '') !== String(entry.ProjectID || '');
         if (projectChanged) {
           allowed.HourlyRateSnapshot = tracking.project
             ? (parseFloat(tracking.project.HourlyRate) || 0)
@@ -7399,6 +7418,8 @@ var TimeEntryService = (typeof global !== 'undefined' && global.TimeEntryService
           allowed.CostRateSnapshot = tracking.project
             ? (parseFloat(tracking.project.CostRate) || 0)
             : 0;
+          allowed.OriginalProjectID = entry.OriginalProjectID || entry.ProjectID || '';
+          allowed.ProjectChangeCount = (parseInt(entry.ProjectChangeCount, 10) || 0) + 1;
         }
       }
       if (updates.taskId !== undefined) allowed.TaskID = tracking.taskId;
@@ -7455,14 +7476,42 @@ var TimeEntryService = (typeof global !== 'undefined' && global.TimeEntryService
         );
       }
 
+      let whileTimerRunning = false;
+      if (projectChanged) {
+        try {
+          whileTimerRunning = !!TimerService._findActiveTimerAcrossWorkspaces(authContext);
+        } catch (err) {
+          whileTimerRunning = !!SheetRepository.getActiveTimer(workspaceId, authContext.userId);
+        }
+      }
+      const auditBefore = projectChanged
+        ? {
+            EntryID: entry.EntryID,
+            ProjectID: entry.ProjectID || '',
+            TaskID: entry.TaskID || '',
+            WhileTimerRunning: whileTimerRunning
+          }
+        : entry;
+      const auditAfter = projectChanged
+        ? {
+            EntryID: updated.EntryID,
+            ProjectID: updated.ProjectID || '',
+            TaskID: updated.TaskID || '',
+            WhileTimerRunning: whileTimerRunning,
+            ProjectChangeCount: parseInt(updated.ProjectChangeCount, 10) || 0
+          }
+        : updated;
+
       SheetRepository.logWorkspaceAudit(workspaceId, {
         ActorUserID: authContext.userId,
         ActorRole: authContext.role,
         EntityType: 'TIME_ENTRY',
         EntityID: entryId,
-        Action: CONSTANTS.AUDIT_EVENTS.ENTRY_UPDATED,
-        BeforeJSON: entry,
-        AfterJSON: updated
+        Action: projectChanged
+          ? CONSTANTS.AUDIT_EVENTS.ENTRY_PROJECT_CHANGED
+          : CONSTANTS.AUDIT_EVENTS.ENTRY_UPDATED,
+        BeforeJSON: auditBefore,
+        AfterJSON: auditAfter
       });
 
       return this.toTimeEntryDTO(
@@ -7499,6 +7548,8 @@ var TimeEntryService = (typeof global !== 'undefined' && global.TimeEntryService
       locked: entry.Locked === true || entry.Locked === 'TRUE' || entry.Locked === 1,
       timesheetId: entry.TimesheetID || '',
       version: parseInt(entry.Version, 10) || 1,
+      originalProjectId: entry.OriginalProjectID || entry.ProjectID || '',
+      projectChangeCount: parseInt(entry.ProjectChangeCount, 10) || 0,
       createdAt: entry.CreatedAt,
       updatedAt: entry.UpdatedAt,
       // Non-financial compatibility aliases.
@@ -7548,12 +7599,24 @@ var TimeEntryService = (typeof global !== 'undefined' && global.TimeEntryService
       AuthorizationService.assertRecordOwnership(authContext, entry.UserID);
       Validation.assertRecordVersion(entry, expectedVersion);
       if (authContext.role === CONSTANTS.ROLES.USER) {
+        Flags.assertOn(
+          'ALLOW_USER_DELETE_ENTRY',
+          workspaceId,
+          'Deleting time entries is disabled for this workspace.'
+        );
+      }
+      if (authContext.role === CONSTANTS.ROLES.USER) {
         TrackingPolicyService.assertEntryEditableByAge(workspaceId, entry);
       }
 
-      if (entry.Locked === true || entry.Locked === 'TRUE' || 
+      if (
+        Flags.isOn('FEATURE_TIMESHEET_APPROVAL', workspaceId) &&
+        (
+          entry.Locked === true || entry.Locked === 'TRUE' ||
           entry.ApprovalStatus === CONSTANTS.TIMESHEET_STATUS.APPROVED ||
-          entry.ApprovalStatus === CONSTANTS.TIMESHEET_STATUS.SUBMITTED) {
+          entry.ApprovalStatus === CONSTANTS.TIMESHEET_STATUS.SUBMITTED
+        )
+      ) {
         throw new AppError(ERROR_CODES.ENTRY_LOCKED, 'Cannot delete an entry that is locked, pending approval, or approved.', 403);
       }
 
@@ -7619,6 +7682,50 @@ var TimeEntryService = (typeof global !== 'undefined' && global.TimeEntryService
     const rows = SheetRepository.listTimeEntries(workspaceId, queryFilters);
     const includeFinancial = authContext.role !== CONSTANTS.ROLES.USER;
     return rows.map(entry => this.toTimeEntryDTO(entry, includeFinancial));
+  },
+
+  getEntryHistory(authContext, workspaceId, entryId) {
+    AuthorizationService.assertWorkspaceAccess(authContext, workspaceId);
+    if (!entryId) {
+      throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'entryId is required.', 400);
+    }
+    const entry = SheetRepository.getEntryAnyStatus(workspaceId, entryId);
+    if (!entry) {
+      throw new AppError(ERROR_CODES.NOT_FOUND, `Time entry ${entryId} not found.`, 404);
+    }
+    if (authContext.role === CONSTANTS.ROLES.USER) {
+      AuthorizationService.assertRecordOwnership(authContext, entry.UserID);
+    }
+
+    const safeKeys = new Set([
+      'EntryID','ProjectID','TaskID','Description','Tags','StartUTC','EndUTC',
+      'DurationSeconds','Billable','Status','ApprovalStatus','WhileTimerRunning',
+      'ProjectChangeCount','OriginalProjectID','operationId'
+    ]);
+    const sanitizeSnapshot = value => {
+      if (!value || typeof value !== 'object' || authContext.role !== CONSTANTS.ROLES.USER) return value || {};
+      const clean = {};
+      for (const [key, item] of Object.entries(value)) {
+        if (safeKeys.has(key)) clean[key] = item;
+      }
+      return clean;
+    };
+    const parseSnapshot = raw => {
+      if (!raw) return {};
+      if (typeof raw === 'object') return raw;
+      try { return JSON.parse(String(raw)); } catch (err) { return {}; }
+    };
+
+    return SheetRepository.listEntryAuditHistory(workspaceId, entryId).map(row => ({
+      auditId: row.AuditID || '',
+      timestampUTC: row.TimestampUTC || '',
+      actorUserId: row.ActorUserID || '',
+      actorRole: row.ActorRole || '',
+      action: row.Action || '',
+      before: sanitizeSnapshot(parseSnapshot(row.BeforeJSON)),
+      after: sanitizeSnapshot(parseSnapshot(row.AfterJSON)),
+      reason: row.Reason || ''
+    }));
   },
 
   /**
@@ -7701,7 +7808,11 @@ var TimeEntryService = (typeof global !== 'undefined' && global.TimeEntryService
 
         const modifiesContent =
           normalizedAction === 'DELETE' || normalizedAction === 'CHANGE_PROJECT';
-        if (modifiesContent && (isLocked || isSubmitted || isApproved)) {
+        if (
+          Flags.isOn('FEATURE_TIMESHEET_APPROVAL', workspaceId) &&
+          modifiesContent &&
+          (isLocked || isSubmitted || isApproved)
+        ) {
           throw new AppError(
             ERROR_CODES.ENTRY_LOCKED,
             `Entry ${entry.EntryID} is locked or belongs to a submitted/approved timesheet. Reopen/reject the timesheet first.`,
