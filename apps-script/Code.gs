@@ -2202,7 +2202,10 @@ var AuthorizationService = (typeof global !== 'undefined' && global.Authorizatio
 
     // Authorization is based only on active WorkspaceAccess mappings.
     // PrimaryWorkspaceID is profile/default-selection metadata, not an ACL.
-    const accesses = MasterRepository.getWorkspaceAccessForUser(authContext.userId);
+    const userBundle = MasterRepository.getUserAuthBundle
+      ? MasterRepository.getUserAuthBundle(authContext.userId)
+      : { account: authContext.user, accesses: MasterRepository.getWorkspaceAccessForUser(authContext.userId) };
+    const accesses = userBundle.accesses || [];
     const hasAccess = accesses.some(a =>
       a.WorkspaceID === requestedWorkspaceId &&
       (a.Active === true || a.Active === 'TRUE' || a.Active === 1)
@@ -2331,7 +2334,10 @@ var SessionService = (typeof global !== 'undefined' && global.SessionService) ||
       normalizedClientType === 'WEB' ||
       normalizedClientType === 'SETUP_WIZARD'
     ) {
-      const account = MasterRepository.findAccountById(userId);
+      const accountBundle = MasterRepository.getUserAuthBundle
+        ? MasterRepository.getUserAuthBundle(userId)
+        : { account: MasterRepository.findAccountById(userId), accesses: [] };
+      const account = accountBundle.account;
       if (!account) {
         throw new AppError(
           ERROR_CODES.AUTH_REQUIRED,
@@ -2443,8 +2449,12 @@ var SessionService = (typeof global !== 'undefined' && global.SessionService) ||
       throw new AppError(ERROR_CODES.SESSION_EXPIRED, 'Session has expired due to timeout. Please sign in again.', 401);
     }
 
-    // Verify User Account status
-    const user = MasterRepository.findAccountById(session.UserID);
+    // Verify current account/access state. The U:<userId> cache is short-lived
+    // and explicitly invalidated by account/access mutations.
+    const userBundle = MasterRepository.getUserAuthBundle
+      ? MasterRepository.getUserAuthBundle(session.UserID)
+      : { account: MasterRepository.findAccountById(session.UserID), accesses: [] };
+    const user = userBundle.account;
     if (!user) {
       MasterRepository.updateSession(session.SessionID, {
         Revoked: true,
@@ -4193,9 +4203,47 @@ var TrackingPolicyService = (typeof global !== 'undefined' && global.TrackingPol
 var MasterRepository = (typeof global !== 'undefined' && global.MasterRepository) || {
   spreadsheetId: null,
   _requestCache: {},
+  _userCacheMemory: {},
 
   beginRequest() {
     this._requestCache = {};
+  },
+
+  _userCacheKey(userId) {
+    return 'U:' + String(userId || '');
+  },
+
+  invalidateUserCache(userId) {
+    const key = this._userCacheKey(userId);
+    if (typeof CacheService !== 'undefined' && CacheService.getScriptCache) {
+      try { CacheService.getScriptCache().remove(key); } catch (e) {}
+    }
+    delete this._userCacheMemory[key];
+  },
+
+  _getCachedUserBundle(userId) {
+    const key = this._userCacheKey(userId);
+    let raw = '';
+    if (typeof CacheService !== 'undefined' && CacheService.getScriptCache) {
+      try { raw = CacheService.getScriptCache().get(key) || ''; } catch (e) {}
+    } else {
+      raw = this._userCacheMemory[key] || '';
+    }
+    if (!raw) return null;
+    try { return JSON.parse(raw); } catch (e) {
+      this.invalidateUserCache(userId);
+      return null;
+    }
+  },
+
+  _putCachedUserBundle(userId, bundle) {
+    const key = this._userCacheKey(userId);
+    const raw = JSON.stringify(bundle);
+    if (typeof CacheService !== 'undefined' && CacheService.getScriptCache) {
+      try { CacheService.getScriptCache().put(key, raw, 60); } catch (e) {}
+    } else {
+      this._userCacheMemory[key] = raw;
+    }
   },
 
   _invalidateTable(tabName) {
@@ -4296,6 +4344,53 @@ var MasterRepository = (typeof global !== 'undefined' && global.MasterRepository
     const row = { _rowIndex: rowIndex };
     for (let i = 0; i < schemaHeaders.length; i++) row[schemaHeaders[i]] = values[i];
     return row;
+  },
+
+  /**
+   * Finds all rows matching one key column without loading the whole tab.
+   */
+  findRowsByKey(tabName, columnName, value, options = {}) {
+    const ss = this.getMasterSpreadsheet();
+    const sheet = ss.getSheetByName(tabName);
+    if (!sheet) {
+      throw new AppError(ERROR_CODES.NOT_FOUND, `Master tab '${tabName}' does not exist.`);
+    }
+    const schemaHeaders = MASTER_SCHEMA[tabName];
+    if (!schemaHeaders) {
+      throw new AppError(ERROR_CODES.INTERNAL_ERROR, `Schema missing for master tab '${tabName}'.`);
+    }
+    const columnIndex = schemaHeaders.indexOf(columnName);
+    if (columnIndex < 0) {
+      throw new AppError(ERROR_CODES.INTERNAL_ERROR, `Column '${columnName}' is not defined for '${tabName}'.`);
+    }
+    const lastRow = sheet.getLastRow();
+    if (lastRow < 2) return [];
+
+    const cells = sheet
+      .getRange(2, columnIndex + 1, lastRow - 1, 1)
+      .createTextFinder(String(value))
+      .matchEntireCell(true)
+      .matchCase(options.matchCase !== false)
+      .findAll();
+
+    return cells.map(cell => {
+      const rowIndex = cell.getRow();
+      const values = sheet.getRange(rowIndex, 1, 1, schemaHeaders.length).getValues()[0];
+      const row = { _rowIndex: rowIndex };
+      for (let i = 0; i < schemaHeaders.length; i++) row[schemaHeaders[i]] = values[i];
+      return row;
+    });
+  },
+
+  getUserAuthBundle(userId) {
+    const cached = this._getCachedUserBundle(userId);
+    if (cached) return cached;
+
+    const account = this.findAccountById(userId);
+    const accesses = account ? this.getWorkspaceAccessForUser(userId) : [];
+    const bundle = { account, accesses };
+    this._putCachedUserBundle(userId, bundle);
+    return bundle;
   },
 
   /**
@@ -4449,10 +4544,10 @@ var MasterRepository = (typeof global !== 'undefined' && global.MasterRepository
   },
 
   updateAccount(userId, updates) {
-    const { rows } = this.getTableData(CONSTANTS.MASTER_TABS.ACCOUNTS);
-    const acc = rows.find(r => r.UserID === userId);
+    const acc = this.findAccountById(userId);
     if (!acc) throw new AppError(ERROR_CODES.NOT_FOUND, `Account ${userId} not found.`);
     this.updateRow(CONSTANTS.MASTER_TABS.ACCOUNTS, acc._rowIndex, updates);
+    this.invalidateUserCache(userId);
     return { ...acc, ...updates };
   },
 
@@ -4507,13 +4602,19 @@ var MasterRepository = (typeof global !== 'undefined' && global.MasterRepository
   },
 
   getWorkspaceAccessForUser(userId) {
-    const { rows } = this.getTableData(CONSTANTS.MASTER_TABS.WORKSPACE_ACCESS);
-    return rows.filter(r => r.UserID === userId && (r.Active === true || r.Active === 'TRUE' || r.Active === 1));
+    return this.findRowsByKey(
+      CONSTANTS.MASTER_TABS.WORKSPACE_ACCESS,
+      'UserID',
+      userId
+    ).filter(r => r.Active === true || r.Active === 'TRUE' || r.Active === 1);
   },
 
   getWorkspaceAccessForWorkspace(workspaceId) {
-    const { rows } = this.getTableData(CONSTANTS.MASTER_TABS.WORKSPACE_ACCESS);
-    return rows.filter(r => r.WorkspaceID === workspaceId && (r.Active === true || r.Active === 'TRUE' || r.Active === 1));
+    return this.findRowsByKey(
+      CONSTANTS.MASTER_TABS.WORKSPACE_ACCESS,
+      'WorkspaceID',
+      workspaceId
+    ).filter(r => r.Active === true || r.Active === 'TRUE' || r.Active === 1);
   },
 
   countActiveAdminWorkspaces(userId) {
@@ -4522,9 +4623,12 @@ var MasterRepository = (typeof global !== 'undefined' && global.MasterRepository
   },
 
   assignWorkspaceAccess(accessData) {
-    // Check if mapping already exists
-    const { rows } = this.getTableData(CONSTANTS.MASTER_TABS.WORKSPACE_ACCESS);
-    const existing = rows.find(r => r.UserID === accessData.UserID && r.WorkspaceID === accessData.WorkspaceID);
+    const rows = this.findRowsByKey(
+      CONSTANTS.MASTER_TABS.WORKSPACE_ACCESS,
+      'UserID',
+      accessData.UserID
+    );
+    const existing = rows.find(r => r.WorkspaceID === accessData.WorkspaceID);
     if (existing) {
       this.updateRow(CONSTANTS.MASTER_TABS.WORKSPACE_ACCESS, existing._rowIndex, {
         Role: accessData.Role,
@@ -4532,21 +4636,27 @@ var MasterRepository = (typeof global !== 'undefined' && global.MasterRepository
         AssignedAt: accessData.AssignedAt || new Date().toISOString(),
         AssignedBy: accessData.AssignedBy || ''
       });
+      this.invalidateUserCache(accessData.UserID);
       return { ...existing, ...accessData, Active: true };
     }
-    return this.appendRow(CONSTANTS.MASTER_TABS.WORKSPACE_ACCESS, accessData);
+    const created = this.appendRow(CONSTANTS.MASTER_TABS.WORKSPACE_ACCESS, accessData);
+    this.invalidateUserCache(accessData.UserID);
+    return created;
   },
 
   syncWorkspaceAccessRole(userId, role) {
-    const { rows } = this.getTableData(CONSTANTS.MASTER_TABS.WORKSPACE_ACCESS);
-    rows
-      .filter(r => r.UserID === userId && (r.Active === true || r.Active === 'TRUE' || r.Active === 1))
+    this.getWorkspaceAccessForUser(userId)
       .forEach(r => this.updateRow(CONSTANTS.MASTER_TABS.WORKSPACE_ACCESS, r._rowIndex, { Role: role }));
+    this.invalidateUserCache(userId);
   },
 
   removeWorkspaceAccess(userId, workspaceId) {
-    const { rows } = this.getTableData(CONSTANTS.MASTER_TABS.WORKSPACE_ACCESS);
-    const existing = rows.find(r => r.UserID === userId && r.WorkspaceID === workspaceId);
+    const rows = this.findRowsByKey(
+      CONSTANTS.MASTER_TABS.WORKSPACE_ACCESS,
+      'UserID',
+      userId
+    );
+    const existing = rows.find(r => r.WorkspaceID === workspaceId);
     if (existing) {
       this.updateRow(CONSTANTS.MASTER_TABS.WORKSPACE_ACCESS, existing._rowIndex, {
         Active: false
@@ -4568,6 +4678,7 @@ var MasterRepository = (typeof global !== 'undefined' && global.MasterRepository
         UpdatedBy: 'SYSTEM'
       });
     }
+    this.invalidateUserCache(userId);
   },
 
   /* ------------------- SESSIONS ------------------- */
