@@ -1,126 +1,97 @@
 # FLINK Time — Installation Guide
 
-This guide is for the person installing FLINK Time for a company.
+## Recommended: Automated Installer
 
-You do **not** need npm, Node.js, Git, a command line, or a one-time setup key.
+The automated installer is intended for normal Google Workspace administrators. It removes the source-copying and manual Web App deployment steps.
 
-## Recommended installation: Master Sheet copy
+### What the installer does
 
-### 1. Make your own copy
+After the user grants Google's required management access, the installer:
 
-Use the FLINK Time Master Google Sheet template and make a copy in **My Drive**.
+1. verifies the signed-in Google Workspace identity;
+2. creates a new **FLINK Time Master** Google Sheet owned by that user;
+3. creates a new Apps Script project bound to the Sheet;
+4. downloads exactly five production files from an immutable pinned Git commit;
+5. injects only the dedicated Master Sheet ID and installation-owner bootstrap values;
+6. uploads the five files with the official Apps Script API;
+7. creates an immutable Apps Script version;
+8. creates the Web App deployment;
+9. reads the Web App URL returned by Google;
+10. returns the Master Sheet, Employee, Admin, and Super Admin links;
+11. opens Super Admin setup.
 
-The first installation must start from a Sheet that your Google account owns. Do not move the Sheet into a Shared Drive until initial setup is complete.
+If installation fails before completion, the installer attempts to move the incomplete Master Sheet to Trash.
 
-### 2. Prepare FLINK Time
+### What the user still approves
 
-Open the copied Sheet.
+Google intentionally retains two security decisions:
 
-From the menu choose:
+1. **Apps Script API management access.** Google keeps API access to script projects disabled by default. The user opens Google's Apps Script settings and enables it once before the installer can create or deploy scripts.
+2. **FLINK Time runtime authorization.** A newly created Apps Script project may still require the installation owner to grant its Drive/Sheets scopes. The installed Web App detects this first-run state with `ScriptApp.getAuthorizationInfo(FULL)` and, when required, shows **AUTHORIZE FLINK TIME** using Google's own authorization URL.
 
-**FLINK Time → 1. Prepare Installation**
+The installer does not and should not try to silently approve either Google security decision.
 
-Google may ask you to authorize the script. Approve the requested permissions for the company account that will own and operate FLINK Time.
+### Normal user steps
 
-The preparation step:
+1. Open the organization's FLINK Time Installer URL.
+2. Click **Open Google API setting**.
+3. Enable **Google Apps Script API**.
+4. Return to the installer.
+5. Click **INSTALL FLINK TIME**.
+6. Wait while Google creates and deploys the system.
+7. The Super Admin page opens.
+8. If shown, click **AUTHORIZE FLINK TIME**, approve Google's consent screen, then click **I HAVE AUTHORIZED — CONTINUE**.
+9. Complete the guided setup.
 
-- binds the Apps Script project to this Master Sheet;
-- records the installation owner;
-- creates/repairs the required Master Sheet tabs;
-- initializes the server-side cryptographic secret;
-- does **not** create users or passwords.
+No GitHub, npm, Node.js, Git, command line, source copying, setup key, or deployment-screen work is required.
 
-### 3. Deploy the Web App
+## Deploy the organization installer once
 
-In the Sheet choose **Extensions → Apps Script**.
+This section is for the FLINK Time maintainer.
+
+Create a standalone Apps Script project containing:
+
+```
+installer/
+  Code.gs
+  Index.html
+  appsscript.json
+```
 
 Then:
 
-1. Click **Deploy → New deployment**.
-2. Choose **Web app**.
-3. Set **Execute as: Me**.
-4. Set access to **users in your Google Workspace domain**.
-5. Click **Deploy**.
-6. Complete Google's authorization prompt if shown.
+1. Associate the installer with an appropriate standard Google Cloud project.
+2. Enable the **Google Apps Script API** in that Cloud project.
+3. Configure the OAuth consent screen appropriately for the organization.
+4. Save the three installer files.
+5. Deploy the installer as a Web App using its manifest:
+   - access: organization domain;
+   - execute as: user accessing the Web App.
+6. Authorize the installer scopes.
+7. Distribute the installer Web App URL.
 
-Do not deploy the production system as public **Anyone** access.
+The installer requires broader scopes because it creates and deploys Apps Script projects. Those scopes stay isolated from the installed FLINK Time runtime.
 
-### 4. Open FLINK Time
+## Manual/template fallback
 
-Return to the Master Sheet.
+If the automated installer is unavailable:
 
-Choose:
+1. Make a copy of the FLINK Time Master Sheet in **My Drive**.
+2. Choose **FLINK Time → 1. Prepare Installation**.
+3. Open **Extensions → Apps Script**.
+4. Choose **Deploy → New deployment → Web app**.
+5. Set **Execute as: Me**.
+6. Set access to **users in your Google Workspace domain**.
+7. Deploy.
+8. Return to the Sheet and choose **FLINK Time → 3. Open FLINK Time**.
+9. Open Super Admin and complete setup.
 
-**FLINK Time → 3. Open FLINK Time**
+Do not deploy the production app as public **Anyone** access.
 
-Open the **Super Admin** link.
+## Portal links
 
-Use the **same Google Workspace account** that:
-
-- owns the copied Master Sheet; and
-- deployed the Web App.
-
-### 5. Complete the guided setup
-
-The Super Admin page walks through the setup in the GUI.
-
-It creates/configures:
-
-1. root Super Admin;
-2. company settings;
-3. first workspace;
-4. workspace admin;
-5. initial employee;
-6. client/project;
-7. time rules;
-8. reporting/alerts;
-9. system health verification.
-
-Optional Admin/Employee creation steps may be skipped and completed later from the Super Admin console.
-
-### 6. Use the correct portal links
-
-After setup:
-
-- **Employee**: `?view=user` — may be embedded in Google Sites.
-- **Admin**: `?view=admin` — open directly.
-- **Super Admin**: `?view=superadmin` — open directly.
+- **Employee:** `?view=user` — may be embedded in Google Sites.
+- **Admin:** `?view=admin` — direct Web App access.
+- **Super Admin:** `?view=superadmin` — direct Web App access.
 
 Admin and Super Admin are intentionally not embeddable.
-
-## If something goes wrong
-
-**FLINK Time menu is missing**
-
-Reload the Google Sheet. The menu is added when the bound Apps Script project opens with the Sheet.
-
-**"Only the Google account that owns this Master Sheet can prepare FLINK Time"**
-
-Make sure you are signed in with the owner account and that the Sheet is a copy in My Drive.
-
-**"FLINK Time is not deployed yet"**
-
-Complete Step 3 above, then reopen **FLINK Time → Open FLINK Time**.
-
-**"First-time setup must be completed by..."**
-
-The account that prepared the Sheet and the account that deployed the Web App do not match. Use the same company account for both.
-
-## Maintainer: building the template from this repository
-
-This section is only for the person creating the distributable Master Sheet template.
-
-1. Create/open the Master Google Sheet.
-2. Open **Extensions → Apps Script**.
-3. Copy the five files from `apps-script/` into the bound Apps Script project:
-   - `Code.gs`
-   - `User.html`
-   - `Admin.html`
-   - `SuperAdmin.html`
-   - `appsscript.json`
-4. Save the Apps Script project.
-5. Reload the Sheet.
-6. Confirm the **FLINK Time** menu appears.
-7. Keep this Sheet as the controlled template source.
-
-The `tests/`, npm files, GitHub workflow, and `docs/` folder are engineering assets and are not copied into the production Apps Script project.

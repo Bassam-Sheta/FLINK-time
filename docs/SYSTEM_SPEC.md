@@ -73,7 +73,17 @@ Client-side portal separation is a usability layer only. Server-side `ACTION_PER
 
 ## Installation and repository policy
 
-The customer-facing template installation path is:
+FLINK Time has two distribution paths.
+
+### Automated installer
+
+The preferred normal-user path is a separate standalone Apps Script installer. It runs as the user accessing it and has its own script-management scopes. Those broader scopes are not present in the five-file FLINK Time runtime.
+
+The installer uses the official Apps Script API to create a bound project, upload the five production files from an immutable pinned release, create a version, create the Web App deployment, and return the deployment URL. It injects only the dedicated Master Sheet ID and installation-owner bootstrap sentinels.
+
+API-installed copies have a first-run self-authorization gate. Before serving the normal portal, the gate activates only while an injected installation owner exists and durable installation-owner state is still absent. It verifies the signed-in owner and uses `ScriptApp.getAuthorizationInfo(ScriptApp.AuthMode.FULL)` to show Google's authorization URL if required. No production OAuth scope is added for this gate.
+
+### Manual/template fallback
 
 1. copy the Master Sheet in My Drive;
 2. choose **FLINK Time → Prepare Installation**;
@@ -81,17 +91,7 @@ The customer-facing template installation path is:
 4. choose **FLINK Time → Open FLINK Time**;
 5. open Super Admin and complete the GUI wizard.
 
-The backend also supports a separate official API installer without weakening the
-manual path. The source contains two inert installer sentinels for Master Sheet
-ID and installation-owner email. When an authorized installer replaces those
-sentinels before uploading a newly created bound Apps Script project, first-run
-setup can resolve the Master Sheet and owner without the **Prepare Installation**
-menu step. Both the active Google identity and execute-as-deployer identity are
-still verified before the injected values are persisted or any schema/account
-mutation occurs.
-
-The active source is source-first. Compiled executables, temporary packaging output, legacy desktop clients, and duplicate Apps Script modules are not committed.
-
+The active source remains source-first. Compiled executables, temporary packaging output, legacy desktop clients, and duplicate Apps Script modules are not committed.
 
 ## Request-cost hardening (WP1 in progress)
 
