@@ -4,25 +4,26 @@ Google Workspace-native time tracking and workforce management.
 
 ## Install FLINK Time
 
-**Normal installers do not need npm, Node.js, Git, a command line, or a setup key.**
+### Recommended: Automated Installer
 
-The intended distribution method is a copy of the FLINK Time Master Google Sheet with its bound Apps Script project.
+Normal installers do **not** need GitHub, npm, Node.js, Git, PowerShell, source-file copying, a setup key, or the Apps Script deployment screens.
 
-1. Make your own copy of the FLINK Time Master Sheet in **My Drive**.
-2. Open the copy and choose **FLINK Time → Prepare Installation**.
-3. Choose **Extensions → Apps Script → Deploy → New deployment → Web app**.
-   - Execute as: **Me**
-   - Access: **users in your Google Workspace domain**
-4. Return to the Sheet and choose **FLINK Time → Open FLINK Time**.
-5. Open **Super Admin** and complete the guided setup.
+The separate application under `installer/` automates the deployment work:
 
-The first setup step automatically verifies that the signed-in Google account owns the Master Sheet and is also the Web App deployment owner.
+1. Open your organization's **FLINK Time Installer**.
+2. Open Google's Apps Script settings and enable **Google Apps Script API** access once.
+3. Return to the installer and click **INSTALL FLINK TIME**.
+4. The installer creates the Master Sheet, creates the bound Apps Script project, uploads the five production files, creates a version, creates the Web App deployment, and opens the Super Admin URL.
+5. If the newly created FLINK Time project still needs its own Drive/Sheets consent, its first-run page shows **AUTHORIZE FLINK TIME** using Google's authorization URL.
+6. Complete the guided Super Admin setup.
 
-For screenshots, troubleshooting, and the maintainer/template-building flow, see **[docs/INSTALLATION.md](docs/INSTALLATION.md)**.
+Google's API-access toggle and OAuth consent are deliberate Google security approvals. The installer automates the deployment operations around them; it does not bypass those approvals.
+
+See **[docs/INSTALLATION.md](docs/INSTALLATION.md)** for the full installer flow and manual fallback.
 
 ## Production application
 
-Only these five files are deployed to Google Apps Script:
+The installed FLINK Time runtime is still only:
 
 ```
 apps-script/
@@ -33,31 +34,32 @@ apps-script/
   appsscript.json
 ```
 
+The separate `installer/` project is only a distribution tool. Its script-management scopes are **not** added to the five-file FLINK Time runtime.
+
 Portal rule:
 
 - **Employee:** may be embedded in Google Sites.
-- **Admin:** open directly from the Web App URL.
-- **Super Admin:** open directly from the Web App URL.
+- **Admin:** direct Web App access.
+- **Super Admin:** direct Web App access.
 
 ## Repository folders
 
 ```
-apps-script/       production application
+apps-script/       five-file production application
+installer/         separate automated deployment application
 tests/             automated regression/security/browser tests
 docs/              installation, architecture, and security documentation
 .github/workflows  GitHub CI
 ```
 
-The test tooling is for developers and CI only. It is never deployed to Google Apps Script.
+npm, Node.js, Playwright, and GitHub Actions are development/CI tools only.
 
 ## Developers
-
-Run the regression suite locally only when needed:
 
 ```bash
 npm test
 ```
 
-GitHub Actions runs the regression and browser tests for pull requests and changes to `main`.
+GitHub Actions runs regression/security tests, browser acceptance, and real portal screenshot capture for pull requests and `main`.
 
 Architecture and security details are in **[docs/SYSTEM_SPEC.md](docs/SYSTEM_SPEC.md)**.
