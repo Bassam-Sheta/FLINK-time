@@ -17,18 +17,18 @@ class AppError extends Error {
   }
 }
 
-function fixture({ lockThrows = false } = {}) {
+function fixture({ lockThrows = false, ownerThrows = false } = {}) {
   const accounts = [];
-  const props = new Map([
-    ['FLINK_SETUP_KEY_HASH', 'SETUP-HASH'],
-    ['FLINK_SETUP_KEY_CREATED_AT', new Date().toISOString()]
-  ]);
+  const props = new Map();
   let lockAcquireCalls = 0;
   let createAccountCalls = 0;
+  let bootstrapCalls = 0;
+  let ownerChecks = 0;
 
   global.AppError = AppError;
   global.ERROR_CODES = {
     AUTH_REQUIRED: 'AUTH_REQUIRED',
+    UNAUTHORIZED: 'UNAUTHORIZED',
     VALIDATION_ERROR: 'VALIDATION_ERROR',
     INTERNAL_ERROR: 'INTERNAL_ERROR',
     CONFLICT: 'CONFLICT'
@@ -37,8 +37,7 @@ function fixture({ lockThrows = false } = {}) {
     ROLES: { SUPER_ADMIN: 'SUPER_ADMIN' },
     ACCOUNT_STATUS: { ACTIVE: 'ACTIVE', DELETED: 'DELETED' },
     MASTER_TABS: { ACCOUNTS: 'Accounts' },
-    AUDIT_EVENTS: { USER_CREATED: 'USER_CREATED' },
-    LIMITS: { SETUP_KEY_TTL_MINUTES: 15 }
+    AUDIT_EVENTS: { USER_CREATED: 'USER_CREATED' }
   };
   global.Validation = {
     assertRequired(obj, names) {
@@ -50,16 +49,18 @@ function fixture({ lockThrows = false } = {}) {
     generateId() { return 'USR-ROOT'; }
   };
   global.IdentityService = {
-    getCurrentGoogleEmail() { return 'root@example.com'; }
+    assertInstallationOwner() {
+      ownerChecks += 1;
+      if (ownerThrows) throw new AppError('UNAUTHORIZED', 'OWNER_MISMATCH', 403);
+      return 'root@example.com';
+    }
   };
   global.SecurityService = {
-    hashToken(value) {
-      return value === 'one-time-key' ? 'SETUP-HASH' : 'BAD-HASH';
-    },
-    constantTimeEquals(a, b) { return a === b; },
     hashPassword() { return 'PASSWORD-HASH'; }
   };
-  global.MigrationService = { bootstrapMasterSheet() {} };
+  global.MigrationService = {
+    bootstrapMasterSheet() { bootstrapCalls += 1; }
+  };
   global.PropertiesService = {
     getScriptProperties() {
       return {
@@ -69,6 +70,7 @@ function fixture({ lockThrows = false } = {}) {
     }
   };
   global.MasterRepository = {
+    getGlobalSetting() { return 'false'; },
     getTableData(tab) {
       assert.equal(tab, 'Accounts');
       return { rows: accounts };
@@ -100,12 +102,13 @@ function fixture({ lockThrows = false } = {}) {
     accounts,
     props,
     getLockAcquireCalls: () => lockAcquireCalls,
-    getCreateAccountCalls: () => createAccountCalls
+    getCreateAccountCalls: () => createAccountCalls,
+    getBootstrapCalls: () => bootstrapCalls,
+    getOwnerChecks: () => ownerChecks
   };
 }
 
 const payload = {
-  setupKey: 'one-time-key',
   fullName: 'Root Admin',
   username: 'root',
   password: 'StrongPass123!',
@@ -118,18 +121,19 @@ test('first-run root creation acquires exactly one script lock', () => {
 
   assert.equal(result.ok, true);
   assert.equal(fx.getLockAcquireCalls(), 1);
+  assert.equal(fx.getOwnerChecks(), 1);
+  assert.equal(fx.getBootstrapCalls(), 1);
   assert.equal(fx.getCreateAccountCalls(), 1);
   assert.equal(fx.accounts.length, 1);
 });
 
-test('second root creation cannot succeed after the first consumes setup state', () => {
+test('second root creation cannot succeed after the first root exists', () => {
   const fx = fixture();
   fx.SetupService.processStep(1, payload, null);
 
   assert.throws(
     () => fx.SetupService.processStep(1, payload, null),
-    err => err instanceof AppError &&
-      ['AUTH_REQUIRED', 'CONFLICT'].includes(err.code)
+    err => err instanceof AppError && err.code === 'CONFLICT'
   );
 
   assert.equal(fx.getCreateAccountCalls(), 1);
@@ -143,6 +147,19 @@ test('root account is not created when installation lock cannot be acquired', ()
     () => fx.SetupService.processStep(1, payload, null),
     /LOCK_BUSY/
   );
+  assert.equal(fx.getOwnerChecks(), 0);
+  assert.equal(fx.getBootstrapCalls(), 0);
   assert.equal(fx.getCreateAccountCalls(), 0);
-  assert.equal(fx.accounts.length, 0);
+});
+
+test('owner mismatch fails before schema or account mutation', () => {
+  const fx = fixture({ ownerThrows: true });
+
+  assert.throws(
+    () => fx.SetupService.processStep(1, payload, null),
+    /OWNER_MISMATCH/
+  );
+  assert.equal(fx.getOwnerChecks(), 1);
+  assert.equal(fx.getBootstrapCalls(), 0);
+  assert.equal(fx.getCreateAccountCalls(), 0);
 });
