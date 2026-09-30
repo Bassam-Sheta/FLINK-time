@@ -79,4 +79,8 @@ Authenticated request paths no longer require whole-table scans for session toke
 
 Session validation uses a 5-minute ScriptCache entry keyed by the session token hash. Cache is an accelerator only: cache misses fall back to the durable Sessions sheet. Any durable session update/revocation invalidates the cached token, and mass revocation evicts all affected cached token hashes.
 
-This is the first WP1 slice. Session/account epoch invalidation, call-budget instrumentation, row trimming/migration, and bounded workspace TimeEntries reads remain in the same work package before WP1 is considered complete.
+WP1 now also uses account/session epochs for constant-cost revoke-all: a session records the account epoch at creation, and security-sensitive account lifecycle operations invalidate existing sessions by rotating the account epoch instead of scanning the Sessions tab. Housekeeping later marks those stale rows revoked and purges them after seven days in contiguous batches.
+
+Master/workspace schema repair also safely trims unused allocated rows/columns. It never automatically deletes populated columns beyond the known schema.
+
+Remaining WP1 validation work is call-budget instrumentation and real-deployment timing. Bounded TimeEntries range reads belong to the year/data-book routing work that follows this foundation.
