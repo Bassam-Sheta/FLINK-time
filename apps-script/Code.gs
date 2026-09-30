@@ -280,7 +280,7 @@ var MASTER_SCHEMA = {
   Accounts: [
     'UserID', 'Username', 'DisplayName', 'Role', 'Status',
     'PrimaryWorkspaceID', 'Email', 'EmployeeCode', 'CreatedAt', 'CreatedBy',
-    'UpdatedAt', 'UpdatedBy', 'LastLoginAt', 'MustChangePassword', 'Version'
+    'UpdatedAt', 'UpdatedBy', 'LastLoginAt', 'MustChangePassword', 'Version', 'SessionEpoch'
   ],
   Credentials: [
     'UserID', 'PasswordHash', 'PasswordVersion', 'PasswordChangedAt',
@@ -303,7 +303,7 @@ var MASTER_SCHEMA = {
   ],
   Sessions: [
     'SessionID', 'UserID', 'TokenHash', 'ClientType', 'ClientLabel',
-    'CreatedAt', 'LastSeenAt', 'ExpiresAt', 'AbsoluteExpiresAt', 'Revoked', 'RevokedAt', 'RevokeReason'
+    'CreatedAt', 'LastSeenAt', 'ExpiresAt', 'AbsoluteExpiresAt', 'Revoked', 'RevokedAt', 'RevokeReason', 'AccountEpoch'
   ],
   GlobalSettings: [
     'SettingKey', 'SettingValue', 'Description', 'UpdatedAt', 'UpdatedBy'
@@ -2383,7 +2383,8 @@ var SessionService = (typeof global !== 'undefined' && global.SessionService) ||
       ExpiresAt: expiresAt.toISOString(),
       AbsoluteExpiresAt: absoluteExpiresAt.toISOString(),
       Revoked: false,
-      RevokedAt: ''
+      RevokedAt: '',
+      AccountEpoch: Number(account.SessionEpoch) > 0 ? Number(account.SessionEpoch) : 1
     };
 
     MasterRepository.createSession(sessionRecord);
@@ -2477,6 +2478,17 @@ var SessionService = (typeof global !== 'undefined' && global.SessionService) ||
         RevokedAt: new Date().toISOString()
       });
       throw new AppError(ERROR_CODES.ACCOUNT_PASSIVE, 'Account is inactive or suspended.', 403);
+    }
+
+    const currentEpoch = Number(user.SessionEpoch) > 0 ? Number(user.SessionEpoch) : 1;
+    const sessionEpoch = Number(session.AccountEpoch) > 0 ? Number(session.AccountEpoch) : 1;
+    if (sessionEpoch !== currentEpoch) {
+      this._deleteCachedSession(tokenHash);
+      throw new AppError(
+        ERROR_CODES.AUTH_REQUIRED,
+        'Session has been revoked. Please sign in again.',
+        401
+      );
     }
 
     const normalizedClientType = String(session.ClientType || '').toUpperCase();
@@ -4683,6 +4695,26 @@ var MasterRepository = (typeof global !== 'undefined' && global.MasterRepository
 
   /* ------------------- SESSIONS ------------------- */
 
+  getSessionEpoch(userId) {
+    const account = this.findAccountById(userId);
+    if (!account) return null;
+    const epoch = Number(account.SessionEpoch);
+    return Number.isInteger(epoch) && epoch > 0 ? epoch : 1;
+  },
+
+  bumpSessionEpoch(userId) {
+    const account = this.findAccountById(userId);
+    if (!account) throw new AppError(ERROR_CODES.NOT_FOUND, `Account ${userId} not found.`);
+    const current = Number(account.SessionEpoch);
+    const nextEpoch = (Number.isInteger(current) && current > 0 ? current : 1) + 1;
+    this.updateRow(CONSTANTS.MASTER_TABS.ACCOUNTS, account._rowIndex, {
+      SessionEpoch: nextEpoch,
+      UpdatedAt: new Date().toISOString()
+    });
+    this.invalidateUserCache(userId);
+    return nextEpoch;
+  },
+
   createSession(sessionData) {
     return this.appendRow(CONSTANTS.MASTER_TABS.SESSIONS, sessionData);
   },
@@ -4713,17 +4745,9 @@ var MasterRepository = (typeof global !== 'undefined' && global.MasterRepository
   },
 
   revokeAllUserSessions(userId) {
-    const { rows } = this.getTableData(CONSTANTS.MASTER_TABS.SESSIONS);
-    const now = new Date().toISOString();
-    rows.filter(r => r.UserID === userId && (r.Revoked === false || r.Revoked === 'FALSE' || !r.Revoked)).forEach(s => {
-      this.updateRow(CONSTANTS.MASTER_TABS.SESSIONS, s._rowIndex, {
-        Revoked: true,
-        RevokedAt: now
-      });
-      if (s.TokenHash && typeof SessionService !== 'undefined' && SessionService._deleteCachedSession) {
-        SessionService._deleteCachedSession(s.TokenHash);
-      }
-    });
+    // Constant-cost revocation: rotate the account epoch. Existing session rows
+    // are made invalid immediately and are physically marked/purged by housekeeping.
+    return this.bumpSessionEpoch(userId);
   },
 
   /* ------------------- REQUESTS ------------------- */
@@ -4958,7 +4982,14 @@ var MasterRepository = (typeof global !== 'undefined' && global.MasterRepository
 
       const now = Date.now();
       return sessionRows
-        .filter(s => !s.Revoked && new Date(s.ExpiresAt).getTime() > now)
+        .filter(s => {
+          if (s.Revoked || new Date(s.ExpiresAt).getTime() <= now) return false;
+          const account = userMap[s.UserID];
+          if (!account) return false;
+          const accountEpoch = Number(account.SessionEpoch) > 0 ? Number(account.SessionEpoch) : 1;
+          const sessionEpoch = Number(s.AccountEpoch) > 0 ? Number(s.AccountEpoch) : 1;
+          return accountEpoch === sessionEpoch;
+        })
         .map(s => {
           const user = userMap[s.UserID] || {};
           return {
@@ -12307,6 +12338,12 @@ var JobService = (typeof global !== 'undefined' && global.JobService) || {
 
     try {
       const { rows: sessions } = MasterRepository.getTableData(CONSTANTS.MASTER_TABS.SESSIONS);
+      const { rows: accounts } = MasterRepository.getTableData(CONSTANTS.MASTER_TABS.ACCOUNTS);
+      const accountEpochs = {};
+      accounts.forEach(account => {
+        accountEpochs[account.UserID] =
+          Number(account.SessionEpoch) > 0 ? Number(account.SessionEpoch) : 1;
+      });
       const now = Date.now();
       const nowIso = new Date().toISOString();
       const retentionMs =
@@ -12318,11 +12355,15 @@ var JobService = (typeof global !== 'undefined' && global.JobService) || {
         const revoked =
           s.Revoked === true || s.Revoked === 'TRUE' || s.Revoked === 1;
 
-        if (!revoked && !isNaN(expiresMs) && expiresMs <= now) {
+        const sessionEpoch = Number(s.AccountEpoch) > 0 ? Number(s.AccountEpoch) : 1;
+        const currentEpoch = accountEpochs[s.UserID];
+        const epochRevoked = currentEpoch === undefined || sessionEpoch !== currentEpoch;
+
+        if (!revoked && (epochRevoked || (!isNaN(expiresMs) && expiresMs <= now))) {
           MasterRepository.updateRow(CONSTANTS.MASTER_TABS.SESSIONS, s._rowIndex, {
             Revoked: true,
             RevokedAt: nowIso,
-            RevokeReason: 'EXPIRED_IDLE_TIMEOUT'
+            RevokeReason: epochRevoked ? 'ACCOUNT_EPOCH_REVOKED' : 'EXPIRED_IDLE_TIMEOUT'
           });
           expiredSessionsCount++;
         }
