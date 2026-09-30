@@ -1,6 +1,8 @@
 (() => {
   const nowIso = () => new Date().toISOString();
   const businessDate = '2026-09-29';
+  const mockRole = String(window.__FLINK_MOCK_ROLE || 'USER').toUpperCase();
+  const setupInitialized = window.__FLINK_MOCK_SETUP_INITIALIZED !== false;
   const state = {
     loggedOut: false,
     passwordChanged: false,
@@ -38,17 +40,45 @@
     { WorkspaceID: 'W2', WorkspaceName: 'Cairo Support', Timezone: 'Africa/Cairo', Status: 'ACTIVE' }
   ];
 
-  const user = () => ({
-    userId: 'U1',
-    username: 'employee',
-    displayName: 'Normal Employee',
-    email: 'employee@example.test',
-    role: 'USER',
-    status: 'ACTIVE',
-    primaryWorkspaceId: 'W1',
-    assignedWorkspaces: ['W1', 'W2'],
-    mustChangePassword: false
-  });
+  const user = () => {
+    if (mockRole === 'ADMIN') {
+      return {
+        userId: 'U2',
+        username: 'manager',
+        displayName: 'Operations Manager',
+        email: 'manager@example.test',
+        role: 'ADMIN',
+        status: 'ACTIVE',
+        primaryWorkspaceId: 'W1',
+        assignedWorkspaces: ['W1', 'W2'],
+        mustChangePassword: false
+      };
+    }
+    if (mockRole === 'SUPER_ADMIN') {
+      return {
+        userId: 'U0',
+        username: 'rootadmin',
+        displayName: 'System Owner',
+        email: 'owner@example.test',
+        role: 'SUPER_ADMIN',
+        status: 'ACTIVE',
+        primaryWorkspaceId: 'W1',
+        assignedWorkspaces: ['W1', 'W2'],
+        mustChangePassword: false
+      };
+    }
+    return {
+      userId: 'U1',
+      username: 'employee',
+      displayName: 'Normal Employee',
+      email: 'employee@example.test',
+      role: 'USER',
+      status: 'ACTIVE',
+      primaryWorkspaceId: 'W1',
+      assignedWorkspaces: ['W1', 'W2'],
+      mustChangePassword: false
+    };
+  };
 
   const trackedSeconds = () =>
     state.entries.reduce((sum, entry) => sum + Number(entry.durationSeconds || 0), 0);
@@ -84,7 +114,10 @@
 
     switch (action) {
       case 'setup.status':
-        return { initialized: true, currentStep: 9 };
+        return {
+          initialized: setupInitialized,
+          currentStep: setupInitialized ? 9 : 0
+        };
 
       case 'auth.login':
         if (payload.username !== 'employee' || payload.password !== 'demo-pass') {
@@ -104,7 +137,7 @@
         return { sessionToken: 'SESSION-1', expiresAt: nowIso(), user: user() };
 
       case 'auth.validateSession':
-        return { user: user(), role: 'USER' };
+        return { user: user(), role: mockRole };
 
       case 'auth.changePassword':
         if (payload.oldPassword !== 'demo-pass' || !payload.newPassword) {
