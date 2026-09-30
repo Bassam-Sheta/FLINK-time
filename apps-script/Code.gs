@@ -4721,16 +4721,32 @@ var MasterRepository = (typeof global !== 'undefined' && global.MasterRepository
   },
 
   bumpSessionEpoch(userId) {
-    const account = this.findAccountById(userId);
-    if (!account) throw new AppError(ERROR_CODES.NOT_FOUND, `Account ${userId} not found.`);
-    const current = Number(account.SessionEpoch);
-    const nextEpoch = (Number.isInteger(current) && current > 0 ? current : 1) + 1;
-    this.updateRow(CONSTANTS.MASTER_TABS.ACCOUNTS, account._rowIndex, {
-      SessionEpoch: nextEpoch,
-      UpdatedAt: new Date().toISOString()
-    });
-    this.invalidateUserCache(userId);
-    return nextEpoch;
+    const lock =
+      typeof LockService !== 'undefined' && LockService.getScriptLock
+        ? LockService.getScriptLock()
+        : null;
+    const alreadyHeld = !!(lock && typeof lock.hasLock === 'function' && lock.hasLock());
+    let acquiredHere = false;
+
+    if (lock && !alreadyHeld) {
+      lock.waitLock(10000);
+      acquiredHere = true;
+    }
+
+    try {
+      const account = this.findAccountById(userId);
+      if (!account) throw new AppError(ERROR_CODES.NOT_FOUND, `Account ${userId} not found.`);
+      const current = Number(account.SessionEpoch);
+      const nextEpoch = (Number.isInteger(current) && current > 0 ? current : 1) + 1;
+      this.updateRow(CONSTANTS.MASTER_TABS.ACCOUNTS, account._rowIndex, {
+        SessionEpoch: nextEpoch,
+        UpdatedAt: new Date().toISOString()
+      });
+      this.invalidateUserCache(userId);
+      return nextEpoch;
+    } finally {
+      if (acquiredHere) lock.releaseLock();
+    }
   },
 
   createSession(sessionData) {
