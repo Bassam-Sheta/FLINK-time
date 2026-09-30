@@ -14,7 +14,9 @@ test('request-time master lookups use bounded TextFinder reads', () => {
   assert.match(src, /createTextFinder\(String\(value\)\)/);
   assert.match(src, /findSessionByTokenHashFast\(tokenHash\)/);
 
-  const a = src.slice(src.indexOf('findAccountById(userId)'), src.indexOf('createAccount(accountData'));
+  const repoStart = src.indexOf('var MasterRepository');
+  const a0 = src.indexOf('findAccountById(userId)', repoStart);
+  const a = src.slice(a0, src.indexOf('createAccount(accountData', a0));
   assert.match(a, /findRowByKey/);
   assert.doesNotMatch(a, /getTableData/);
 
