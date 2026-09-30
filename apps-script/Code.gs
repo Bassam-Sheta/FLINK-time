@@ -3468,7 +3468,10 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
       cred = latestCred;
       account = latestAccount;
 
-      if (SecurityService.needsPasswordHashUpgrade(cred.PasswordHash)) {
+      if (
+        typeof SecurityService.needsPasswordHashUpgrade === 'function' &&
+        SecurityService.needsPasswordHashUpgrade(cred.PasswordHash)
+      ) {
         const beforeIterations = SecurityService.getStoredPasswordIterations(cred.PasswordHash);
         const targetIterations = SecurityService.getConfiguredPasswordIterations();
         const upgradedHash = SecurityService.hashPassword(password, targetIterations);
