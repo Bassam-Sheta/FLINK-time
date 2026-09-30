@@ -1055,6 +1055,7 @@ const ACTION_PERMISSIONS = {
   'system.health': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN], isWrite: true },
   'system.repair': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN], isWrite: true },
   'system.diagnostics': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN], isWrite: false },
+  'security.calibrateKdf': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN], isWrite: false },
 
   // Settings & Configuration
   'settings.get': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN, CONSTANTS.ROLES.ADMIN], isWrite: false },
@@ -1488,6 +1489,10 @@ function dispatchAction_(action, data) {
 
     case 'system.diagnostics':
       return SetupService.getAdvancedDiagnostics(authContext);
+
+    case 'security.calibrateKdf':
+      AuthorizationService.assertRole(authContext, [CONSTANTS.ROLES.SUPER_ADMIN]);
+      return SecurityService.calibratePasswordKdf(payload.targetMs || 700);
 
     case 'setup.completeStep':
       return SetupService.processStep(payload.step, payload, authContext);
@@ -2038,19 +2043,99 @@ var SecurityService = (typeof global !== 'undefined' && global.SecurityService) 
     return derived.map(b => b.toString(16).padStart(2, '0')).join('');
   },
 
+  getStoredPasswordIterations(storedHashString) {
+    if (!storedHashString) return 0;
+    const match = String(storedHashString).match(/\$pbkdf2\$v1\$i=(\d+)\$/);
+    return match ? parseInt(match[1], 10) || 0 : 0;
+  },
+
+  getConfiguredPasswordIterations() {
+    const hardFloor = Math.max(10000, Number(CONSTANTS.SECURITY.PBKDF2_ITERATIONS) || 10000);
+    const hardCeiling = 1000000;
+    let configured = hardFloor;
+    try {
+      if (
+        typeof MasterRepository !== 'undefined' &&
+        MasterRepository.getGlobalSettingFast
+      ) {
+        const raw = MasterRepository.getGlobalSettingFast(
+          'PBKDF2_ITERATIONS',
+          String(hardFloor)
+        );
+        configured = parseInt(raw, 10);
+      }
+    } catch (err) {
+      configured = hardFloor;
+    }
+    if (!Number.isInteger(configured)) configured = hardFloor;
+    return Math.min(hardCeiling, Math.max(hardFloor, configured));
+  },
+
+  needsPasswordHashUpgrade(storedHashString) {
+    const stored = this.getStoredPasswordIterations(storedHashString);
+    return stored > 0 && stored < this.getConfiguredPasswordIterations();
+  },
+
   /**
    * Hashes a password using PBKDF2-HMAC-SHA256 with per-user salt and server pepper.
-   * Returns format: $pbkdf2$v1$i=10000$salt$hash
+   * The encoded iteration count permits safe upgrade-on-login.
    */
-  hashPassword(plaintextPassword) {
+  hashPassword(plaintextPassword, iterationOverride = null) {
     Validation.validatePassword(plaintextPassword);
     const salt = this.generateRandomHex(CONSTANTS.SECURITY.SALT_BYTES);
     const pepper = this.getPepper();
     const saltedPepperedPassword = plaintextPassword + pepper;
-    const iterations = CONSTANTS.SECURITY.PBKDF2_ITERATIONS;
+    const configured = this.getConfiguredPasswordIterations();
+    const requested = iterationOverride === null
+      ? configured
+      : parseInt(iterationOverride, 10);
+    const iterations = Math.min(1000000, Math.max(10000, requested || configured));
     const hash = this.pbkdf2Sync(saltedPepperedPassword, salt, iterations, CONSTANTS.SECURITY.PBKDF2_KEY_BYTES);
 
-    return `$pbkdf2$v1$i=${iterations}$${salt}$${hash}`;
+    return `$pbkdf2$v1$i=${iterations}${salt}${hash}`;
+  },
+
+  calibratePasswordKdf(targetMs = 700) {
+    const safeTargetMs = Math.min(1500, Math.max(300, parseInt(targetMs, 10) || 700));
+    const samplePassword = 'FLINK-PBKDF2-BENCHMARK-NOT-A-REAL-PASSWORD';
+    const sampleSalt = '00112233445566778899aabbccddeeff';
+    const keyBytes = CONSTANTS.SECURITY.PBKDF2_KEY_BYTES;
+    const targets = [10000, 25000, 50000, 100000];
+    const results = [];
+    const overallStartedAt = Date.now();
+
+    this.pbkdf2Sync(samplePassword, sampleSalt, 1000, keyBytes);
+    for (const iterations of targets) {
+      const startedAt = Date.now();
+      this.pbkdf2Sync(samplePassword, sampleSalt, iterations, keyBytes);
+      const elapsedMs = Math.max(1, Date.now() - startedAt);
+      results.push({
+        iterations,
+        elapsedMs,
+        millisecondsPerIteration: elapsedMs / iterations
+      });
+      if (elapsedMs >= 10000 || Date.now() - overallStartedAt >= 45000) break;
+    }
+
+    const usable = results.filter(result => result.elapsedMs > 0);
+    const averageMsPerIteration = usable.length
+      ? usable.reduce((sum, result) => sum + result.millisecondsPerIteration, 0) / usable.length
+      : 0;
+    const rawRecommendation = averageMsPerIteration > 0
+      ? Math.round(safeTargetMs / averageMsPerIteration)
+      : CONSTANTS.SECURITY.PBKDF2_ITERATIONS;
+    const recommendedIterations = Math.min(
+      1000000,
+      Math.max(10000, Math.round(rawRecommendation / 1000) * 1000)
+    );
+
+    return {
+      targetMs: safeTargetMs,
+      currentIterations: this.getConfiguredPasswordIterations(),
+      recommendedIterations,
+      results,
+      measuredAtUTC: new Date().toISOString()
+    };
   },
 
   /**
@@ -3382,6 +3467,33 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
 
       cred = latestCred;
       account = latestAccount;
+
+      if (
+        typeof SecurityService.needsPasswordHashUpgrade === 'function' &&
+        SecurityService.needsPasswordHashUpgrade(cred.PasswordHash)
+      ) {
+        const beforeIterations = SecurityService.getStoredPasswordIterations(cred.PasswordHash);
+        const targetIterations = SecurityService.getConfiguredPasswordIterations();
+        const upgradedHash = SecurityService.hashPassword(password, targetIterations);
+        MasterRepository.updateCredentials(account.UserID, {
+          PasswordHash: upgradedHash,
+          PasswordVersion: (parseInt(cred.PasswordVersion, 10) || 1) + 1
+        });
+        cred = Object.assign({}, cred, {
+          PasswordHash: upgradedHash,
+          PasswordVersion: (parseInt(cred.PasswordVersion, 10) || 1) + 1
+        });
+        MasterRepository.logSecurityEvent({
+          UserID: account.UserID,
+          Username: account.Username,
+          EventType: 'PASSWORD_HASH_UPGRADED',
+          Success: true,
+          metadata: {
+            fromIterations: beforeIterations,
+            toIterations: targetIterations
+          }
+        });
+      }
     });
 
     if (cred.MfaEnabled === true || cred.MfaEnabled === 'TRUE') {
@@ -5176,6 +5288,15 @@ var MasterRepository = (typeof global !== 'undefined' && global.MasterRepository
   getGlobalSettingStrict(key, defaultValue = '') {
     const { rows } = this.getTableData(CONSTANTS.MASTER_TABS.GLOBAL_SETTINGS);
     const row = rows.find(r => r.SettingKey === key);
+    return row ? row.SettingValue : defaultValue;
+  },
+
+  getGlobalSettingFast(key, defaultValue = '') {
+    const row = this.findRowByKey(
+      CONSTANTS.MASTER_TABS.GLOBAL_SETTINGS,
+      'SettingKey',
+      key
+    );
     return row ? row.SettingValue : defaultValue;
   },
 
@@ -14264,55 +14385,7 @@ var MigrationService = (typeof global !== 'undefined' && global.MigrationService
  * password and salt below are fixed, non-secret benchmark data.
  */
 function benchmarkPasswordKdf_() {
-  const samplePassword = 'FLINK-PBKDF2-BENCHMARK-NOT-A-REAL-PASSWORD';
-  const sampleSalt = '00112233445566778899aabbccddeeff';
-  const keyBytes = CONSTANTS.SECURITY.PBKDF2_KEY_BYTES;
-  const targets = [10000, 25000, 50000, 100000];
-  const results = [];
-  const overallStartedAt = Date.now();
-
-  // Warm the V8/runtime path so initialization does not dominate the first sample.
-  SecurityService.pbkdf2Sync(samplePassword, sampleSalt, 1000, keyBytes);
-
-  for (const iterations of targets) {
-    const startedAt = Date.now();
-    SecurityService.pbkdf2Sync(samplePassword, sampleSalt, iterations, keyBytes);
-    const elapsedMs = Date.now() - startedAt;
-    results.push({
-      iterations,
-      elapsedMs,
-      millisecondsPerIteration: elapsedMs / iterations
-    });
-
-    // Keep this diagnostic safely bounded well below Apps Script's execution limit.
-    if (elapsedMs >= 10000 || Date.now() - overallStartedAt >= 45000) break;
-  }
-
-  const usable = results.filter(result => result.elapsedMs > 0);
-  const averageMsPerIteration = usable.length
-    ? usable.reduce(
-        (sum, result) => sum + result.millisecondsPerIteration,
-        0
-      ) / usable.length
-    : 0;
-  const owaspReferenceIterations = 600000;
-  const estimatedOwaspRuntimeMs = averageMsPerIteration > 0
-    ? Math.round(averageMsPerIteration * owaspReferenceIterations)
-    : null;
-
-  const report = {
-    currentIterations: CONSTANTS.SECURITY.PBKDF2_ITERATIONS,
-    owaspReferenceIterations,
-    results,
-    estimatedOwaspRuntimeMs,
-    estimatedOwaspRuntimeSeconds:
-      estimatedOwaspRuntimeMs === null ? null : estimatedOwaspRuntimeMs / 1000,
-    oneSecondReferenceMet:
-      estimatedOwaspRuntimeMs !== null && estimatedOwaspRuntimeMs <= 1000,
-    note:
-      'Diagnostic only. Do not change PBKDF2_ITERATIONS until the benchmark result is reviewed and the migration path is selected.'
-  };
-
+  const report = SecurityService.calibratePasswordKdf(700);
   console.log(JSON.stringify(report, null, 2));
   return report;
 }

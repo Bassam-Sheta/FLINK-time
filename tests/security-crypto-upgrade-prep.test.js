@@ -30,10 +30,12 @@ test('PBKDF2 benchmark helper is private and does not expose a browser RPC', () 
   );
 });
 
-test('preparation does not change the production password work factor before runtime benchmarking', () => {
+test('production password work factor remains backward compatible and is runtime-calibratable', () => {
   assert.match(code, /PBKDF2_ITERATIONS:\s*10000/);
-  assert.match(code, /owaspReferenceIterations\s*=\s*600000/);
-  assert.match(code, /Diagnostic only\. Do not change PBKDF2_ITERATIONS/);
+  assert.match(code, /calibratePasswordKdf\(targetMs = 700\)/);
+  assert.match(code, /recommendedIterations/);
+  assert.match(code, /getConfiguredPasswordIterations\(\)/);
+  assert.match(code, /needsPasswordHashUpgrade\(storedHashString\)/);
 });
 
 test('KMS scopes are intentionally not activated by the preparation branch', () => {

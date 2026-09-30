@@ -48,6 +48,7 @@ Client-side portal separation is a usability layer only. Server-side `ACTION_PER
 - First-run root creation is owner-bound: **FLINK Time → Prepare Installation** records the Master Sheet owner, then Setup Step 1 requires both the active Google identity and the execute-as-deployer identity to match that prepared owner.
 - Normal installation does not use or expose a one-time setup key. Legacy setup-key properties are deleted after successful root creation if they exist.
 - Password hashing, failed-login throttling/lockout, session idle/absolute expiry, password-version invalidation, forced password change, and MFA rules remain in `Code.gs`.
+- PBKDF2 iteration cost is calibratable from Super Admin System Health against a ~700 ms target. The configured `PBKDF2_ITERATIONS` value has a hard server floor of 10,000 and ceiling of 1,000,000; successful password verification upgrades older hashes in place without changing the user's password.
 - High-risk Super Admin mutations require a short-lived step-up grant created only after fresh password + TOTP verification. Step-up rotates the authenticated session and is bound to the replacement SessionID.
 - The sole root SUPER_ADMIN is a protected trust anchor: generic CRUD cannot demote it, deactivate it, re-bind its Google Workspace identity, or disable its MFA.
 

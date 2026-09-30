@@ -3959,7 +3959,10 @@
                 <div class="card-title">System Architecture Diagnostics</div>
                 <div class="card-subtitle">Measured checks only; unverified capabilities are not reported as healthy.</div>
               </div>
-              <button class="btn btn-warning btn-sm" onclick="runSystemAutoRepair()">[ FIX AUTOMATICALLY ]</button>
+              <div style="display:flex; gap:0.5rem;">
+                <button class="btn btn-secondary btn-sm" onclick="runKdfCalibration()">Calibrate Password Hashing</button>
+                <button class="btn btn-warning btn-sm" onclick="runSystemAutoRepair()">[ FIX AUTOMATICALLY ]</button>
+              </div>
             </div>
             <div id="saHealthChecks" style="line-height: 2.2;"></div>
           </div>
@@ -3992,6 +3995,20 @@
         });
       } catch (e) {
         renderError(container, '', e);
+      }
+    }
+
+    async function runKdfCalibration() {
+      try {
+        const result = await apiCall('security.calibrateKdf', { targetMs: 700 });
+        alert(
+          'Password hashing calibration complete.\n\n' +
+          'Current iterations: ' + Number(result.currentIterations || 0).toLocaleString() + '\n' +
+          'Recommended iterations (~700 ms target): ' + Number(result.recommendedIterations || 0).toLocaleString() + '\n\n' +
+          'The recommendation is not applied automatically.'
+        );
+      } catch (e) {
+        alert(e.message || 'Password hashing calibration failed.');
       }
     }
 
