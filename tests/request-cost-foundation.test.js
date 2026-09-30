@@ -43,3 +43,33 @@ test('all-session revocation evicts cached token hashes', () => {
   const block = src.slice(start, end);
   assert.match(block, /SessionService\._deleteCachedSession\(s\.TokenHash\)/);
 });
+
+
+test('workspace access hot path is bounded and U cache is short-lived', () => {
+  const src = source();
+  const repoStart = src.indexOf('var MasterRepository');
+  const accessStart = src.indexOf('getWorkspaceAccessForUser(userId)', repoStart);
+  const accessEnd = src.indexOf('getWorkspaceAccessForWorkspace', accessStart);
+  const accessBlock = src.slice(accessStart, accessEnd);
+
+  assert.match(src, /findRowsByKey\(tabName, columnName, value/);
+  assert.match(accessBlock, /findRowsByKey/);
+  assert.doesNotMatch(accessBlock, /getTableData/);
+  assert.match(src, /return 'U:' \+ String\(userId \|\| ''\)/);
+  assert.match(src, /CacheService\.getScriptCache\(\)\.put\(key, raw, 60\)/);
+  assert.match(src, /invalidateUserCache\(userId\)/);
+});
+
+test('revoke-all rotates account session epoch without scanning Sessions', () => {
+  const src = source();
+  const repoStart = src.indexOf('var MasterRepository');
+  const start = src.indexOf('revokeAllUserSessions(userId) {', repoStart);
+  const end = src.indexOf('/* ------------------- REQUESTS', start);
+  const block = src.slice(start, end);
+
+  assert.match(block, /return this\.bumpSessionEpoch\(userId\)/);
+  assert.doesNotMatch(block, /getTableData/);
+  assert.match(src, /AccountEpoch/);
+  assert.match(src, /SessionEpoch/);
+  assert.match(src, /sessionEpoch !== currentEpoch/);
+});
