@@ -14,3 +14,6 @@ pnpm-debug.log*
 Thumbs.db
 *.swp
 *.swo
+
+# Generated visual walkthrough
+artifacts/screenshots/
