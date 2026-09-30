@@ -88,8 +88,8 @@ test('installer patches only the dedicated bootstrap sentinels', () => {
   assert.match(code, /__FLINK_INSTALLER_MASTER_SPREADSHEET_ID__/);
   assert.match(code, /__FLINK_INSTALLER_OWNER_EMAIL__/);
   assert.match(code, /file\.name === 'Code'/);
-  assert.match(code, /source\.split\(masterSentinel\)/);
-  assert.match(code, /source\.split\(ownerSentinel\)/);
+  assert.match(code, /\.split\(masterSentinel\)\.join/);
+  assert.match(code, /\.split\(ownerSentinel\)\.join/);
   assert.match(code, /escapeSingleQuotedJs_\(ownerEmail\)/);
 });
 
