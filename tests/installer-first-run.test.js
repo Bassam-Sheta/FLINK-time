@@ -78,5 +78,5 @@ test('installer UI teaches direct privileged access and simple Sheet-menu setup'
   assert.match(readme, /Normal installers do not need npm, Node\.js, Git, a command line, or a setup key/);
   assert.match(readme, /FLINK Time → Prepare Installation/);
   assert.match(installGuide, /FLINK Time → 1\. Prepare Installation/);
-  assert.match(installGuide, /Execute as: \*\*Me\*\*/);
+  assert.match(installGuide, /\*\*Execute as: Me\*\*/);
 });
