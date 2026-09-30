@@ -4587,8 +4587,7 @@ var MasterRepository = (typeof global !== 'undefined' && global.MasterRepository
   },
 
   updateCredentials(userId, updates) {
-    const { rows } = this.getTableData(CONSTANTS.MASTER_TABS.CREDENTIALS);
-    const cred = rows.find(r => r.UserID === userId);
+    const cred = this.getCredentials(userId);
     if (!cred) throw new AppError(ERROR_CODES.NOT_FOUND, `Credentials for ${userId} not found.`);
     this.updateRow(CONSTANTS.MASTER_TABS.CREDENTIALS, cred._rowIndex, updates);
     return { ...cred, ...updates };
@@ -4959,17 +4958,16 @@ var MasterRepository = (typeof global !== 'undefined' && global.MasterRepository
       if (!user) throw new AppError(ERROR_CODES.NOT_FOUND, `User ${userId} not found.`);
 
       if (user.Status === CONSTANTS.ACCOUNT_STATUS.LOCKED) {
-        this.updateRow(CONSTANTS.MASTER_TABS.ACCOUNTS, user._rowIndex, {
+        this.updateAccount(userId, {
           Status: CONSTANTS.ACCOUNT_STATUS.ACTIVE,
           UpdatedAt: new Date().toISOString(),
           UpdatedBy: 'SUPER_ADMIN'
         });
       }
 
-      const { rows: credRows } = this.getTableData(CONSTANTS.MASTER_TABS.CREDENTIALS);
-      const cred = credRows.find(c => c.UserID === userId);
+      const cred = this.getCredentials(userId);
       if (cred) {
-        this.updateRow(CONSTANTS.MASTER_TABS.CREDENTIALS, cred._rowIndex, {
+        this.updateCredentials(userId, {
           FailedLoginCount: 0,
           LockUntil: ''
         });
