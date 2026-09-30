@@ -34,10 +34,10 @@ No other `.gs` file is required for deployment. npm, Node.js, Playwright, GitHub
 Timer, My Time, self-scoped Reports, Account.
 
 ### ADMIN portal
-Manager workspace, assigned-workspace Reports, Account.
+Personal Timer and My Time, Manager workspace, assigned-workspace Reports, Account.
 
 ### SUPER_ADMIN portal
-Super Admin control center, Manager workspace, Reports, Account, first-run setup.
+Personal Timer and My Time, Super Admin control center, Manager workspace, Reports, Account, first-run setup.
 
 Client-side portal separation is a usability layer only. Server-side `ACTION_PERMISSIONS`, session validation, workspace ACLs, and role checks remain the security authority.
 
