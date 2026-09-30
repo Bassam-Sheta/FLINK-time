@@ -20,7 +20,7 @@ test('request-time master lookups use bounded TextFinder reads', () => {
   assert.match(a, /findRowByKey/);
   assert.doesNotMatch(a, /getTableData/);
 
-  const s0 = src.indexOf('findSessionByTokenHashFast(tokenHash)');
+  const s0 = src.indexOf('findSessionByTokenHashFast(tokenHash)', repoStart);
   const s1 = src.indexOf('revokeAllUserSessions(userId)', s0);
   const s = src.slice(s0, s1);
   assert.match(s, /findRowByKey/);
