@@ -76,7 +76,8 @@ test('installer UI teaches direct privileged access and simple Sheet-menu setup'
   assert.doesNotMatch(superAdmin, /Super Admin Google Sites page/);
 
   assert.match(readme, /Normal installers do \*\*not\*\* need GitHub, npm, Node\.js, Git, PowerShell, source-file copying, a setup key, or the Apps Script deployment screens/);
-  assert.match(readme, /FLINK Time → Prepare Installation/);
+  assert.match(readme, /Recommended: Automated Installer/);
+  assert.match(readme, /AUTHORIZE FLINK TIME/);
   assert.match(installGuide, /FLINK Time → 1\. Prepare Installation/);
   assert.match(installGuide, /\*\*Execute as: Me\*\*/);
 });
