@@ -194,7 +194,7 @@ var CONSTANTS = {
     STEP_UP_TTL_MINUTES: 5,
     MAX_SINGLE_ENTRY_HOURS: 24,
     DASHBOARD_LIVE_WINDOW_SECONDS: 60,
-    SESSION_RETENTION_DAYS: 30
+    SESSION_RETENTION_DAYS: 7
   },
 
   SECURITY: {
@@ -4437,6 +4437,20 @@ var MasterRepository = (typeof global !== 'undefined' && global.MasterRepository
       throw new AppError(ERROR_CODES.NOT_FOUND, `Master tab '${tabName}' does not exist.`);
     }
     sheet.deleteRow(rowIndex);
+    this._invalidateTable(tabName);
+  },
+
+  deleteRows(tabName, startRow, howMany) {
+    const count = Number(howMany || 0);
+    if (!Number.isInteger(startRow) || startRow < 2 || !Number.isInteger(count) || count < 1) {
+      throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'Invalid batch row deletion request.', 400);
+    }
+    const ss = this.getMasterSpreadsheet();
+    const sheet = ss.getSheetByName(tabName);
+    if (!sheet) {
+      throw new AppError(ERROR_CODES.NOT_FOUND, `Master tab '${tabName}' does not exist.`);
+    }
+    sheet.deleteRows(startRow, count);
     this._invalidateTable(tabName);
   },
 
@@ -12386,12 +12400,29 @@ var JobService = (typeof global !== 'undefined' && global.JobService) || {
         })
         .sort((a, b) => b._rowIndex - a._rowIndex);
 
-      for (const session of purgeRows) {
-        MasterRepository.deleteRow(
+      // Delete contiguous row groups from highest to lowest so row shifts
+      // never invalidate a later group. This keeps service calls bounded by
+      // fragmentation rather than by the number of retained sessions.
+      for (let i = 0; i < purgeRows.length;) {
+        let high = purgeRows[i]._rowIndex;
+        let low = high;
+        let count = 1;
+        let j = i + 1;
+        while (
+          j < purgeRows.length &&
+          purgeRows[j]._rowIndex === low - 1
+        ) {
+          low = purgeRows[j]._rowIndex;
+          count++;
+          j++;
+        }
+        MasterRepository.deleteRows(
           CONSTANTS.MASTER_TABS.SESSIONS,
-          session._rowIndex
+          low,
+          count
         );
-        purgedSessionsCount++;
+        purgedSessionsCount += count;
+        i = j;
       }
 
       // MFA challenges are one-per-user, but failed/abandoned challenges should
