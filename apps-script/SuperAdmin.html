@@ -822,8 +822,8 @@
     }
 
     function embedAllowedViews() {
-      if (EMBED_MODE === 'ADMIN') return new Set(['admin', 'reports', 'account']);
-      if (EMBED_MODE === 'SUPER_ADMIN') return new Set(['superadmin', 'admin', 'reports', 'account']);
+      if (EMBED_MODE === 'ADMIN') return new Set(['timer', 'mytime', 'admin', 'reports', 'account']);
+      if (EMBED_MODE === 'SUPER_ADMIN') return new Set(['timer', 'mytime', 'superadmin', 'admin', 'reports', 'account']);
       return new Set(['timer', 'mytime', 'reports', 'account']);
     }
 
@@ -1179,7 +1179,7 @@
 
       buildNavigation();
       navigate(embedDefaultView());
-      if (EMBED_MODE === 'USER') loadWorkspaceData();
+      loadWorkspaceData();
     }
 
     function buildNavigation() {
@@ -1189,12 +1189,16 @@
       let links;
       if (EMBED_MODE === 'ADMIN') {
         links = [
+          { id: 'timer', label: 'Timer' },
+          { id: 'mytime', label: 'My Time' },
           { id: 'admin', label: 'Manager' },
           { id: 'reports', label: 'Reports' },
           { id: 'account', label: 'Account' }
         ];
       } else if (EMBED_MODE === 'SUPER_ADMIN') {
         links = [
+          { id: 'timer', label: 'Timer' },
+          { id: 'mytime', label: 'My Time' },
           { id: 'superadmin', label: 'Admin Console' },
           { id: 'admin', label: 'Manager' },
           { id: 'reports', label: 'Reports' },
