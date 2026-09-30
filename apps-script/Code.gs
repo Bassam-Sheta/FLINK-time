@@ -59,6 +59,25 @@ var AppError = (typeof global !== 'undefined' && global.AppError) || class AppEr
   }
 }
 
+/**
+ * Optional install-time bootstrap values.
+ *
+ * Normal/template installs leave the sentinels untouched; installerBootstrapValue_()
+ * treats them as empty. The separate official installer may replace only these two
+ * sentinel strings before uploading the five production files into a newly created
+ * bound Apps Script project.
+ */
+var INSTALLER_BOOTSTRAP = {
+  masterSpreadsheetId: '__FLINK_INSTALLER_MASTER_SPREADSHEET_ID__',
+  ownerEmail: '__FLINK_INSTALLER_OWNER_EMAIL__'
+};
+
+function installerBootstrapValue_(value) {
+  const raw = String(value || '').trim();
+  if (!raw || /^__FLINK_INSTALLER_[A-Z0-9_]+__$/.test(raw)) return '';
+  return raw;
+}
+
 /* ===== Constants.gs ===== */
 /**
  * FLINK Time & Workforce Platform — System Constants & Schema Specifications
@@ -1614,9 +1633,16 @@ var IdentityService = (typeof global !== 'undefined' && global.IdentityService) 
     }
 
     const props = PropertiesService.getScriptProperties();
-    const preparedOwner = this.normalizeEmail(
+    let preparedOwner = this.normalizeEmail(
       props.getProperty('FLINK_INSTALL_OWNER_EMAIL') || ''
     );
+    const installerOwner = this.normalizeEmail(
+      installerBootstrapValue_(
+        INSTALLER_BOOTSTRAP && INSTALLER_BOOTSTRAP.ownerEmail
+      )
+    );
+    if (!preparedOwner && installerOwner) preparedOwner = installerOwner;
+
     if (!preparedOwner) {
       throw new AppError(
         ERROR_CODES.AUTH_REQUIRED,
@@ -1634,6 +1660,22 @@ var IdentityService = (typeof global !== 'undefined' && global.IdentityService) 
         403
       );
     }
+
+    // Persist installer-injected bootstrap values only after both Google identity
+    // checks succeed. From this point onward Script Properties are authoritative.
+    if (!props.getProperty('FLINK_INSTALL_OWNER_EMAIL')) {
+      props.setProperty('FLINK_INSTALL_OWNER_EMAIL', preparedOwner);
+    }
+    const installerSpreadsheetId = installerBootstrapValue_(
+      INSTALLER_BOOTSTRAP && INSTALLER_BOOTSTRAP.masterSpreadsheetId
+    );
+    if (
+      installerSpreadsheetId &&
+      !props.getProperty('MASTER_SPREADSHEET_ID')
+    ) {
+      props.setProperty('MASTER_SPREADSHEET_ID', installerSpreadsheetId);
+    }
+
     return preparedOwner;
   },
 
@@ -4345,6 +4387,15 @@ var MasterRepository = (typeof global !== 'undefined' && global.MasterRepository
         return SpreadsheetApp.openById(id);
       }
     }
+
+    const installerSpreadsheetId = installerBootstrapValue_(
+      INSTALLER_BOOTSTRAP && INSTALLER_BOOTSTRAP.masterSpreadsheetId
+    );
+    if (installerSpreadsheetId && typeof SpreadsheetApp !== 'undefined') {
+      this.spreadsheetId = installerSpreadsheetId;
+      return SpreadsheetApp.openById(installerSpreadsheetId);
+    }
+
     if (typeof SpreadsheetApp !== 'undefined' && SpreadsheetApp.getActiveSpreadsheet) {
       const active = SpreadsheetApp.getActiveSpreadsheet();
       if (active) return active;

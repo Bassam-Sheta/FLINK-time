@@ -73,13 +73,22 @@ Client-side portal separation is a usability layer only. Server-side `ACTION_PER
 
 ## Installation and repository policy
 
-The customer-facing installation path is:
+The customer-facing template installation path is:
 
 1. copy the Master Sheet in My Drive;
 2. choose **FLINK Time → Prepare Installation**;
 3. deploy the Web App as **Me** to the Google Workspace domain;
 4. choose **FLINK Time → Open FLINK Time**;
 5. open Super Admin and complete the GUI wizard.
+
+The backend also supports a separate official API installer without weakening the
+manual path. The source contains two inert installer sentinels for Master Sheet
+ID and installation-owner email. When an authorized installer replaces those
+sentinels before uploading a newly created bound Apps Script project, first-run
+setup can resolve the Master Sheet and owner without the **Prepare Installation**
+menu step. Both the active Google identity and execute-as-deployer identity are
+still verified before the injected values are persisted or any schema/account
+mutation occurs.
 
 The active source is source-first. Compiled executables, temporary packaging output, legacy desktop clients, and duplicate Apps Script modules are not committed.
 
