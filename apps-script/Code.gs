@@ -5586,6 +5586,7 @@ var WorkspaceService = (typeof global !== 'undefined' && global.WorkspaceService
         // Set header row
         sheet.getRange(1, 1, 1, columns.length).setValues([columns]);
         sheet.setFrozenRows(1);
+        trimSheetToSchema_(sheet, columns.length, 1000);
       }
 
       // Remove original default 'Sheet1' if it is not in schema
@@ -11635,6 +11636,8 @@ var SetupService = (typeof global !== 'undefined' && global.SetupService) || {
           repairedTabs.push(`Master Header: ${tabName}`);
         }
       }
+      const trimResult = trimSheetToSchema_(sheet, columns.length, 1000);
+      if (trimResult.changed) repairedTabs.push(`Master Trim: ${tabName}`);
     }
 
     // 2. Check and repair all active Workspaces
@@ -11650,6 +11653,22 @@ var SetupService = (typeof global !== 'undefined' && global.SetupService) || {
             sheet.getRange(1, 1, 1, columns.length).setValues([columns]);
             sheet.setFrozenRows(1);
             repairedTabs.push(`Workspace ${ws.WorkspaceName} Tab: ${tabName}`);
+          } else {
+            const currentHeaders = sheet
+              .getRange(1, 1, 1, Math.max(sheet.getLastColumn(), 1))
+              .getValues()[0];
+            if (
+              currentHeaders.length < columns.length ||
+              !columns.every((c, i) => currentHeaders[i] === c)
+            ) {
+              sheet.getRange(1, 1, 1, columns.length).setValues([columns]);
+              sheet.setFrozenRows(1);
+              repairedTabs.push(`Workspace ${ws.WorkspaceName} Header: ${tabName}`);
+            }
+          }
+          const trimResult = trimSheetToSchema_(sheet, columns.length, 1000);
+          if (trimResult.changed) {
+            repairedTabs.push(`Workspace ${ws.WorkspaceName} Trim: ${tabName}`);
           }
         }
 
@@ -13883,6 +13902,50 @@ var ExportService = (typeof global !== 'undefined' && global.ExportService) || {
   }
 };
 
+function trimSheetToSchema_(sheet, columnCount, minimumRows = 1000) {
+  if (!sheet || !Number.isInteger(columnCount) || columnCount < 1) return { changed: false };
+
+  const canInspectColumns =
+    typeof sheet.getLastColumn === 'function' &&
+    typeof sheet.getMaxColumns === 'function';
+  const canInspectRows =
+    typeof sheet.getLastRow === 'function' &&
+    typeof sheet.getMaxRows === 'function';
+
+  let columnsTrimmed = 0;
+  let rowsTrimmed = 0;
+
+  if (canInspectColumns) {
+    const lastColumn = Math.max(1, Number(sheet.getLastColumn()) || 1);
+    const maxColumns = Number(sheet.getMaxColumns()) || lastColumn;
+    // Never delete populated data outside the known schema automatically.
+    if (
+      maxColumns > columnCount &&
+      lastColumn <= columnCount &&
+      typeof sheet.deleteColumns === 'function'
+    ) {
+      columnsTrimmed = maxColumns - columnCount;
+      sheet.deleteColumns(columnCount + 1, columnsTrimmed);
+    }
+  }
+
+  if (canInspectRows) {
+    const lastRow = Math.max(1, Number(sheet.getLastRow()) || 1);
+    const maxRows = Number(sheet.getMaxRows()) || lastRow;
+    const targetRows = Math.max(Number(minimumRows) || 1000, lastRow);
+    if (maxRows > targetRows && typeof sheet.deleteRows === 'function') {
+      rowsTrimmed = maxRows - targetRows;
+      sheet.deleteRows(targetRows + 1, rowsTrimmed);
+    }
+  }
+
+  return {
+    changed: columnsTrimmed > 0 || rowsTrimmed > 0,
+    columnsTrimmed,
+    rowsTrimmed
+  };
+}
+
 var MigrationService = (typeof global !== 'undefined' && global.MigrationService) || {
   /**
    * Bootstraps only the Master Control Sheet schema and cryptographic secret.
@@ -13896,6 +13959,7 @@ var MigrationService = (typeof global !== 'undefined' && global.MigrationService
       if (!sheet) sheet = ss.insertSheet(tabName);
       sheet.getRange(1, 1, 1, columns.length).setValues([columns]);
       sheet.setFrozenRows(1);
+      trimSheetToSchema_(sheet, columns.length, 1000);
     }
 
     const defaultSheet = ss.getSheetByName('Sheet1');
