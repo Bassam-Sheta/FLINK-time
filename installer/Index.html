@@ -1,0 +1,150 @@
+<!doctype html>
+<html>
+<head>
+  <base target="_top">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Install FLINK Time</title>
+  <style>
+    :root {
+      --bg:#0b111c; --card:#121b2b; --card2:#1c283a; --line:#2a3850;
+      --text:#f8fafc; --muted:#9caac0; --blue:#3b82f6; --green:#10b981;
+      --amber:#f59e0b; --red:#ef4444;
+    }
+    *{box-sizing:border-box}
+    body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 Arial,sans-serif}
+    main{max-width:820px;margin:0 auto;padding:52px 22px 80px}
+    .brand{font-size:30px;font-weight:800;margin-bottom:8px}
+    .brand span{color:var(--blue)}
+    .lead{color:var(--muted);font-size:17px;margin:0 0 28px}
+    .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:22px;margin:16px 0}
+    .step{display:flex;gap:16px;align-items:flex-start}
+    .num{width:34px;height:34px;border-radius:50%;display:grid;place-items:center;background:var(--card2);font-weight:800;flex:0 0 auto}
+    h2{font-size:18px;margin:2px 0 6px}
+    p{margin:6px 0;color:var(--muted)}
+    a{color:#7db1ff}
+    button,.btn{border:0;border-radius:8px;padding:12px 18px;font-weight:800;cursor:pointer;text-decoration:none;display:inline-block}
+    .primary{background:var(--blue);color:white}
+    .secondary{background:var(--card2);color:white;border:1px solid var(--line)}
+    button:disabled{opacity:.55;cursor:not-allowed}
+    #status{display:none;margin-top:20px}
+    .ok{border-color:#165f4b}.bad{border-color:#7f1d1d}
+    .links{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px;margin-top:16px}
+    .links a{text-align:center}
+    .small{font-size:12px;color:var(--muted)}
+    .spinner{display:inline-block;width:14px;height:14px;border:2px solid #ffffff55;border-top-color:white;border-radius:50%;animation:spin .8s linear infinite;vertical-align:-2px;margin-right:7px}
+    @keyframes spin{to{transform:rotate(360deg)}}
+  </style>
+</head>
+<body>
+<main>
+  <div class="brand"><span>FLINK</span> Time Installer</div>
+  <p class="lead">This installer creates and deploys a fresh FLINK Time system for your Google Workspace account. Google security approvals remain under your control.</p>
+
+  <div class="card step">
+    <div class="num">1</div>
+    <div>
+      <h2>Allow Apps Script API access once</h2>
+      <p>Google keeps script-management API access off by default. Open the Google setting below, enable <strong>Google Apps Script API</strong>, then return here.</p>
+      <a class="btn secondary" id="apiSettings" target="_blank" rel="noopener">Open Google API setting</a>
+    </div>
+  </div>
+
+  <div class="card step">
+    <div class="num">2</div>
+    <div style="width:100%">
+      <h2>Install FLINK Time</h2>
+      <p>This button creates the Master Sheet, creates the bound Apps Script project, uploads the five production files, creates a version, and deploys the Web App. No deployment screens are required.</p>
+      <button id="installBtn" class="primary" onclick="startInstall()">INSTALL FLINK TIME</button>
+      <div class="small" style="margin-top:10px">Keep this page open until installation finishes.</div>
+    </div>
+  </div>
+
+  <div id="status" class="card"></div>
+</main>
+
+<script>
+  let pendingSetupWindow = null;
+
+  function escapeHtml(value) {
+    return String(value == null ? '' : value).replace(/[&<>"']/g, ch => ({
+      '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+    })[ch]);
+  }
+
+  function loadInfo() {
+    google.script.run
+      .withSuccessHandler(info => {
+        document.getElementById('apiSettings').href = info.apiSettingsUrl;
+      })
+      .withFailureHandler(() => {})
+      .getInstallerInfo();
+  }
+
+  function startInstall() {
+    const btn = document.getElementById('installBtn');
+    const status = document.getElementById('status');
+
+    btn.disabled = true;
+    status.style.display = 'block';
+    status.className = 'card';
+    status.innerHTML =
+      '<strong><span class="spinner"></span>Installing FLINK Time…</strong>' +
+      '<p>Google is creating and deploying your new system. Do not close this page.</p>';
+
+    // Open synchronously so browsers do not block the final setup tab.
+    pendingSetupWindow = window.open('about:blank', 'flink_time_setup');
+
+    google.script.run
+      .withSuccessHandler(result => finishInstall(result))
+      .withFailureHandler(err => finishInstall({
+        ok:false,
+        message:(err && err.message) || 'Installer request failed.'
+      }))
+      .installFlinkTime();
+  }
+
+  function finishInstall(result) {
+    const btn = document.getElementById('installBtn');
+    const status = document.getElementById('status');
+
+    if (!result || !result.ok) {
+      if (pendingSetupWindow && !pendingSetupWindow.closed) pendingSetupWindow.close();
+      pendingSetupWindow = null;
+      btn.disabled = false;
+      status.className = 'card bad';
+
+      const settings = result && result.apiSettingsUrl
+        ? '<p><a class="btn secondary" target="_blank" rel="noopener" href="' +
+          escapeHtml(result.apiSettingsUrl) + '">Open Google API setting</a></p>'
+        : '';
+
+      status.innerHTML =
+        '<strong style="color:var(--red)">Installation did not complete.</strong>' +
+        '<p>' + escapeHtml(result && result.message || 'Unknown installation error.') + '</p>' +
+        settings;
+      return;
+    }
+
+    btn.disabled = true;
+    status.className = 'card ok';
+    status.innerHTML =
+      '<strong style="color:var(--green)">FLINK Time is deployed.</strong>' +
+      '<p>Your Master Sheet and Web App were created successfully. The Super Admin tab opens next. If Google asks for FLINK Time Drive/Sheets authorization, click AUTHORIZE FLINK TIME, approve Google’s consent screen, then continue setup.</p>' +
+      '<div class="links">' +
+        '<a class="btn primary" target="_blank" rel="noopener" href="' + escapeHtml(result.superAdminUrl) + '">Open Super Admin Setup</a>' +
+        '<a class="btn secondary" target="_blank" rel="noopener" href="' + escapeHtml(result.spreadsheetUrl) + '">Open Master Sheet</a>' +
+        '<a class="btn secondary" target="_blank" rel="noopener" href="' + escapeHtml(result.adminUrl) + '">Open Admin</a>' +
+        '<a class="btn secondary" target="_blank" rel="noopener" href="' + escapeHtml(result.employeeUrl) + '">Open Employee Portal</a>' +
+      '</div>';
+
+    if (pendingSetupWindow && !pendingSetupWindow.closed) {
+      pendingSetupWindow.location.replace(result.superAdminUrl);
+      pendingSetupWindow.focus();
+    }
+  }
+
+  window.addEventListener('DOMContentLoaded', loadInfo);
+</script>
+</body>
+</html>
