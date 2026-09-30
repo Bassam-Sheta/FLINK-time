@@ -94,6 +94,17 @@ API-installed copies have a first-run self-authorization gate. Before serving th
 
 The active source remains source-first. Compiled executables, temporary packaging output, legacy desktop clients, and duplicate Apps Script modules are not committed.
 
+## Settings catalog and feature flags (WP5)
+
+- `SETTINGS_CATALOG` is the single schema for configurable global/workspace settings: key, group, label, type, default, limits/options, scope, step-up requirement, and help text.
+- Super Admin uses `settings.getCatalog` and step-up-protected `settings.patch`; the Settings GUI is generated from the catalog rather than hard-coded fields.
+- Global values live in `GlobalSettings`; workspace values live in each workspace's `WorkspaceSettings`.
+- `Flags` performs one cached global `FLAGS` read per request (with durable Sheet fallback) and caches workspace flags per request. Patches invalidate the cache.
+- Server-side feature guards are authoritative. Report export and live view already reject requests with `FEATURE_DISABLED` when their workspace flag is off; later work packages attach the remaining planned flags to their features.
+- Session idle/absolute timeout settings are sourced from `SESSION_IDLE_MINUTES` and `SESSION_MAX_HOURS`, with existing hard-coded limits retained as fail-safe fallbacks.
+- `PBKDF2_ITERATIONS` remains bounded server-side to 10,000–1,000,000 and is compatible with WP1 upgrade-on-login.
+- `FEATURE_TIMESHEET_APPROVAL` defaults to false in preparation for WP3; WP3 attaches the approval actions/UI to that flag.
+
 ## Request-cost hardening (WP1 in progress)
 
 Authenticated request paths no longer require whole-table scans for session token, account ID/username, credentials, or workspace-ID lookups. These hot-path reads use bounded TextFinder column searches followed by a single-row read.

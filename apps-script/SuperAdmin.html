@@ -4012,69 +4012,144 @@
       }
     }
 
-    /* Subtab 14: System Settings */
+    /* Subtab 14: Catalog-driven System Settings */
+    function createCatalogSettingControl(entry) {
+      const wrapper = document.createElement('div');
+      wrapper.style.marginBottom = '1rem';
+
+      const label = document.createElement('label');
+      label.textContent = entry.label + (entry.scope === 'WORKSPACE' ? ' — Workspace' : ' — Global');
+
+      let input;
+      if (entry.type === 'bool') {
+        input = document.createElement('select');
+        input.add(new Option('Enabled', 'true'));
+        input.add(new Option('Disabled', 'false'));
+        input.value = entry.value === true ? 'true' : 'false';
+      } else if (entry.type === 'select') {
+        input = document.createElement('select');
+        (entry.options || []).forEach(option => input.add(new Option(String(option), String(option))));
+        input.value = String(entry.value === undefined ? entry.default : entry.value);
+      } else {
+        input = document.createElement('input');
+        input.type = entry.type === 'number' ? 'number' : 'text';
+        if (entry.min !== null && entry.min !== undefined) input.min = String(entry.min);
+        if (entry.max !== null && entry.max !== undefined) input.max = String(entry.max);
+        input.value = String(entry.value === undefined ? entry.default : entry.value);
+      }
+
+      input.className = 'catalog-setting-input';
+      input.dataset.settingKey = entry.key;
+      input.dataset.settingScope = entry.scope;
+      input.dataset.settingType = entry.type;
+
+      const hint = document.createElement('div');
+      hint.className = 'field-hint';
+      hint.textContent = String(entry.help || '');
+
+      wrapper.append(label, input, hint);
+      return wrapper;
+    }
+
     async function renderSaSettings() {
       const container = document.getElementById('saSubtabContent');
-      try {
-        const settings = await apiCall('settings.get');
-        container.innerHTML = `
-          <div class="card">
-            <div class="card-header">
-              <div>
-                <div class="card-title">System Settings & Governance</div>
-                <div class="card-subtitle">Configured without ever touching raw spreadsheet formulas</div>
-              </div>
-              <button class="btn btn-sm" onclick="saveGlobalSettings()">Save Settings</button>
-            </div>
-            <div class="grid-2" style="margin-bottom: 1.5rem;">
-              <div>
-                <label>Company Legal Name</label>
-                <input type="text" id="stCompanyName">
-                <div class="field-hint">Used across headers, export manifests, and PDF titles.</div>
-              </div>
-              <div>
-                <label>Default Timezone</label>
-                <input type="text" id="stTimezone">
-                <div class="field-hint">Timezone for weekly rollups and timesheet date cuts.</div>
-              </div>
-            </div>
-            <div class="grid-2" style="margin-bottom: 1.5rem;">
-              <div>
-                <label>Session Idle Timeout (Hours)</label>
-                <input type="number" id="stIdleTimeout">
-                <div class="field-hint">Users inactive for longer than this must sign in again.</div>
-              </div>
-              <div>
-                <label>Auto-Stop Long Timers (Hours)</label>
-                <input type="number" id="stAutoStop">
-                <div class="field-hint">Prevents runaway timers left active overnight.</div>
-              </div>
-            </div>
-          </div>
-        `;
+      container.replaceChildren();
 
-        document.getElementById('stCompanyName').value = String(settings.COMPANY_NAME || 'FLINK Business Solutions');
-        document.getElementById('stTimezone').value = String(settings.DEFAULT_TIMEZONE || 'Africa/Cairo');
-        document.getElementById('stIdleTimeout').value = String(settings.IDLE_TIMEOUT_HOURS || 8);
-        document.getElementById('stAutoStop').value = String(settings.AUTO_STOP_HOURS || 14);
+      try {
+        const response = await apiCall('settings.getCatalog', {
+          workspaceId: state.currentWorkspace || ''
+        });
+        const catalog = Array.isArray(response.catalog) ? response.catalog : [];
+
+        const header = document.createElement('div');
+        header.className = 'card';
+
+        const headerRow = document.createElement('div');
+        headerRow.className = 'card-header';
+        const titleWrap = document.createElement('div');
+        const title = document.createElement('div');
+        title.className = 'card-title';
+        title.textContent = 'System Settings & Governance';
+        const subtitle = document.createElement('div');
+        subtitle.className = 'card-subtitle';
+        subtitle.textContent = state.currentWorkspace
+          ? 'Global settings plus workspace settings for the selected workspace.'
+          : 'Global settings. Select a workspace to edit workspace-level controls.';
+        titleWrap.append(title, subtitle);
+
+        const save = document.createElement('button');
+        save.className = 'btn btn-sm';
+        save.textContent = 'Save Settings';
+        save.onclick = saveCatalogSettings;
+        headerRow.append(titleWrap, save);
+        header.appendChild(headerRow);
+        container.appendChild(header);
+
+        const groups = new Map();
+        catalog.forEach(entry => {
+          if (!groups.has(entry.group)) groups.set(entry.group, []);
+          groups.get(entry.group).push(entry);
+        });
+
+        groups.forEach((entries, groupName) => {
+          const card = document.createElement('div');
+          card.className = 'card';
+
+          const groupTitle = document.createElement('div');
+          groupTitle.className = 'card-title';
+          groupTitle.style.marginBottom = '1rem';
+          groupTitle.textContent = groupName;
+
+          const grid = document.createElement('div');
+          grid.className = 'grid-2';
+          entries.forEach(entry => {
+            const control = createCatalogSettingControl(entry);
+            if (entry.scope === 'WORKSPACE' && !state.currentWorkspace) {
+              const input = control.querySelector('.catalog-setting-input');
+              if (input) input.disabled = true;
+            }
+            grid.appendChild(control);
+          });
+
+          card.append(groupTitle, grid);
+          container.appendChild(card);
+        });
       } catch (e) {
         renderError(container, '', e);
       }
     }
 
-    async function saveGlobalSettings() {
+    async function saveCatalogSettings() {
+      const globalSettings = {};
+      const workspaceSettings = {};
+
+      document.querySelectorAll('.catalog-setting-input').forEach(input => {
+        const key = input.dataset.settingKey || '';
+        const scope = input.dataset.settingScope || '';
+        if (!key || input.disabled) return;
+        if (scope === 'WORKSPACE') workspaceSettings[key] = input.value;
+        else globalSettings[key] = input.value;
+      });
+
       try {
-        await apiCall('settings.save', {
-          settings: {
-            COMPANY_NAME: document.getElementById('stCompanyName').value,
-            DEFAULT_TIMEZONE: document.getElementById('stTimezone').value,
-            IDLE_TIMEOUT_HOURS: document.getElementById('stIdleTimeout').value,
-            AUTO_STOP_HOURS: document.getElementById('stAutoStop').value
-          }
-        });
-        alert('Global settings saved successfully.');
+        if (Object.keys(globalSettings).length) {
+          await apiCall('settings.patch', {
+            scope: 'GLOBAL',
+            settings: globalSettings
+          });
+        }
+        if (Object.keys(workspaceSettings).length) {
+          if (!state.currentWorkspace) throw new Error('Select a workspace before saving workspace settings.');
+          await apiCall('settings.patch', {
+            scope: 'WORKSPACE',
+            workspaceId: state.currentWorkspace,
+            settings: workspaceSettings
+          });
+        }
+        alert('Settings saved successfully.');
+        await renderSaSettings();
       } catch (e) {
-        alert(e.message);
+        alert(e.message || 'Settings could not be saved.');
       }
     }
 

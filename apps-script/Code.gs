@@ -28,6 +28,7 @@ var ERROR_CODES = {
   ACTIVE_TIMER_EXISTS: 'ACTIVE_TIMER_EXISTS',
   TIMER_NOT_FOUND: 'TIMER_NOT_FOUND',
   ENTRY_LOCKED: 'ENTRY_LOCKED',
+  FEATURE_DISABLED: 'FEATURE_DISABLED',
   CONFLICT: 'CONFLICT',
   RATE_LIMITED: 'RATE_LIMITED',
   SERVER_BUSY: 'SERVER_BUSY',
@@ -448,6 +449,40 @@ var WORKSPACE_SCHEMA = {
   ]
 };
 
+/* ===== SettingsCatalog.gs ===== */
+/**
+ * Canonical settings catalog. Adding a configurable feature requires a catalog
+ * entry plus a server-side guard; the Super Admin UI renders this catalog.
+ */
+var SETTINGS_CATALOG = [
+  { key:'COMPANY_NAME', group:'General', label:'Company Legal Name', type:'text', default:'FLINK Business Solutions', min:1, max:120, options:[], scope:'GLOBAL', stepUp:false, help:'Company name shown in system-facing labels and exports.' },
+  { key:'DEFAULT_TIMEZONE', group:'General', label:'Default Timezone', type:'text', default:'Africa/Cairo', min:1, max:64, options:[], scope:'GLOBAL', stepUp:false, help:'Default IANA timezone for new workspaces.' },
+  { key:'AUTO_STOP_HOURS', group:'Time Tracking', label:'Auto-stop Long Timers (Hours)', type:'number', default:14, min:1, max:168, options:[], scope:'GLOBAL', stepUp:false, help:'Maximum timer length before automated protection applies.' },
+  { key:'IDLE_TIMEOUT_HOURS', group:'Compatibility', label:'Legacy Idle Timeout (Hours)', type:'number', default:8, min:1, max:24, options:[], scope:'GLOBAL', stepUp:false, help:'Compatibility setting retained for older installations.', visible:false },
+
+  { key:'PASSWORD_RECOVERY_EMAIL', group:'Security', label:'Email Password Recovery', type:'bool', default:false, min:null, max:null, options:[], scope:'GLOBAL', stepUp:true, help:'Enables the email recovery workflow once WP6 is installed.' },
+  { key:'MFA_REQUIRED', group:'Security', label:'Require MFA', type:'bool', default:true, min:null, max:null, options:[], scope:'GLOBAL', stepUp:true, help:'Security policy flag for mandatory authenticator verification.' },
+  { key:'SESSION_IDLE_MINUTES', group:'Security', label:'Session Idle Timeout (Minutes)', type:'number', default:480, min:5, max:1440, options:[], scope:'GLOBAL', stepUp:true, help:'Maximum inactivity before a session expires.' },
+  { key:'SESSION_MAX_HOURS', group:'Security', label:'Maximum Session Length (Hours)', type:'number', default:24, min:1, max:168, options:[], scope:'GLOBAL', stepUp:true, help:'Absolute maximum session lifetime.' },
+  { key:'PBKDF2_ITERATIONS', group:'Security', label:'Password Hash Iterations', type:'number', default:10000, min:10000, max:1000000, options:[], scope:'GLOBAL', stepUp:true, help:'PBKDF2 work factor. Use System Health calibration before increasing it.' },
+
+  { key:'FEATURE_TIMESHEET_APPROVAL', group:'Features', label:'Timesheet Approval', type:'bool', default:false, min:null, max:null, options:[], scope:'WORKSPACE', stepUp:true, help:'Approval workflow feature flag. Target design keeps this off.' },
+  { key:'ALLOW_USER_PROJECT_SWITCH', group:'Time Tracking', label:'Allow Project Switching', type:'bool', default:true, min:null, max:null, options:[], scope:'WORKSPACE', stepUp:false, help:'Allows users to change projects according to WP3 rules.' },
+  { key:'ENTRY_EDIT_WINDOW_DAYS', group:'Time Tracking', label:'Entry Edit Window (Days)', type:'number', default:0, min:0, max:3650, options:[], scope:'WORKSPACE', stepUp:false, help:'0 means no edit-age limit.' },
+  { key:'ALLOW_MANUAL_ENTRIES', group:'Time Tracking', label:'Allow Manual Entries', type:'bool', default:true, min:null, max:null, options:[], scope:'WORKSPACE', stepUp:false, help:'Allows manual time entry creation.' },
+  { key:'ALLOW_USER_DELETE_ENTRY', group:'Time Tracking', label:'Allow User Entry Deletion', type:'bool', default:true, min:null, max:null, options:[], scope:'WORKSPACE', stepUp:false, help:'Allows users to delete their own entries.' },
+  { key:'REQUIRE_DESCRIPTION', group:'Time Tracking', label:'Require Description', type:'bool', default:false, min:null, max:null, options:[], scope:'WORKSPACE', stepUp:false, help:'Requires a description on tracked time.' },
+  { key:'FEATURE_TAGS', group:'Features', label:'Tags', type:'bool', default:true, min:null, max:null, options:[], scope:'WORKSPACE', stepUp:false, help:'Enables tags in the workspace.' },
+  { key:'FEATURE_TASKS', group:'Features', label:'Tasks', type:'bool', default:true, min:null, max:null, options:[], scope:'WORKSPACE', stepUp:false, help:'Enables project tasks in the workspace.' },
+  { key:'FEATURE_LIVE_VIEW', group:'Features', label:'Live View', type:'bool', default:true, min:null, max:null, options:[], scope:'WORKSPACE', stepUp:false, help:'Enables live workforce views.' },
+  { key:'FEATURE_REPORT_EXPORT', group:'Features', label:'Report Export', type:'bool', default:true, min:null, max:null, options:[], scope:'WORKSPACE', stepUp:false, help:'Enables report export on the server.' },
+  { key:'FEATURE_SAVED_DASHBOARDS', group:'Features', label:'Saved Dashboards', type:'bool', default:true, min:null, max:null, options:[], scope:'WORKSPACE', stepUp:false, help:'Enables saved dashboard functionality.' }
+];
+
+function getSettingCatalogEntry_(key) {
+  return SETTINGS_CATALOG.find(entry => entry.key === String(key || '')) || null;
+}
+
 /* ===== Validation.gs ===== */
 /**
  * FLINK Time & Workforce Platform — Input Validation & Sanitization
@@ -543,88 +578,83 @@ var Validation = {
     return role;
   },
 
-  validateGlobalSettingsPatch(settings) {
+  validateSettingsPatch(settings, scope = 'GLOBAL') {
     if (!settings || typeof settings !== 'object' || Array.isArray(settings)) {
-      throw new AppError(
-        ERROR_CODES.VALIDATION_ERROR,
-        'A settings object is required.',
-        400
-      );
+      throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'A settings object is required.', 400);
+    }
+    const normalizedScope = String(scope || 'GLOBAL').toUpperCase();
+    if (!['GLOBAL', 'WORKSPACE'].includes(normalizedScope)) {
+      throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'Setting scope must be GLOBAL or WORKSPACE.', 400);
     }
 
-    const allowedKeys = new Set([
-      'COMPANY_NAME',
-      'DEFAULT_TIMEZONE',
-      'IDLE_TIMEOUT_HOURS',
-      'AUTO_STOP_HOURS'
-    ]);
     const keys = Object.keys(settings);
-    if (keys.length === 0 || keys.length > allowedKeys.size) {
-      throw new AppError(
-        ERROR_CODES.VALIDATION_ERROR,
-        'One or more supported settings are required.',
-        400
-      );
+    if (keys.length === 0) {
+      throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'At least one setting is required.', 400);
     }
 
     const clean = {};
     for (const key of keys) {
-      if (!allowedKeys.has(key)) {
+      const entry = getSettingCatalogEntry_(key);
+      if (!entry || entry.scope !== normalizedScope) {
+        const label = normalizedScope === 'GLOBAL' ? 'global setting' : 'workspace setting';
+        throw new AppError(ERROR_CODES.VALIDATION_ERROR, `Unsupported ${label}: ${key}`, 400);
+      }
+      const raw = settings[key];
+
+      if (entry.type === 'bool') {
+        if (![true, false, 1, 0, 'true', 'false', 'TRUE', 'FALSE', '1', '0'].includes(raw)) {
+          throw new AppError(ERROR_CODES.VALIDATION_ERROR, `${entry.label} must be true or false.`, 400);
+        }
+        clean[key] = (raw === true || raw === 1 || raw === 'true' || raw === 'TRUE' || raw === '1')
+          ? 'true'
+          : 'false';
+        continue;
+      }
+
+      if (entry.type === 'number') {
+        const value = Number(raw);
+        if (!Number.isFinite(value) || !Number.isInteger(value)) {
+          throw new AppError(ERROR_CODES.VALIDATION_ERROR, `${entry.label} must be a whole number.`, 400);
+        }
+        if (entry.min !== null && entry.min !== undefined && value < Number(entry.min)) {
+          throw new AppError(ERROR_CODES.VALIDATION_ERROR, `${entry.label} must be at least ${entry.min}.`, 400);
+        }
+        if (entry.max !== null && entry.max !== undefined && value > Number(entry.max)) {
+          throw new AppError(ERROR_CODES.VALIDATION_ERROR, `${entry.label} must be at most ${entry.max}.`, 400);
+        }
+        clean[key] = String(value);
+        continue;
+      }
+
+      if (entry.type === 'select') {
+        const value = String(raw === null || raw === undefined ? '' : raw).trim();
+        if (!Array.isArray(entry.options) || !entry.options.includes(value)) {
+          throw new AppError(ERROR_CODES.VALIDATION_ERROR, `Invalid value for ${entry.label}.`, 400);
+        }
+        clean[key] = this.sanitizeCellValue(value);
+        continue;
+      }
+
+      const value = String(raw === null || raw === undefined ? '' : raw).trim();
+      const minLength = entry.min === null || entry.min === undefined ? 0 : Number(entry.min);
+      const maxLength = entry.max === null || entry.max === undefined ? 500 : Number(entry.max);
+      if (value.length < minLength || value.length > maxLength) {
         throw new AppError(
           ERROR_CODES.VALIDATION_ERROR,
-          `Unsupported global setting: ${key}`,
+          `${entry.label} must be between ${minLength} and ${maxLength} characters.`,
           400
         );
       }
-
-      const raw = settings[key];
-      if (key === 'COMPANY_NAME') {
-        const value = String(raw === null || raw === undefined ? '' : raw).trim();
-        if (!value || value.length > 120) {
-          throw new AppError(
-            ERROR_CODES.VALIDATION_ERROR,
-            'Company name must be between 1 and 120 characters.',
-            400
-          );
-        }
-        clean[key] = this.sanitizeCellValue(value);
-      } else if (key === 'DEFAULT_TIMEZONE') {
-        const value = String(raw === null || raw === undefined ? '' : raw).trim();
-        if (
-          !value ||
-          value.length > 64 ||
-          !/^[A-Za-z0-9_+\-/]+$/.test(value)
-        ) {
-          throw new AppError(
-            ERROR_CODES.VALIDATION_ERROR,
-            'Default timezone format is invalid.',
-            400
-          );
-        }
-        clean[key] = value;
-      } else if (key === 'IDLE_TIMEOUT_HOURS') {
-        const value = Number(raw);
-        if (!Number.isInteger(value) || value < 1 || value > 24) {
-          throw new AppError(
-            ERROR_CODES.VALIDATION_ERROR,
-            'Idle timeout must be a whole number between 1 and 24 hours.',
-            400
-          );
-        }
-        clean[key] = String(value);
-      } else if (key === 'AUTO_STOP_HOURS') {
-        const value = Number(raw);
-        if (!Number.isInteger(value) || value < 1 || value > 168) {
-          throw new AppError(
-            ERROR_CODES.VALIDATION_ERROR,
-            'Auto-stop must be a whole number between 1 and 168 hours.',
-            400
-          );
-        }
-        clean[key] = String(value);
+      if (key === 'DEFAULT_TIMEZONE' && !/^[A-Za-z0-9_+\-/]+$/.test(value)) {
+        throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'Default timezone format is invalid.', 400);
       }
+      clean[key] = this.sanitizeCellValue(value);
     }
     return clean;
+  },
+
+  validateGlobalSettingsPatch(settings) {
+    return this.validateSettingsPatch(settings, 'GLOBAL');
   },
 
   validateDateRange(startUtc, endUtc, allowFuture = false) {
@@ -1060,6 +1090,8 @@ const ACTION_PERMISSIONS = {
   // Settings & Configuration
   'settings.get': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN, CONSTANTS.ROLES.ADMIN], isWrite: false },
   'settings.save': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN], isWrite: true },
+  'settings.getCatalog': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN], isWrite: false },
+  'settings.patch': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN], isWrite: true },
 
   // Sessions & Security
   'sessions.listActive': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN], isWrite: false },
@@ -1100,6 +1132,7 @@ const PRIVILEGED_STEP_UP_ACTIONS = new Set([
   'system.health',
   'system.repair',
   'settings.save',
+  'settings.patch',
   'sessions.revoke',
   'backups.create',
   'backups.restoreApply',
@@ -1147,6 +1180,9 @@ function executeApiRequest_(action, requestData, httpMethod = 'POST') {
   // from one API request into another.
   if (typeof MasterRepository !== 'undefined' && MasterRepository.beginRequest) {
     MasterRepository.beginRequest();
+  }
+  if (typeof Flags !== 'undefined' && Flags.beginRequest) {
+    Flags.beginRequest();
   }
   if (typeof SheetRepository !== 'undefined' && SheetRepository.beginRequest) {
     SheetRepository.beginRequest();
@@ -1473,9 +1509,11 @@ function dispatchAction_(action, data) {
       return ReportService.getExceptionsReport(authContext, wsId, payload);
 
     case 'reports.exportCsv':
+      Flags.assertOn('FEATURE_REPORT_EXPORT', wsId, 'Report export is disabled for this workspace.');
       return ExportService.exportDetailedCsv(authContext, wsId, payload);
 
     case 'dashboard.radar':
+      Flags.assertOn('FEATURE_LIVE_VIEW', wsId, 'Live view is disabled for this workspace.');
       return DashboardService.getLiveWorkforceRadar(authContext, wsId);
 
     case 'dashboard.overview':
@@ -1501,6 +1539,17 @@ function dispatchAction_(action, data) {
       return SetupService.processStep(9, payload, authContext);
 
     /* ---------------- SETTINGS & CONFIGURATION ---------------- */
+    case 'settings.getCatalog':
+      return SettingsService.getCatalog(authContext, payload.workspaceId || wsId || '');
+
+    case 'settings.patch':
+      return SettingsService.patch(
+        authContext,
+        payload.scope,
+        payload.workspaceId || wsId || '',
+        payload.settings
+      );
+
     case 'settings.get': {
       AuthorizationService.assertRole(authContext, [CONSTANTS.ROLES.SUPER_ADMIN, CONSTANTS.ROLES.ADMIN]);
       const allSettings = MasterRepository.getAllGlobalSettingsStrict();
@@ -1681,6 +1730,182 @@ const App = {
 
 /** FLINK Time — Consolidated identity, authentication, authorization, session, MFA, and tracking policy services. */
 
+
+/* ===== SettingsService.gs ===== */
+var Flags = {
+  _requestCache: { FLAGS: null, workspaces: {} },
+
+  beginRequest() {
+    this._requestCache = { FLAGS: null, workspaces: {} };
+  },
+
+  _decodeValue(entry, raw) {
+    if (raw === '' || raw === null || raw === undefined) return entry.default;
+    if (entry.type === 'bool') {
+      return raw === true || raw === 1 || raw === '1' || raw === 'true' || raw === 'TRUE';
+    }
+    if (entry.type === 'number') {
+      const value = Number(raw);
+      return Number.isFinite(value) ? value : Number(entry.default);
+    }
+    return String(raw);
+  },
+
+  _loadGlobal() {
+    if (this._requestCache.FLAGS) return this._requestCache.FLAGS;
+
+    let stored = null;
+    try {
+      if (typeof CacheService !== 'undefined' && CacheService.getScriptCache) {
+        const raw = CacheService.getScriptCache().get('FLAGS');
+        if (raw) stored = JSON.parse(raw);
+      }
+    } catch (err) {
+      stored = null;
+    }
+
+    if (!stored) {
+      stored = MasterRepository.getAllGlobalSettingsStrict();
+      try {
+        if (typeof CacheService !== 'undefined' && CacheService.getScriptCache) {
+          CacheService.getScriptCache().put('FLAGS', JSON.stringify(stored), 60);
+        }
+      } catch (err) {}
+    }
+
+    this._requestCache.FLAGS = stored || {};
+    return this._requestCache.FLAGS;
+  },
+
+  _loadWorkspace(workspaceId) {
+    const id = String(workspaceId || '');
+    if (!id) return {};
+    if (!this._requestCache.workspaces[id]) {
+      this._requestCache.workspaces[id] = SheetRepository.getWorkspaceSettings(id);
+    }
+    return this._requestCache.workspaces[id];
+  },
+
+  getValue(key, workspaceId = '') {
+    const entry = getSettingCatalogEntry_(key);
+    if (!entry) {
+      throw new AppError(ERROR_CODES.VALIDATION_ERROR, `Unknown setting: ${key}`, 400);
+    }
+    const stored = entry.scope === 'WORKSPACE'
+      ? this._loadWorkspace(workspaceId)
+      : this._loadGlobal();
+    return this._decodeValue(entry, Object.prototype.hasOwnProperty.call(stored, entry.key) ? stored[entry.key] : '');
+  },
+
+  isOn(key, workspaceId = '') {
+    return this.getValue(key, workspaceId) === true;
+  },
+
+  getNumber(key, workspaceId = '') {
+    return Number(this.getValue(key, workspaceId));
+  },
+
+  assertOn(key, workspaceId = '', message = '') {
+    if (!this.isOn(key, workspaceId)) {
+      throw new AppError(
+        ERROR_CODES.FEATURE_DISABLED,
+        message || `${key} is disabled for this workspace.`,
+        403
+      );
+    }
+    return true;
+  },
+
+  invalidate() {
+    this.beginRequest();
+    try {
+      if (typeof CacheService !== 'undefined' && CacheService.getScriptCache) {
+        CacheService.getScriptCache().remove('FLAGS');
+      }
+    } catch (err) {}
+  }
+};
+
+var SettingsService = {
+  getCatalog(authContext, workspaceId = '') {
+    AuthorizationService.assertRole(authContext, [CONSTANTS.ROLES.SUPER_ADMIN]);
+    const id = String(workspaceId || '');
+    if (id && !MasterRepository.getWorkspace(id)) {
+      throw new AppError(ERROR_CODES.NOT_FOUND, `Workspace ${id} not found.`, 404);
+    }
+
+    return {
+      workspaceId: id,
+      catalog: SETTINGS_CATALOG
+        .filter(entry => entry.visible !== false)
+        .map(entry => ({
+          key: entry.key,
+          group: entry.group,
+          label: entry.label,
+          type: entry.type,
+          default: entry.default,
+          min: entry.min,
+          max: entry.max,
+          options: entry.options,
+          scope: entry.scope,
+          stepUp: entry.stepUp,
+          help: entry.help,
+          value: Flags.getValue(entry.key, entry.scope === 'WORKSPACE' ? id : '')
+        }))
+    };
+  },
+
+  patch(authContext, scope, workspaceId, settings) {
+    AuthorizationService.assertRole(authContext, [CONSTANTS.ROLES.SUPER_ADMIN]);
+    const normalizedScope = String(scope || '').toUpperCase();
+    const id = String(workspaceId || '');
+    const clean = Validation.validateSettingsPatch(settings, normalizedScope);
+
+    if (normalizedScope === 'WORKSPACE') {
+      if (!id) {
+        throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'workspaceId is required for workspace settings.', 400);
+      }
+      if (!MasterRepository.getWorkspace(id)) {
+        throw new AppError(ERROR_CODES.NOT_FOUND, `Workspace ${id} not found.`, 404);
+      }
+    }
+
+    const before = {};
+    for (const key of Object.keys(clean)) {
+      before[key] = Flags.getValue(key, normalizedScope === 'WORKSPACE' ? id : '');
+    }
+
+    const auditOk = MasterRepository.logGlobalAudit({
+      ActorUserID: authContext.userId,
+      ActorRole: authContext.role,
+      WorkspaceID: normalizedScope === 'WORKSPACE' ? id : 'MASTER',
+      EntityType: 'SETTINGS',
+      EntityID: normalizedScope === 'WORKSPACE' ? id : 'GLOBAL',
+      Action: CONSTANTS.AUDIT_EVENTS.SETTINGS_CHANGED,
+      BeforeJSON: before,
+      AfterJSON: clean,
+      Reason: `Validated ${normalizedScope.toLowerCase()} settings patch`
+    });
+    if (!auditOk) {
+      throw new AppError(
+        ERROR_CODES.CRYPTO_FAILURE,
+        'Security audit trail is unavailable. Settings were not changed.',
+        503
+      );
+    }
+
+    for (const [key, value] of Object.entries(clean)) {
+      const entry = getSettingCatalogEntry_(key);
+      if (normalizedScope === 'WORKSPACE') {
+        SheetRepository.setWorkspaceSetting(id, key, value, authContext.userId, entry.help || '');
+      } else {
+        MasterRepository.setGlobalSetting(key, value, authContext.userId, entry.help || '');
+      }
+    }
+    Flags.invalidate();
+    return { ok: true, scope: normalizedScope, workspaceId: id, settings: clean };
+  }
+};
 
 /* ===== IdentityService.gs ===== */
 /**
@@ -2691,8 +2916,16 @@ var SessionService = (typeof global !== 'undefined' && global.SessionService) ||
     const now = new Date();
     const sessionId = Validation.generateId('SES');
 
-    const idleTimeoutMs = CONSTANTS.LIMITS.SESSION_IDLE_TIMEOUT_HOURS * 3600 * 1000;
-    const absoluteTimeoutMs = CONSTANTS.LIMITS.SESSION_ABSOLUTE_TIMEOUT_HOURS * 3600 * 1000;
+    let idleTimeoutMinutes = CONSTANTS.LIMITS.SESSION_IDLE_TIMEOUT_HOURS * 60;
+    let absoluteTimeoutHours = CONSTANTS.LIMITS.SESSION_ABSOLUTE_TIMEOUT_HOURS;
+    try {
+      if (typeof Flags !== 'undefined' && Flags.getNumber) {
+        idleTimeoutMinutes = Flags.getNumber('SESSION_IDLE_MINUTES') || idleTimeoutMinutes;
+        absoluteTimeoutHours = Flags.getNumber('SESSION_MAX_HOURS') || absoluteTimeoutHours;
+      }
+    } catch (err) {}
+    const idleTimeoutMs = idleTimeoutMinutes * 60 * 1000;
+    const absoluteTimeoutMs = absoluteTimeoutHours * 3600 * 1000;
     const expiresAt = new Date(now.getTime() + idleTimeoutMs);
     const absoluteExpiresAt = new Date(now.getTime() + absoluteTimeoutMs);
 
@@ -2758,8 +2991,16 @@ var SessionService = (typeof global !== 'undefined' && global.SessionService) ||
       throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'Session record is invalid. Please sign in again.', 401);
     }
 
-    const idleTimeoutMs = CONSTANTS.LIMITS.SESSION_IDLE_TIMEOUT_HOURS * 3600 * 1000;
-    const absoluteTimeoutMs = CONSTANTS.LIMITS.SESSION_ABSOLUTE_TIMEOUT_HOURS * 3600 * 1000;
+    let idleTimeoutMinutes = CONSTANTS.LIMITS.SESSION_IDLE_TIMEOUT_HOURS * 60;
+    let absoluteTimeoutHours = CONSTANTS.LIMITS.SESSION_ABSOLUTE_TIMEOUT_HOURS;
+    try {
+      if (typeof Flags !== 'undefined' && Flags.getNumber) {
+        idleTimeoutMinutes = Flags.getNumber('SESSION_IDLE_MINUTES') || idleTimeoutMinutes;
+        absoluteTimeoutHours = Flags.getNumber('SESSION_MAX_HOURS') || absoluteTimeoutHours;
+      }
+    } catch (err) {}
+    const idleTimeoutMs = idleTimeoutMinutes * 60 * 1000;
+    const absoluteTimeoutMs = absoluteTimeoutHours * 3600 * 1000;
     const storedAbsoluteExpiresAt = new Date(session.AbsoluteExpiresAt || '').getTime();
     const absoluteExpiresAt = isNaN(storedAbsoluteExpiresAt)
       ? createdAt + absoluteTimeoutMs
@@ -5846,7 +6087,38 @@ var SheetRepository = (typeof global !== 'undefined' && global.SheetRepository) 
         try { auditLock.releaseLock(); } catch (releaseErr) {}
       }
     }
+  },
+  getWorkspaceSettings(workspaceId) {
+    const { rows } = this.getTableData(workspaceId, CONSTANTS.WORKSPACE_TABS.WORKSPACE_SETTINGS);
+    const settings = {};
+    for (const row of rows) {
+      if (row.SettingKey) settings[row.SettingKey] = row.SettingValue;
+    }
+    return settings;
+  },
+
+  setWorkspaceSetting(workspaceId, key, value, updatedBy = 'SYSTEM', description = '') {
+    const { rows } = this.getTableData(workspaceId, CONSTANTS.WORKSPACE_TABS.WORKSPACE_SETTINGS);
+    const existing = rows.find(row => row.SettingKey === key);
+    const now = new Date().toISOString();
+    if (existing) {
+      this.updateRow(workspaceId, CONSTANTS.WORKSPACE_TABS.WORKSPACE_SETTINGS, existing._rowIndex, {
+        SettingValue: String(value),
+        Description: description || existing.Description || '',
+        UpdatedAt: now,
+        UpdatedBy: updatedBy
+      });
+    } else {
+      this.appendRow(workspaceId, CONSTANTS.WORKSPACE_TABS.WORKSPACE_SETTINGS, {
+        SettingKey: key,
+        SettingValue: String(value),
+        Description: description,
+        UpdatedAt: now,
+        UpdatedBy: updatedBy
+      });
+    }
   }
+
 };
 
 /* ===== WorkspaceRouter.gs ===== */
@@ -14611,11 +14883,12 @@ function initializeInstallation_() {
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     ERROR_CODES, AppError,
-    CONSTANTS, MASTER_SCHEMA, WORKSPACE_SCHEMA, Validation,
+    CONSTANTS, MASTER_SCHEMA, WORKSPACE_SCHEMA, SETTINGS_CATALOG, Validation,
     ACTION_PERMISSIONS, PUBLIC_ACTIONS, GET_SAFE_ACTIONS,
     isHttpMethodAllowed: isHttpMethodAllowed_, App, doGet, doPost,
     handleApiRequest: handleApiRequest_, handleClientRequest, executeApiRequest: executeApiRequest_,
     dispatchAction: dispatchAction_, buildJsonResponse: buildJsonResponse_,
+    Flags, SettingsService,
     IdentityService, SecurityService, AuthorizationService,
     SessionService, AuthService, TrackingPolicyService,
     MasterRepository, SheetRepository, WorkspaceRouter,
