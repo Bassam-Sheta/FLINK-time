@@ -764,6 +764,16 @@ function doGet(e) {
   const action = params ? params.action : '';
   const view = String(params && params.view ? params.view : 'user').trim().toLowerCase();
 
+  // API-created installations can reach the Web App before the deployment
+  // owner's Drive/Sheets scopes have been granted to this new script project.
+  // Handle that specific first-run state inside the Web App instead of sending
+  // the owner into the Apps Script editor. Manual/template installations are
+  // unaffected because their installer bootstrap sentinels remain inert.
+  if (!action) {
+    const authorizationGate = maybeRenderInstallerAuthorizationGate_(view);
+    if (authorizationGate) return authorizationGate;
+  }
+
   // API GET requests are read-only; privileged/admin HTML is not served from this deployment.
   // If action query parameter is passed, treat as GET API request
   if (action) {
@@ -810,6 +820,127 @@ function doGet(e) {
       .createTextOutput('FLINK Platform Portal could not be loaded. Reference: ' + correlationId)
       .setMimeType(ContentService.MimeType.TEXT);
   }
+}
+
+function maybeRenderInstallerAuthorizationGate_(view) {
+  try {
+    if (
+      typeof PropertiesService === 'undefined' ||
+      !PropertiesService.getScriptProperties ||
+      typeof ScriptApp === 'undefined' ||
+      !ScriptApp.getAuthorizationInfo
+    ) {
+      return null;
+    }
+
+    const props = PropertiesService.getScriptProperties();
+    if (props.getProperty('FLINK_INSTALL_OWNER_EMAIL')) return null;
+
+    const installerOwner = IdentityService.normalizeEmail(
+      installerBootstrapValue_(
+        INSTALLER_BOOTSTRAP && INSTALLER_BOOTSTRAP.ownerEmail
+      )
+    );
+    if (!installerOwner) return null;
+
+    const activeEmail = IdentityService.getCurrentGoogleEmail(false);
+    if (!activeEmail || activeEmail !== installerOwner) {
+      return buildInstallerAuthorizationPage_({
+        title: 'Installation owner required',
+        message:
+          'Sign in with the Google Workspace account that installed FLINK Time before continuing first-time setup.',
+        authorizationUrl: '',
+        continueUrl: '',
+        actionLabel: ''
+      });
+    }
+
+    const authInfo = ScriptApp.getAuthorizationInfo(ScriptApp.AuthMode.FULL);
+    const status = authInfo.getAuthorizationStatus();
+    if (status !== ScriptApp.AuthorizationStatus.REQUIRED) return null;
+
+    const authorizationUrl = String(authInfo.getAuthorizationUrl() || '');
+    const serviceUrl = (
+      ScriptApp.getService &&
+      ScriptApp.getService() &&
+      ScriptApp.getService().getUrl
+    ) ? String(ScriptApp.getService().getUrl() || '') : '';
+    const safeView = ['user', 'admin', 'superadmin'].includes(view)
+      ? view
+      : 'superadmin';
+    const continueUrl = serviceUrl
+      ? serviceUrl + '?view=' + encodeURIComponent(safeView)
+      : '';
+
+    return buildInstallerAuthorizationPage_({
+      title: 'Authorize FLINK Time',
+      message:
+        'Google requires the installation owner to approve FLINK Time access to its Master Sheet and managed workspace files before first use.',
+      authorizationUrl: authorizationUrl,
+      continueUrl: continueUrl,
+      actionLabel: 'AUTHORIZE FLINK TIME'
+    });
+  } catch (err) {
+    const correlationId = Validation.generateId('ERR');
+    console.error(
+      correlationId + ' installer authorization gate error: ' +
+      (err && err.stack ? err.stack : String(err))
+    );
+    return buildInstallerAuthorizationPage_({
+      title: 'FLINK Time authorization could not be checked',
+      message:
+        'Reload this page while signed in with the installation owner account. If the problem continues, contact your FLINK Time administrator. Reference: ' +
+        correlationId,
+      authorizationUrl: '',
+      continueUrl: '',
+      actionLabel: ''
+    });
+  }
+}
+
+function buildInstallerAuthorizationPage_(options) {
+  const opts = options || {};
+  const title = escapeInstallerHtml_(opts.title || 'FLINK Time');
+  const message = escapeInstallerHtml_(opts.message || '');
+  const authorizationUrl = escapeInstallerHtml_(opts.authorizationUrl || '');
+  const continueUrl = escapeInstallerHtml_(opts.continueUrl || '');
+  const actionLabel = escapeInstallerHtml_(
+    opts.actionLabel || 'AUTHORIZE FLINK TIME'
+  );
+
+  let actions = '';
+  if (authorizationUrl) {
+    actions +=
+      '<a class="primary" target="_blank" rel="noopener" href="' +
+      authorizationUrl + '">' + actionLabel + '</a>';
+  }
+  if (continueUrl) {
+    actions +=
+      '<a class="secondary" href="' + continueUrl + '">I HAVE AUTHORIZED — CONTINUE</a>';
+  }
+
+  const html =
+    '<!doctype html><html><head><base target="_top">' +
+    '<meta name="viewport" content="width=device-width,initial-scale=1">' +
+    '<style>' +
+    'body{margin:0;background:#0b111c;color:#f8fafc;font:15px/1.5 Arial,sans-serif}' +
+    'main{max-width:680px;margin:0 auto;padding:72px 24px}' +
+    '.card{background:#121b2b;border:1px solid #2a3850;border-radius:14px;padding:28px}' +
+    'h1{margin:0 0 10px;font-size:26px}p{color:#a6b2c5;margin:0 0 22px}' +
+    '.actions{display:flex;gap:10px;flex-wrap:wrap}' +
+    'a{padding:12px 16px;border-radius:8px;text-decoration:none;font-weight:800}' +
+    '.primary{background:#3b82f6;color:#fff}.secondary{background:#1c283a;color:#fff;border:1px solid #2a3850}' +
+    '.note{font-size:12px;color:#8290a5;margin-top:18px}' +
+    '</style></head><body><main><div class="card">' +
+    '<h1>' + title + '</h1><p>' + message + '</p>' +
+    '<div class="actions">' + actions + '</div>' +
+    '<div class="note">This authorization is generated by Google. FLINK Time never receives your Google password.</div>' +
+    '</div></main></body></html>';
+
+  return HtmlService
+    .createHtmlOutput(html)
+    .setTitle(opts.title || 'FLINK Time')
+    .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.DEFAULT);
 }
 
 function doPost(e) {
