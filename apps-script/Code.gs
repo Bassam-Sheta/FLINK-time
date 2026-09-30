@@ -4589,7 +4589,16 @@ var MasterRepository = (typeof global !== 'undefined' && global.MasterRepository
 
   updateSession(sessionId, updates) {
     const s = this.findRowByKey(CONSTANTS.MASTER_TABS.SESSIONS, 'SessionID', sessionId);
-    if (s) this.updateRow(CONSTANTS.MASTER_TABS.SESSIONS, s._rowIndex, updates);
+    if (s) {
+      this.updateRow(CONSTANTS.MASTER_TABS.SESSIONS, s._rowIndex, updates);
+      if (
+        s.TokenHash &&
+        typeof SessionService !== 'undefined' &&
+        SessionService._deleteCachedSession
+      ) {
+        SessionService._deleteCachedSession(s.TokenHash);
+      }
+    }
   },
 
   revokeAllUserSessions(userId) {
