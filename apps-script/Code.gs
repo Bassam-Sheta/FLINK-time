@@ -7920,6 +7920,9 @@ var TimerService = (typeof global !== 'undefined' && global.TimerService) || {
       billable: active.Billable === true || active.Billable === 'TRUE' || active.Billable === 1,
       startedAtUTC: active.StartedAtUTC,
       source: active.Source || CONSTANTS.ENTRY_SOURCE.WEB,
+      startProjectId: active.StartProjectID || active.ProjectID || '',
+      version: parseInt(active.Version, 10) || 1,
+      projectChangeCount: parseInt(active.ProjectChangeCount, 10) || 0,
       ...extras
     };
   },
@@ -8074,7 +8077,11 @@ var TimerService = (typeof global !== 'undefined' && global.TimerService) || {
         StartedAtLocal: this._formatWorkspaceLocalTime(workspaceId, now),
         Billable: tracking.billable ? true : false,
         Source: source,
-        LastHeartbeat: startedAtUTC
+        LastHeartbeat: startedAtUTC,
+        StartProjectID: tracking.projectId,
+        Version: 1,
+        ProjectChangeCount: 0,
+        LastOperationID: ''
       };
 
       SheetRepository.createActiveTimer(workspaceId, timerRecord);
@@ -8098,6 +8105,129 @@ var TimerService = (typeof global !== 'undefined' && global.TimerService) || {
 
       return this._toActiveTimerResponse(workspaceId, timerRecord, {
         operationId: operationId || '',
+        replayed: false
+      });
+    } finally {
+      if (scriptLock) {
+        try { scriptLock.releaseLock(); } catch (e) {}
+      }
+    }
+  },
+
+  updateTimer(authContext, workspaceId, payload = {}) {
+    AuthorizationService.assertWorkspaceAccess(authContext, workspaceId);
+    const operationId = this._normalizeOperationId(payload.operationId);
+    if (!operationId) {
+      throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'operationId is required when updating a running timer.', 400);
+    }
+    if (payload.expectedVersion === null || payload.expectedVersion === undefined || payload.expectedVersion === '') {
+      throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'expectedVersion is required when updating a running timer.', 400);
+    }
+
+    const mutableFields = ['projectId', 'taskId', 'description', 'tagIds', 'tags', 'billable'];
+    if (!mutableFields.some(field => Object.prototype.hasOwnProperty.call(payload, field))) {
+      throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'At least one running-timer field is required.', 400);
+    }
+
+    let scriptLock = null;
+    if (typeof LockService !== 'undefined' && LockService.getScriptLock) {
+      scriptLock = LockService.getScriptLock();
+      if (!scriptLock.tryLock(10000)) {
+        throw new AppError(ERROR_CODES.SERVER_BUSY, 'Could not acquire lock to update timer. Please retry.', 409);
+      }
+    }
+
+    try {
+      const active = SheetRepository.getActiveTimer(workspaceId, authContext.userId);
+      if (!active) {
+        throw new AppError(ERROR_CODES.TIMER_NOT_FOUND, 'No running timer found in this workspace.', 404);
+      }
+
+      if (String(active.LastOperationID || '') === operationId) {
+        return this._toActiveTimerResponse(workspaceId, active, {
+          operationId,
+          replayed: true
+        });
+      }
+
+      Validation.assertRecordVersion(active, payload.expectedVersion);
+
+      const merged = {
+        projectId: payload.projectId !== undefined ? payload.projectId : active.ProjectID,
+        taskId: payload.taskId !== undefined ? payload.taskId : active.TaskID,
+        description: payload.description !== undefined ? payload.description : active.Description,
+        tags: payload.tagIds !== undefined
+          ? payload.tagIds
+          : (payload.tags !== undefined ? payload.tags : active.TagIDs),
+        billable: payload.billable !== undefined ? payload.billable : active.Billable
+      };
+      const tracking = TrackingPolicyService.validateTrackingContext(
+        authContext,
+        workspaceId,
+        merged,
+        { manual: false, enforceRequired: true }
+      );
+
+      const projectChanged =
+        String(tracking.projectId || '') !== String(active.ProjectID || '');
+      if (projectChanged && authContext.role === CONSTANTS.ROLES.USER) {
+        Flags.assertOn(
+          'ALLOW_USER_PROJECT_SWITCH',
+          workspaceId,
+          'Project switching is disabled for this workspace.'
+        );
+      }
+
+      const entryId = this._entryIdForTimer(active.TimerID);
+      const beforeAudit = {
+        EntryID: entryId,
+        ProjectID: active.ProjectID || '',
+        TaskID: active.TaskID || '',
+        WhileTimerRunning: true
+      };
+
+      const updates = {
+        ProjectID: tracking.projectId,
+        TaskID: tracking.taskId,
+        Description: tracking.description,
+        TagIDs: tracking.tagIdsCsv,
+        Billable: tracking.billable ? true : false,
+        Version: (parseInt(active.Version, 10) || 1) + 1,
+        ProjectChangeCount:
+          (parseInt(active.ProjectChangeCount, 10) || 0) + (projectChanged ? 1 : 0),
+        LastOperationID: operationId
+      };
+      const updated = SheetRepository.updateActiveTimer(
+        workspaceId,
+        authContext.userId,
+        updates
+      );
+
+      const afterAudit = {
+        EntryID: entryId,
+        ProjectID: updated.ProjectID || '',
+        TaskID: updated.TaskID || '',
+        WhileTimerRunning: true,
+        operationId
+      };
+      const auditOk = SheetRepository.logWorkspaceAudit(workspaceId, {
+        ActorUserID: authContext.userId,
+        ActorRole: authContext.role,
+        EntityType: 'TIME_ENTRY',
+        EntityID: entryId,
+        Action: projectChanged
+          ? CONSTANTS.AUDIT_EVENTS.TIMER_PROJECT_CHANGED
+          : CONSTANTS.AUDIT_EVENTS.TIMER_UPDATED,
+        BeforeJSON: beforeAudit,
+        AfterJSON: afterAudit,
+        ClientType: active.Source || 'WEB'
+      });
+      if (!auditOk) {
+        throw new AppError(ERROR_CODES.CRYPTO_FAILURE, 'Timer change could not be written to the audit trail.', 503);
+      }
+
+      return this._toActiveTimerResponse(workspaceId, updated, {
+        operationId,
         replayed: false
       });
     } finally {
@@ -8221,7 +8351,9 @@ var TimerService = (typeof global !== 'undefined' && global.TimerService) || {
       EntrySource: activeTimer.Source || CONSTANTS.ENTRY_SOURCE.WEB,
       ManualEntry: false,
       Status: 'ACTIVE',
-      ApprovalStatus: CONSTANTS.TIMESHEET_STATUS.OPEN,
+      ApprovalStatus: Flags.isOn('FEATURE_TIMESHEET_APPROVAL', workspaceId)
+        ? CONSTANTS.TIMESHEET_STATUS.OPEN
+        : 'NOT_REQUIRED',
       TimesheetID: '',
       Locked: false,
       CreatedAt: existingEntry && existingEntry.CreatedAt
@@ -8234,7 +8366,10 @@ var TimerService = (typeof global !== 'undefined' && global.TimerService) || {
       DeletedBy: '',
       Version: existingEntry
         ? (parseInt(existingEntry.Version, 10) || 1) + 1
-        : 1
+        : 1,
+      OriginalProjectID:
+        activeTimer.StartProjectID || activeTimer.ProjectID || tracking.projectId || '',
+      ProjectChangeCount: parseInt(activeTimer.ProjectChangeCount, 10) || 0
     };
 
     let entryMutated = false;
