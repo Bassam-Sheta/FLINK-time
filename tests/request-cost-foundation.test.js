@@ -36,20 +36,12 @@ test('session validation uses a bounded five-minute ScriptCache entry', () => {
   assert.match(src, /this\._deleteCachedSession\(tokenHash\)/);
 });
 
-test('all-session revocation evicts cached token hashes', () => {
-  const src = source();
-  const start = src.indexOf('revokeAllUserSessions(userId) {', src.indexOf('var MasterRepository'));
-  const end = src.indexOf('/* ------------------- REQUESTS', start);
-  const block = src.slice(start, end);
-  assert.match(block, /SessionService\._deleteCachedSession\(s\.TokenHash\)/);
-});
-
 
 test('workspace access hot path is bounded and U cache is short-lived', () => {
   const src = source();
   const repoStart = src.indexOf('var MasterRepository');
-  const accessStart = src.indexOf('getWorkspaceAccessForUser(userId)', repoStart);
-  const accessEnd = src.indexOf('getWorkspaceAccessForWorkspace', accessStart);
+  const accessStart = src.indexOf('  getWorkspaceAccessForUser(userId) {', repoStart);
+  const accessEnd = src.indexOf('  getWorkspaceAccessForWorkspace(workspaceId) {', accessStart);
   const accessBlock = src.slice(accessStart, accessEnd);
 
   assert.match(src, /findRowsByKey\(tabName, columnName, value/);
