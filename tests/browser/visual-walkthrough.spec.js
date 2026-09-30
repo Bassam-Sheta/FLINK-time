@@ -70,6 +70,4 @@ test('capture Super Admin first-run experience', async ({ page }) => {
   await page.getByRole('button', { name: 'START SETUP' }).click();
   await expect(page.getByText('Step 1 — Create the System Owner', { exact: true })).toBeVisible();
   await capture(page, '07-superadmin-setup-step1.png');
-
-  await page.getByRole('button', { name: 'Back' }).click().catch(() => {});
 });
