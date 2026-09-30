@@ -13649,6 +13649,67 @@ var MigrationService = (typeof global !== 'undefined' && global.MigrationService
 };
 
 /**
+ * Deployment-owner-only PBKDF2 benchmark.
+ *
+ * Run this private function from the Apps Script editor against the production
+ * Apps Script runtime. It does not read or write user credentials. The sample
+ * password and salt below are fixed, non-secret benchmark data.
+ */
+function benchmarkPasswordKdf_() {
+  const samplePassword = 'FLINK-PBKDF2-BENCHMARK-NOT-A-REAL-PASSWORD';
+  const sampleSalt = '00112233445566778899aabbccddeeff';
+  const keyBytes = CONSTANTS.SECURITY.PBKDF2_KEY_BYTES;
+  const targets = [10000, 25000, 50000, 100000];
+  const results = [];
+  const overallStartedAt = Date.now();
+
+  // Warm the V8/runtime path so initialization does not dominate the first sample.
+  SecurityService.pbkdf2Sync(samplePassword, sampleSalt, 1000, keyBytes);
+
+  for (const iterations of targets) {
+    const startedAt = Date.now();
+    SecurityService.pbkdf2Sync(samplePassword, sampleSalt, iterations, keyBytes);
+    const elapsedMs = Date.now() - startedAt;
+    results.push({
+      iterations,
+      elapsedMs,
+      millisecondsPerIteration: elapsedMs / iterations
+    });
+
+    // Keep this diagnostic safely bounded well below Apps Script's execution limit.
+    if (elapsedMs >= 10000 || Date.now() - overallStartedAt >= 45000) break;
+  }
+
+  const usable = results.filter(result => result.elapsedMs > 0);
+  const averageMsPerIteration = usable.length
+    ? usable.reduce(
+        (sum, result) => sum + result.millisecondsPerIteration,
+        0
+      ) / usable.length
+    : 0;
+  const owaspReferenceIterations = 600000;
+  const estimatedOwaspRuntimeMs = averageMsPerIteration > 0
+    ? Math.round(averageMsPerIteration * owaspReferenceIterations)
+    : null;
+
+  const report = {
+    currentIterations: CONSTANTS.SECURITY.PBKDF2_ITERATIONS,
+    owaspReferenceIterations,
+    results,
+    estimatedOwaspRuntimeMs,
+    estimatedOwaspRuntimeSeconds:
+      estimatedOwaspRuntimeMs === null ? null : estimatedOwaspRuntimeMs / 1000,
+    oneSecondReferenceMet:
+      estimatedOwaspRuntimeMs !== null && estimatedOwaspRuntimeMs <= 1000,
+    note:
+      'Diagnostic only. Do not change PBKDF2_ITERATIONS until the benchmark result is reviewed and the migration path is selected.'
+  };
+
+  console.log(JSON.stringify(report, null, 2));
+  return report;
+}
+
+/**
  * Owner-only installation helper.
  * Run this function once from the Apps Script editor before opening the public web app.
  * The one-time setup key is returned only to the deployment owner when this private helper is run and must be entered in Setup Step 1.
