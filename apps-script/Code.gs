@@ -175,8 +175,11 @@ var CONSTANTS = {
     REQUEST_EXECUTED: 'REQUEST_EXECUTED',
     TIMER_STARTED: 'TIMER_STARTED',
     TIMER_STOPPED: 'TIMER_STOPPED',
+    TIMER_UPDATED: 'TIMER_UPDATED',
+    TIMER_PROJECT_CHANGED: 'timer.projectChanged',
     ENTRY_CREATED: 'ENTRY_CREATED',
     ENTRY_UPDATED: 'ENTRY_UPDATED',
+    ENTRY_PROJECT_CHANGED: 'entry.projectChanged',
     ENTRY_DELETED: 'ENTRY_DELETED',
     TIMESHEET_SUBMITTED: 'TIMESHEET_SUBMITTED',
     TIMESHEET_APPROVED: 'TIMESHEET_APPROVED',
@@ -395,14 +398,16 @@ var WORKSPACE_SCHEMA = {
   ],
   ActiveTimers: [
     'TimerID', 'UserID', 'ProjectID', 'TaskID', 'Description',
-    'TagIDs', 'StartedAtUTC', 'StartedAtLocal', 'Billable', 'Source', 'LastHeartbeat'
+    'TagIDs', 'StartedAtUTC', 'StartedAtLocal', 'Billable', 'Source', 'LastHeartbeat',
+    'StartProjectID', 'Version', 'ProjectChangeCount', 'LastOperationID'
   ],
   TimeEntries: [
     'EntryID', 'UserID', 'ProjectID', 'TaskID', 'Description', 'Tags',
     'StartUTC', 'EndUTC', 'DurationSeconds', 'Billable',
     'HourlyRateSnapshot', 'CostRateSnapshot', 'EntrySource', 'ManualEntry',
     'Status', 'ApprovalStatus', 'TimesheetID', 'Locked',
-    'CreatedAt', 'CreatedBy', 'UpdatedAt', 'UpdatedBy', 'DeletedAt', 'DeletedBy', 'Version'
+    'CreatedAt', 'CreatedBy', 'UpdatedAt', 'UpdatedBy', 'DeletedAt', 'DeletedBy', 'Version',
+    'OriginalProjectID', 'ProjectChangeCount'
   ],
   Timesheets: [
     'TimesheetID', 'UserID', 'PeriodStart', 'PeriodEnd', 'TotalSeconds',
@@ -1046,11 +1051,13 @@ const ACTION_PERMISSIONS = {
   // Timer & Time Entries
   'timer.start': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN, CONSTANTS.ROLES.ADMIN, CONSTANTS.ROLES.USER], requiresWorkspace: true, isWrite: true },
   'timer.stop': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN, CONSTANTS.ROLES.ADMIN, CONSTANTS.ROLES.USER], requiresWorkspace: true, isWrite: true },
+  'timer.update': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN, CONSTANTS.ROLES.ADMIN, CONSTANTS.ROLES.USER], requiresWorkspace: true, isWrite: true },
   'timer.getActive': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN, CONSTANTS.ROLES.ADMIN, CONSTANTS.ROLES.USER], requiresWorkspace: true, isWrite: false },
   'entries.createManual': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN, CONSTANTS.ROLES.ADMIN, CONSTANTS.ROLES.USER], requiresWorkspace: true, isWrite: true },
   'entries.update': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN, CONSTANTS.ROLES.ADMIN, CONSTANTS.ROLES.USER], requiresWorkspace: true, isWrite: true },
   'entries.delete': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN, CONSTANTS.ROLES.ADMIN, CONSTANTS.ROLES.USER], requiresWorkspace: true, isWrite: true },
   'entries.list': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN, CONSTANTS.ROLES.ADMIN, CONSTANTS.ROLES.USER], requiresWorkspace: true, isWrite: false },
+  'entries.history': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN, CONSTANTS.ROLES.ADMIN, CONSTANTS.ROLES.USER], requiresWorkspace: true, isWrite: false },
   'entries.bulkAction': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN, CONSTANTS.ROLES.ADMIN, CONSTANTS.ROLES.USER], requiresWorkspace: true, isWrite: true },
 
   // Timesheet & Approvals
@@ -1418,6 +1425,9 @@ function dispatchAction_(action, data) {
     case 'timer.stop':
       return TimerService.stopTimer(authContext, wsId, payload);
 
+    case 'timer.update':
+      return TimerService.updateTimer(authContext, wsId, payload);
+
     case 'timer.getActive':
       return TimerService.getActiveTimer(authContext, wsId);
 
@@ -1444,11 +1454,15 @@ function dispatchAction_(action, data) {
     case 'entries.list':
       return TimeEntryService.listEntries(authContext, wsId, payload.filters);
 
+    case 'entries.history':
+      return TimeEntryService.getEntryHistory(authContext, wsId, payload.entryId);
+
     /* ---------------- TIMESHEET & APPROVALS ---------------- */
     case 'timesheet.getWeekly':
       return TimesheetService.getWeeklyTimesheet(authContext, wsId, payload.targetUserId, payload.weekStartDate);
 
     case 'timesheet.listForReview':
+      Flags.assertOn('FEATURE_TIMESHEET_APPROVAL', wsId, 'Timesheet approval is disabled for this workspace.');
       return TimesheetService.listTimesheetsForManager(
         authContext,
         wsId,
@@ -1456,15 +1470,19 @@ function dispatchAction_(action, data) {
       );
 
     case 'timesheet.submit':
+      Flags.assertOn('FEATURE_TIMESHEET_APPROVAL', wsId, 'Timesheet approval is disabled for this workspace.');
       return TimesheetService.submitTimesheet(authContext, wsId, payload);
 
     case 'timesheet.approve':
+      Flags.assertOn('FEATURE_TIMESHEET_APPROVAL', wsId, 'Timesheet approval is disabled for this workspace.');
       return ApprovalService.approveTimesheet(authContext, wsId, payload.timesheetId, payload.comment);
 
     case 'timesheet.reject':
+      Flags.assertOn('FEATURE_TIMESHEET_APPROVAL', wsId, 'Timesheet approval is disabled for this workspace.');
       return ApprovalService.rejectTimesheet(authContext, wsId, payload.timesheetId, payload.comment);
 
     case 'timesheet.reopen':
+      Flags.assertOn('FEATURE_TIMESHEET_APPROVAL', wsId, 'Timesheet approval is disabled for this workspace.');
       return ApprovalService.reopenTimesheet(authContext, wsId, payload.timesheetId, payload.reason);
 
     /* ---------------- MASTER DATA ---------------- */
@@ -4611,19 +4629,15 @@ var TrackingPolicyService = (typeof global !== 'undefined' && global.TrackingPol
   },
 
   getPolicy(workspaceId) {
-    const workspaceManual = MasterRepository.getGlobalSettingStrict(`WS_${workspaceId}_ALLOW_MANUAL`, '');
-    const globalManual = this._getBooleanSetting('RULE_ALLOW_MANUAL', true);
-
     return {
       projectRequired: this._getBooleanSetting('RULE_PROJECT_REQUIRED', false),
       taskRequired: this._getBooleanSetting('RULE_TASK_REQUIRED', false),
-      descriptionRequired: this._getBooleanSetting('RULE_DESC_REQUIRED', false),
+      descriptionRequired: Flags.isOn('REQUIRE_DESCRIPTION', workspaceId),
       tagsRequired: this._getBooleanSetting('RULE_TAGS_REQUIRED', false),
-      allowManual: workspaceManual === '' ? globalManual : this._toBoolean(workspaceManual, globalManual),
-      pastEntryEditDays: Math.max(
-        0,
-        parseInt(MasterRepository.getGlobalSettingStrict('PAST_ENTRY_EDIT_DAYS', '7'), 10) || 0
-      )
+      allowManual: Flags.isOn('ALLOW_MANUAL_ENTRIES', workspaceId),
+      allowProjectSwitch: Flags.isOn('ALLOW_USER_PROJECT_SWITCH', workspaceId),
+      allowDelete: Flags.isOn('ALLOW_USER_DELETE_ENTRY', workspaceId),
+      pastEntryEditDays: Math.max(0, Flags.getNumber('ENTRY_EDIT_WINDOW_DAYS', workspaceId) || 0)
     };
   },
 
@@ -5922,6 +5936,14 @@ var SheetRepository = (typeof global !== 'undefined' && global.SheetRepository) 
     return this.appendRow(workspaceId, CONSTANTS.WORKSPACE_TABS.ACTIVE_TIMERS, timerData);
   },
 
+  updateActiveTimer(workspaceId, userId, updates) {
+    const { rows } = this.getTableData(workspaceId, CONSTANTS.WORKSPACE_TABS.ACTIVE_TIMERS);
+    const timer = rows.find(t => t.UserID === userId);
+    if (!timer) throw new AppError(ERROR_CODES.TIMER_NOT_FOUND, 'No running timer found in this workspace.', 404);
+    this.updateRow(workspaceId, CONSTANTS.WORKSPACE_TABS.ACTIVE_TIMERS, timer._rowIndex, updates);
+    return { ...timer, ...updates };
+  },
+
   deleteActiveTimer(workspaceId, userId) {
     const { rows } = this.getTableData(workspaceId, CONSTANTS.WORKSPACE_TABS.ACTIVE_TIMERS);
     const timer = rows.find(t => t.UserID === userId);
@@ -6088,6 +6110,13 @@ var SheetRepository = (typeof global !== 'undefined' && global.SheetRepository) 
       }
     }
   },
+  listEntryAuditHistory(workspaceId, entryId) {
+    const { rows } = this.getTableData(workspaceId, CONSTANTS.WORKSPACE_TABS.AUDIT_LOG);
+    return rows
+      .filter(row => String(row.EntityID || '') === String(entryId || ''))
+      .sort((a, b) => String(a.TimestampUTC || '').localeCompare(String(b.TimestampUTC || '')));
+  },
+
   getWorkspaceSettings(workspaceId) {
     const { rows } = this.getTableData(workspaceId, CONSTANTS.WORKSPACE_TABS.WORKSPACE_SETTINGS);
     const settings = {};
