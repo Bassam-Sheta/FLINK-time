@@ -2269,6 +2269,46 @@ var AuthorizationService = (typeof global !== 'undefined' && global.Authorizatio
  */
 
 var SessionService = (typeof global !== 'undefined' && global.SessionService) || {
+  _sessionCacheMemory: {},
+
+  _sessionCacheKey(tokenHash) {
+    return 'S:' + String(tokenHash || '');
+  },
+
+  _getCachedSession(tokenHash) {
+    const key = this._sessionCacheKey(tokenHash);
+    let raw = '';
+    if (typeof CacheService !== 'undefined' && CacheService.getScriptCache) {
+      try { raw = CacheService.getScriptCache().get(key) || ''; } catch (e) {}
+    } else {
+      raw = this._sessionCacheMemory[key] || '';
+    }
+    if (!raw) return null;
+    try { return JSON.parse(raw); } catch (e) {
+      this._deleteCachedSession(tokenHash);
+      return null;
+    }
+  },
+
+  _putCachedSession(tokenHash, session) {
+    if (!tokenHash || !session) return;
+    const key = this._sessionCacheKey(tokenHash);
+    const raw = JSON.stringify(session);
+    if (typeof CacheService !== 'undefined' && CacheService.getScriptCache) {
+      try { CacheService.getScriptCache().put(key, raw, 300); } catch (e) {}
+    } else {
+      this._sessionCacheMemory[key] = raw;
+    }
+  },
+
+  _deleteCachedSession(tokenHash) {
+    const key = this._sessionCacheKey(tokenHash);
+    if (typeof CacheService !== 'undefined' && CacheService.getScriptCache) {
+      try { CacheService.getScriptCache().remove(key); } catch (e) {}
+    }
+    delete this._sessionCacheMemory[key];
+  },
+
   /**
    * Creates and registers a new authenticated session
    */
@@ -2341,6 +2381,7 @@ var SessionService = (typeof global !== 'undefined' && global.SessionService) ||
     };
 
     MasterRepository.createSession(sessionRecord);
+    this._putCachedSession(tokenHash, sessionRecord);
 
     return {
       sessionId,
@@ -2358,7 +2399,13 @@ var SessionService = (typeof global !== 'undefined' && global.SessionService) ||
     }
 
     const tokenHash = SecurityService.hashToken(rawToken.trim());
-    const session = MasterRepository.findSessionByTokenHash(tokenHash);
+    let session = this._getCachedSession(tokenHash);
+    if (!session) {
+      session = MasterRepository.findSessionByTokenHashFast
+        ? MasterRepository.findSessionByTokenHashFast(tokenHash)
+        : MasterRepository.findSessionByTokenHash(tokenHash);
+      if (session) this._putCachedSession(tokenHash, session);
+    }
 
     if (!session) {
       throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'Invalid or expired session.', 401);
@@ -2479,11 +2526,14 @@ var SessionService = (typeof global !== 'undefined' && global.SessionService) ||
       (CONSTANTS.LIMITS.SESSION_TOUCH_INTERVAL_MINUTES || 5) * 60 * 1000;
     if ((now - lastSeenAt) >= touchIntervalMs) {
       const newExpiresMs = Math.min(now + idleTimeoutMs, absoluteExpiresAt);
-      MasterRepository.updateSession(session.SessionID, {
+      const touch = {
         LastSeenAt: new Date(now).toISOString(),
         ExpiresAt: new Date(newExpiresMs).toISOString(),
         AbsoluteExpiresAt: new Date(absoluteExpiresAt).toISOString()
-      });
+      };
+      MasterRepository.updateSession(session.SessionID, touch);
+      session = { ...session, ...touch };
+      this._putCachedSession(tokenHash, session);
     }
 
     return {
@@ -2501,13 +2551,16 @@ var SessionService = (typeof global !== 'undefined' && global.SessionService) ||
   revokeSession(rawToken) {
     if (!rawToken) return;
     const tokenHash = SecurityService.hashToken(rawToken.trim());
-    const session = MasterRepository.findSessionByTokenHash(tokenHash);
+    const session = MasterRepository.findSessionByTokenHashFast
+      ? MasterRepository.findSessionByTokenHashFast(tokenHash)
+      : MasterRepository.findSessionByTokenHash(tokenHash);
     if (session) {
       MasterRepository.updateSession(session.SessionID, {
         Revoked: true,
         RevokedAt: new Date().toISOString()
       });
     }
+    this._deleteCachedSession(tokenHash);
   },
 
   /**
@@ -4208,6 +4261,44 @@ var MasterRepository = (typeof global !== 'undefined' && global.MasterRepository
   },
 
   /**
+   * Finds one row by key without loading the entire tab.
+   * Growing request-time tables must prefer this path over getTableData().
+   */
+  findRowByKey(tabName, columnName, value, options = {}) {
+    const ss = this.getMasterSpreadsheet();
+    const sheet = ss.getSheetByName(tabName);
+    if (!sheet) {
+      throw new AppError(ERROR_CODES.NOT_FOUND, `Master tab '${tabName}' does not exist.`);
+    }
+
+    const schemaHeaders = MASTER_SCHEMA[tabName];
+    if (!schemaHeaders) {
+      throw new AppError(ERROR_CODES.INTERNAL_ERROR, `Schema missing for master tab '${tabName}'.`);
+    }
+    const columnIndex = schemaHeaders.indexOf(columnName);
+    if (columnIndex < 0) {
+      throw new AppError(ERROR_CODES.INTERNAL_ERROR, `Column '${columnName}' is not defined for '${tabName}'.`);
+    }
+
+    const lastRow = sheet.getLastRow();
+    if (lastRow < 2) return null;
+
+    const cell = sheet
+      .getRange(2, columnIndex + 1, lastRow - 1, 1)
+      .createTextFinder(String(value))
+      .matchEntireCell(true)
+      .matchCase(options.matchCase !== false)
+      .findNext();
+    if (!cell) return null;
+
+    const rowIndex = cell.getRow();
+    const values = sheet.getRange(rowIndex, 1, 1, schemaHeaders.length).getValues()[0];
+    const row = { _rowIndex: rowIndex };
+    for (let i = 0; i < schemaHeaders.length; i++) row[schemaHeaders[i]] = values[i];
+    return row;
+  },
+
+  /**
    * Appends an entity row to a master tab
    */
   appendRow(tabName, entity) {
@@ -4287,13 +4378,16 @@ var MasterRepository = (typeof global !== 'undefined' && global.MasterRepository
 
   findAccountByUsername(username) {
     const cleanUsername = String(username).trim().toLowerCase();
-    const { rows } = this.getTableData(CONSTANTS.MASTER_TABS.ACCOUNTS);
-    return rows.find(r => String(r.Username).trim().toLowerCase() === cleanUsername) || null;
+    return this.findRowByKey(
+      CONSTANTS.MASTER_TABS.ACCOUNTS,
+      'Username',
+      cleanUsername,
+      { matchCase: false }
+    );
   },
 
   findAccountById(userId) {
-    const { rows } = this.getTableData(CONSTANTS.MASTER_TABS.ACCOUNTS);
-    return rows.find(r => r.UserID === userId) || null;
+    return this.findRowByKey(CONSTANTS.MASTER_TABS.ACCOUNTS, 'UserID', userId);
   },
 
   createAccount(accountData, credentialData) {
@@ -4363,8 +4457,7 @@ var MasterRepository = (typeof global !== 'undefined' && global.MasterRepository
   },
 
   getCredentials(userId) {
-    const { rows } = this.getTableData(CONSTANTS.MASTER_TABS.CREDENTIALS);
-    return rows.find(r => r.UserID === userId) || null;
+    return this.findRowByKey(CONSTANTS.MASTER_TABS.CREDENTIALS, 'UserID', userId);
   },
 
   updateCredentials(userId, updates) {
@@ -4383,8 +4476,7 @@ var MasterRepository = (typeof global !== 'undefined' && global.MasterRepository
   },
 
   getWorkspace(workspaceId) {
-    const { rows } = this.getTableData(CONSTANTS.MASTER_TABS.WORKSPACES);
-    return rows.find(r => r.WorkspaceID === workspaceId) || null;
+    return this.findRowByKey(CONSTANTS.MASTER_TABS.WORKSPACES, 'WorkspaceID', workspaceId);
   },
 
   createWorkspace(workspaceData) {
@@ -4484,17 +4576,20 @@ var MasterRepository = (typeof global !== 'undefined' && global.MasterRepository
     return this.appendRow(CONSTANTS.MASTER_TABS.SESSIONS, sessionData);
   },
 
+  findSessionByTokenHashFast(tokenHash) {
+    const row = this.findRowByKey(CONSTANTS.MASTER_TABS.SESSIONS, 'TokenHash', tokenHash);
+    if (!row) return null;
+    const revoked = row.Revoked === true || row.Revoked === 'TRUE' || row.Revoked === 1;
+    return revoked ? null : row;
+  },
+
   findSessionByTokenHash(tokenHash) {
-    const { rows } = this.getTableData(CONSTANTS.MASTER_TABS.SESSIONS);
-    return rows.find(r => r.TokenHash === tokenHash && (r.Revoked === false || r.Revoked === 'FALSE' || r.Revoked === 0 || !r.Revoked)) || null;
+    return this.findSessionByTokenHashFast(tokenHash);
   },
 
   updateSession(sessionId, updates) {
-    const { rows } = this.getTableData(CONSTANTS.MASTER_TABS.SESSIONS);
-    const s = rows.find(r => r.SessionID === sessionId);
-    if (s) {
-      this.updateRow(CONSTANTS.MASTER_TABS.SESSIONS, s._rowIndex, updates);
-    }
+    const s = this.findRowByKey(CONSTANTS.MASTER_TABS.SESSIONS, 'SessionID', sessionId);
+    if (s) this.updateRow(CONSTANTS.MASTER_TABS.SESSIONS, s._rowIndex, updates);
   },
 
   revokeAllUserSessions(userId) {
@@ -4505,6 +4600,9 @@ var MasterRepository = (typeof global !== 'undefined' && global.MasterRepository
         Revoked: true,
         RevokedAt: now
       });
+      if (s.TokenHash && typeof SessionService !== 'undefined' && SessionService._deleteCachedSession) {
+        SessionService._deleteCachedSession(s.TokenHash);
+      }
     });
   },
 
