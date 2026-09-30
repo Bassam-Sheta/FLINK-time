@@ -78,8 +78,8 @@ test('Apps Script browser RPC surface is explicit and cannot bypass session auth
 
   assert.deepEqual(
     browserCallable,
-    ['doGet', 'doPost', 'handleClientRequest'],
-    'only the required web entrypoints and authenticated client bridge may be browser-callable'
+    ['doGet', 'doPost', 'handleClientRequest', 'onOpen'],
+    'only the web entrypoints, authenticated client bridge, and harmless Sheet menu trigger may be browser-callable'
   );
 
   assert.match(source, /function dispatchAction_\(action, data\)/);
@@ -210,7 +210,7 @@ test('unauthenticated setup step 1 is controlled by permission metadata, not a h
   });
 
   assert.deepEqual(
-    mod.dispatchAction('setup.completeStep', { step: 1, setupKey: 'one-time-key' }),
+    mod.dispatchAction('setup.completeStep', { step: 1 }),
     { ok: true, bootstrap: true }
   );
   assert.equal(setupCalls, 1);
@@ -220,7 +220,7 @@ test('unauthenticated setup step 1 is controlled by permission metadata, not a h
   mod.ACTION_PERMISSIONS['setup.completeStep'].allowUnauthStep1 = false;
   try {
     assert.throws(
-      () => mod.dispatchAction('setup.completeStep', { step: 1, setupKey: 'one-time-key' }),
+      () => mod.dispatchAction('setup.completeStep', { step: 1 }),
       /NO_SESSION/
     );
     assert.equal(sessionCalls, 1);

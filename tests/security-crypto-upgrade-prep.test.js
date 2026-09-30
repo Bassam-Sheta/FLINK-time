@@ -26,7 +26,7 @@ test('PBKDF2 benchmark helper is private and does not expose a browser RPC', () 
 
   assert.deepEqual(
     browserCallable.sort(),
-    ['doGet', 'doPost', 'handleClientRequest'].sort()
+    ['doGet', 'doPost', 'handleClientRequest', 'onOpen'].sort()
   );
 });
 

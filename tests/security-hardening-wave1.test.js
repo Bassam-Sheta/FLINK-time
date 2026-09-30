@@ -38,18 +38,26 @@ test('unexpected API errors are sanitized and correlated', () => {
   );
 });
 
-test('bootstrap key is not logged, expires, and is checked before schema mutation', () => {
+test('first-run bootstrap is owner-bound before schema or account mutation', () => {
   const source = fs.readFileSync(codePath, 'utf8');
-  assert.equal(source.includes("console.log('FLINK one-time setup key:"), false);
-  assert.match(source, /SETUP_KEY_TTL_MINUTES:\s*15/);
+
+  assert.match(source, /function prepareInstallationCore_\(\)/);
+  assert.match(source, /MASTER_SPREADSHEET_ID/);
+  assert.match(source, /FLINK_INSTALL_OWNER_EMAIL/);
+  assert.match(source, /getBoundMasterSheetOwnerEmail_\(spreadsheet\)/);
+  assert.doesNotMatch(source, /const setupKey = SecurityService\.generateRandomHex\(24\)/);
+
   const stepStart = source.indexOf('_step1_SystemOwnerLocked(payload)');
   const nextStep = source.indexOf('_step2_CompanySettings', stepStart);
   const block = source.slice(stepStart, nextStep);
-  const keyCheck = block.indexOf('SecurityService.constantTimeEquals(suppliedSetupKeyHash, expectedSetupKeyHash)');
+  const ownerCheck = block.indexOf('IdentityService.assertInstallationOwner()');
   const bootstrap = block.indexOf('MigrationService.bootstrapMasterSheet()');
-  assert.ok(keyCheck >= 0, 'setup key validation must exist');
-  assert.ok(bootstrap > keyCheck, 'schema initialization must happen only after setup key validation');
-  assert.match(block, /Installation key expired/);
+  const createAccount = block.indexOf('MasterRepository.createAccount(accountRecord');
+
+  assert.ok(ownerCheck >= 0, 'installation-owner verification must exist');
+  assert.ok(bootstrap > ownerCheck, 'schema initialization must happen only after owner verification');
+  assert.ok(createAccount > bootstrap, 'root account creation must happen after verified bootstrap');
+  assert.doesNotMatch(block, /setupKey/);
 });
 
 test('temporary passwords use strong server generation and enforced expiry metadata', () => {

@@ -1573,6 +1573,70 @@ var IdentityService = (typeof global !== 'undefined' && global.IdentityService) 
     return email;
   },
 
+  getEffectiveGoogleEmail(required = true) {
+    let email = '';
+    try {
+      if (
+        typeof Session !== 'undefined' &&
+        Session.getEffectiveUser
+      ) {
+        const effectiveUser = Session.getEffectiveUser();
+        if (effectiveUser && effectiveUser.getEmail) {
+          email = this.normalizeEmail(effectiveUser.getEmail());
+        }
+      }
+    } catch (err) {
+      if (!required) return '';
+      throw new AppError(
+        ERROR_CODES.AUTH_REQUIRED,
+        'The FLINK Time deployment owner could not be verified.',
+        401
+      );
+    }
+
+    if (!email && required) {
+      throw new AppError(
+        ERROR_CODES.AUTH_REQUIRED,
+        'The FLINK Time deployment owner could not be verified.',
+        401
+      );
+    }
+    return email;
+  },
+
+  assertInstallationOwner() {
+    if (typeof PropertiesService === 'undefined' || !PropertiesService.getScriptProperties) {
+      throw new AppError(
+        ERROR_CODES.INTERNAL_ERROR,
+        'Installation settings are unavailable.',
+        500
+      );
+    }
+
+    const props = PropertiesService.getScriptProperties();
+    const preparedOwner = this.normalizeEmail(
+      props.getProperty('FLINK_INSTALL_OWNER_EMAIL') || ''
+    );
+    if (!preparedOwner) {
+      throw new AppError(
+        ERROR_CODES.AUTH_REQUIRED,
+        'FLINK Time has not been prepared yet. Open the Master Sheet and choose FLINK Time → Prepare Installation.',
+        401
+      );
+    }
+
+    const activeEmail = this.getCurrentGoogleEmail(true);
+    const effectiveEmail = this.getEffectiveGoogleEmail(true);
+    if (activeEmail !== preparedOwner || effectiveEmail !== preparedOwner) {
+      throw new AppError(
+        ERROR_CODES.UNAUTHORIZED,
+        'First-time setup must be completed by the Google Workspace account that owns the Master Sheet and deployed this Web App.',
+        403
+      );
+    }
+    return preparedOwner;
+  },
+
   assertAccountIdentity(account, clientType = 'WEB') {
     const normalizedClient = String(clientType || 'WEB').toUpperCase();
     if (normalizedClient !== 'WEB' && normalizedClient !== 'SETUP_WIZARD') {
@@ -1638,7 +1702,7 @@ var SecurityService = (typeof global !== 'undefined' && global.SecurityService) 
       if (pepper) return pepper;
       throw new AppError(
         ERROR_CODES.CRYPTO_FAILURE,
-        'Server cryptographic secret is not initialized. Run initializeInstallation_() as the deployment owner.',
+        'Server cryptographic secret is not initialized. Open the Master Sheet and choose FLINK Time → Prepare Installation.',
         500
       );
     }
@@ -10950,7 +11014,12 @@ var SetupService = (typeof global !== 'undefined' && global.SetupService) || {
       workspaceCount = 0;
     }
 
-    const setupFlag = MasterRepository.getGlobalSetting('SETUP_COMPLETE', 'false');
+    let setupFlag = 'false';
+    try {
+      setupFlag = MasterRepository.getGlobalSetting('SETUP_COMPLETE', 'false');
+    } catch (e) {
+      setupFlag = 'false';
+    }
     isSetupComplete = (setupFlag === 'true' || setupFlag === true) && superAdminExists && workspaceCount > 0;
 
     // Once initialization is complete, the public setup-status endpoint only needs
@@ -11036,45 +11105,15 @@ var SetupService = (typeof global !== 'undefined' && global.SetupService) || {
   },
 
   _step1_SystemOwnerLocked(payload) {
-    Validation.assertRequired(payload, ['setupKey', 'fullName', 'username', 'password', 'confirmPassword']);
+    Validation.assertRequired(payload, ['fullName', 'username', 'password', 'confirmPassword']);
+
+    // The first unauthenticated setup mutation is allowed only for the account
+    // that prepared the Master Sheet AND owns the execute-as-deployer Web App.
+    // Verify this before any schema or credential mutation.
+    const googleEmail = IdentityService.assertInstallationOwner();
 
     // Caller already holds the script-wide installation lock. Do not reacquire
     // the same lock here; Apps Script locks are not a re-entrant transaction.
-    // Validate the owner-issued installation key before performing any schema mutation.
-
-    if (typeof PropertiesService === 'undefined' || !PropertiesService.getScriptProperties) {
-      throw new AppError(ERROR_CODES.INTERNAL_ERROR, 'Script Properties are unavailable.');
-    }
-    const props = PropertiesService.getScriptProperties();
-    const expectedSetupKeyHash = props.getProperty('FLINK_SETUP_KEY_HASH');
-    if (!expectedSetupKeyHash) {
-      throw new AppError(
-        ERROR_CODES.AUTH_REQUIRED,
-        'Installation is not initialized. Run initializeInstallation_() from the Apps Script editor first.',
-        401
-      );
-    }
-    const setupKeyCreatedAt = new Date(
-      props.getProperty('FLINK_SETUP_KEY_CREATED_AT') || ''
-    ).getTime();
-    const setupKeyTtlMs =
-      (CONSTANTS.LIMITS.SETUP_KEY_TTL_MINUTES || 15) * 60 * 1000;
-    if (
-      !Number.isFinite(setupKeyCreatedAt) ||
-      Date.now() - setupKeyCreatedAt > setupKeyTtlMs ||
-      Date.now() < setupKeyCreatedAt - 60 * 1000
-    ) {
-      props.deleteProperty('FLINK_SETUP_KEY_HASH');
-      props.deleteProperty('FLINK_SETUP_KEY_CREATED_AT');
-      throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'Installation key expired. Generate a new key from the Apps Script editor.', 401);
-    }
-
-    const suppliedSetupKeyHash = SecurityService.hashToken(String(payload.setupKey).trim());
-    if (!SecurityService.constantTimeEquals(suppliedSetupKeyHash, expectedSetupKeyHash)) {
-      throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'Invalid one-time installation key.', 401);
-    }
-
-    // The setup key is valid and fresh. It is now safe to initialize schema/pepper.
     MigrationService.bootstrapMasterSheet();
 
     if (payload.password !== payload.confirmPassword) {
@@ -11082,15 +11121,26 @@ var SetupService = (typeof global !== 'undefined' && global.SetupService) || {
     }
     Validation.validatePassword(payload.password);
 
-    // Verify no Super Admin already registered
+    const setupFlag = MasterRepository.getGlobalSetting('SETUP_COMPLETE', 'false');
+    if (setupFlag === true || setupFlag === 'true') {
+      throw new AppError(
+        ERROR_CODES.CONFLICT,
+        'FLINK Time setup is already complete. Please sign in.',
+        409
+      );
+    }
+
+    // Verify no Super Admin already registered.
     const { rows: accounts } = MasterRepository.getTableData(CONSTANTS.MASTER_TABS.ACCOUNTS);
-    const existing = accounts.find(a => a.Role === CONSTANTS.ROLES.SUPER_ADMIN && a.Status !== CONSTANTS.ACCOUNT_STATUS.DELETED);
+    const existing = accounts.find(
+      a => a.Role === CONSTANTS.ROLES.SUPER_ADMIN &&
+        a.Status !== CONSTANTS.ACCOUNT_STATUS.DELETED
+    );
     if (existing) {
       throw new AppError(ERROR_CODES.CONFLICT, 'Super Admin account already exists. Please log in.');
     }
 
     const cleanUsername = String(payload.username).trim().toLowerCase();
-    const googleEmail = IdentityService.getCurrentGoogleEmail(true);
     const adminUserId = Validation.generateId('USR');
     const hash = SecurityService.hashPassword(payload.password);
     const now = new Date().toISOString();
@@ -11129,14 +11179,17 @@ var SetupService = (typeof global !== 'undefined' && global.SetupService) || {
       EntityID: adminUserId,
       Action: CONSTANTS.AUDIT_EVENTS.USER_CREATED,
       AfterJSON: { username: cleanUsername, role: CONSTANTS.ROLES.SUPER_ADMIN },
-      Reason: 'Root Super Admin created via Setup Wizard Step 1'
+      Reason: 'Root Super Admin created via owner-bound Setup Wizard Step 1'
     });
 
-    // One-time installation key is invalid after successful root-account creation.
-    props.deleteProperty('FLINK_SETUP_KEY_HASH');
-    props.deleteProperty('FLINK_SETUP_KEY_CREATED_AT');
+    // Remove any legacy setup-key state left by an older release.
+    if (typeof PropertiesService !== 'undefined' && PropertiesService.getScriptProperties) {
+      const props = PropertiesService.getScriptProperties();
+      props.deleteProperty('FLINK_SETUP_KEY_HASH');
+      props.deleteProperty('FLINK_SETUP_KEY_CREATED_AT');
+    }
 
-    // Automatically issue session for immediate progression
+    // Automatically issue session for immediate progression.
     const session = SessionService.createSession(
       adminUserId,
       'SETUP_WIZARD',
@@ -14083,26 +14136,221 @@ function benchmarkPasswordKdf_() {
 }
 
 /**
- * Owner-only installation helper.
- * Run this function once from the Apps Script editor before opening the public web app.
- * The one-time setup key is returned only to the deployment owner when this private helper is run and must be entered in Setup Step 1.
+ * Adds a tiny installer menu to the bound Master Sheet.
+ * The only public simple-trigger entrypoint is onOpen(); all menu handlers stay
+ * private (trailing underscore) and therefore are unavailable to google.script.run.
  */
-function initializeInstallation_() {
-  MigrationService.bootstrapMasterSheet();
-  if (typeof PropertiesService === 'undefined' || !PropertiesService.getScriptProperties) {
-    throw new AppError(ERROR_CODES.INTERNAL_ERROR, 'Script Properties are unavailable in this runtime.');
+function onOpen() {
+  try {
+    if (typeof SpreadsheetApp === 'undefined' || !SpreadsheetApp.getUi) return;
+    SpreadsheetApp.getUi()
+      .createMenu('FLINK Time')
+      .addItem('1. Prepare Installation', 'prepareInstallation_')
+      .addItem('2. Deployment Instructions', 'showDeploymentInstructions_')
+      .addItem('3. Open FLINK Time', 'showWebAppLink_')
+      .addToUi();
+  } catch (err) {
+    console.error('FLINK Time menu could not be added: ' + (err && err.message ? err.message : String(err)));
+  }
+}
+
+function getBoundMasterSheetOwnerEmail_(spreadsheet) {
+  if (!spreadsheet || !spreadsheet.getId) {
+    throw new AppError(ERROR_CODES.INTERNAL_ERROR, 'The bound Master Sheet could not be resolved.', 500);
   }
 
+  const activeEmail = IdentityService.getCurrentGoogleEmail(true);
+  let ownerEmail = '';
+  try {
+    if (typeof DriveApp === 'undefined' || !DriveApp.getFileById) {
+      throw new Error('Drive service unavailable');
+    }
+    const file = DriveApp.getFileById(spreadsheet.getId());
+    const owner = file && file.getOwner ? file.getOwner() : null;
+    ownerEmail = IdentityService.normalizeEmail(
+      owner && owner.getEmail ? owner.getEmail() : ''
+    );
+  } catch (err) {
+    throw new AppError(
+      ERROR_CODES.UNAUTHORIZED,
+      'Initial setup must use a Master Sheet copy owned in My Drive. Make your own copy of the template before preparing FLINK Time.',
+      403
+    );
+  }
+
+  if (!ownerEmail || activeEmail !== ownerEmail) {
+    throw new AppError(
+      ERROR_CODES.UNAUTHORIZED,
+      'Only the Google account that owns this Master Sheet can prepare FLINK Time.',
+      403
+    );
+  }
+  return ownerEmail;
+}
+
+function prepareInstallationCore_() {
+  if (
+    typeof SpreadsheetApp === 'undefined' ||
+    !SpreadsheetApp.getActiveSpreadsheet
+  ) {
+    throw new AppError(ERROR_CODES.INTERNAL_ERROR, 'Google Sheets is unavailable in this runtime.', 500);
+  }
+  if (
+    typeof PropertiesService === 'undefined' ||
+    !PropertiesService.getScriptProperties
+  ) {
+    throw new AppError(ERROR_CODES.INTERNAL_ERROR, 'Script Properties are unavailable in this runtime.', 500);
+  }
+
+  const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  if (!spreadsheet) {
+    throw new AppError(
+      ERROR_CODES.INTERNAL_ERROR,
+      'Open the FLINK Time Master Sheet before preparing the installation.',
+      500
+    );
+  }
+
+  const ownerEmail = getBoundMasterSheetOwnerEmail_(spreadsheet);
+  const spreadsheetId = spreadsheet.getId();
   const props = PropertiesService.getScriptProperties();
-  const setupKey = SecurityService.generateRandomHex(24);
-  props.setProperty('FLINK_SETUP_KEY_HASH', SecurityService.hashToken(setupKey));
-  props.setProperty('FLINK_SETUP_KEY_CREATED_AT', new Date().toISOString());
+  const configuredSpreadsheetId = String(
+    props.getProperty('MASTER_SPREADSHEET_ID') || ''
+  ).trim();
+  const configuredOwner = IdentityService.normalizeEmail(
+    props.getProperty('FLINK_INSTALL_OWNER_EMAIL') || ''
+  );
+
+  if (configuredSpreadsheetId && configuredSpreadsheetId !== spreadsheetId) {
+    throw new AppError(
+      ERROR_CODES.CONFLICT,
+      'This Apps Script project is already bound to a different FLINK Time Master Sheet.',
+      409
+    );
+  }
+  if (configuredOwner && configuredOwner !== ownerEmail) {
+    throw new AppError(
+      ERROR_CODES.UNAUTHORIZED,
+      'This FLINK Time installation is already bound to another installation owner.',
+      403
+    );
+  }
+
+  props.setProperty('MASTER_SPREADSHEET_ID', spreadsheetId);
+  props.setProperty('FLINK_INSTALL_OWNER_EMAIL', ownerEmail);
+  props.setProperty('FLINK_INSTALL_PREPARED_AT', new Date().toISOString());
+  MasterRepository.spreadsheetId = spreadsheetId;
+
+  let alreadyComplete = false;
+  try {
+    const existingFlag = MasterRepository.getGlobalSetting('SETUP_COMPLETE', 'false');
+    alreadyComplete = existingFlag === true || existingFlag === 'true';
+  } catch (err) {
+    alreadyComplete = false;
+  }
+
+  if (!alreadyComplete) {
+    MigrationService.bootstrapMasterSheet(spreadsheet);
+  }
 
   return {
     ok: true,
-    setupKey,
-    message: 'Installation initialized. Use this one-time key in Setup Step 1; it is invalidated after Super Admin creation.'
+    alreadyComplete,
+    ownerEmail,
+    spreadsheetId,
+    message: alreadyComplete
+      ? 'FLINK Time is already prepared and setup is complete.'
+      : 'FLINK Time is prepared. Deploy the Web App, then open the Super Admin link to finish setup.'
   };
+}
+
+function prepareInstallation_() {
+  try {
+    const result = prepareInstallationCore_();
+    SpreadsheetApp.getUi().alert(
+      'FLINK Time',
+      result.message + '\n\nNext: choose FLINK Time → Deployment Instructions.',
+      SpreadsheetApp.getUi().ButtonSet.OK
+    );
+    return result;
+  } catch (err) {
+    const message = err && err.message ? err.message : 'Installation preparation failed.';
+    SpreadsheetApp.getUi().alert(
+      'FLINK Time setup could not continue',
+      message,
+      SpreadsheetApp.getUi().ButtonSet.OK
+    );
+    throw err;
+  }
+}
+
+function showDeploymentInstructions_() {
+  SpreadsheetApp.getUi().alert(
+    'FLINK Time — Deployment Instructions',
+    [
+      '1. In this Sheet, choose Extensions → Apps Script.',
+      '2. In Apps Script choose Deploy → New deployment → Web app.',
+      '3. Set Execute as: Me.',
+      '4. Set access to users in your Google Workspace domain.',
+      '5. Deploy, authorize when Google asks, then return to this Sheet.',
+      '6. Choose FLINK Time → Open FLINK Time and open the Super Admin link.',
+      '',
+      'Only the Employee portal may be embedded in Google Sites. Admin and Super Admin must be opened directly.'
+    ].join('\n'),
+    SpreadsheetApp.getUi().ButtonSet.OK
+  );
+}
+
+function escapeInstallerHtml_(value) {
+  return String(value || '').replace(/[&<>"']/g, ch => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;'
+  })[ch]);
+}
+
+function showWebAppLink_() {
+  const ui = SpreadsheetApp.getUi();
+  const baseUrl = (
+    typeof ScriptApp !== 'undefined' &&
+    ScriptApp.getService &&
+    ScriptApp.getService().getUrl
+  ) ? String(ScriptApp.getService().getUrl() || '') : '';
+
+  if (!baseUrl) {
+    ui.alert(
+      'FLINK Time is not deployed yet',
+      'Complete FLINK Time → Deployment Instructions first, then try again.',
+      ui.ButtonSet.OK
+    );
+    return;
+  }
+
+  const safeBase = escapeInstallerHtml_(baseUrl);
+  const userUrl = safeBase + '?view=user';
+  const adminUrl = safeBase + '?view=admin';
+  const superAdminUrl = safeBase + '?view=superadmin';
+  const html = HtmlService.createHtmlOutput(
+    '<div style="font-family:Arial,sans-serif;padding:18px;line-height:1.55">' +
+      '<h2 style="margin-top:0">FLINK Time</h2>' +
+      '<p><strong>First installation:</strong> open Super Admin and complete the guided setup.</p>' +
+      '<p><a target="_blank" href="' + superAdminUrl + '">Open Super Admin</a></p>' +
+      '<p><a target="_blank" href="' + adminUrl + '">Open Admin</a></p>' +
+      '<p><a target="_blank" href="' + userUrl + '">Open Employee Portal</a></p>' +
+      '<p style="font-size:12px;color:#666">Admin and Super Admin are direct links. Only the Employee portal may be embedded in Google Sites.</p>' +
+    '</div>'
+  ).setWidth(430).setHeight(300);
+  ui.showModalDialog(html, 'FLINK Time Links');
+}
+
+/**
+ * Backward-compatible private owner helper for maintainers.
+ * Normal installers do not need to run code in the Apps Script editor.
+ */
+function initializeInstallation_() {
+  return prepareInstallationCore_();
 }
 
 if (typeof module !== 'undefined' && module.exports) {
