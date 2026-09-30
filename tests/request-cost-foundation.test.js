@@ -73,3 +73,16 @@ test('revoke-all rotates account session epoch without scanning Sessions', () =>
   assert.match(src, /SessionEpoch/);
   assert.match(src, /sessionEpoch !== currentEpoch/);
 });
+
+
+test('housekeeping retains invalid sessions for seven days then batch deletes contiguous rows', () => {
+  const src = source();
+  assert.match(src, /SESSION_RETENTION_DAYS:\s*7/);
+  assert.match(src, /deleteRows\(tabName, startRow, howMany\)/);
+  const start = src.indexOf('const purgeRows = refreshedSessions');
+  const end = src.indexOf('// MFA challenges are one-per-user', start);
+  const block = src.slice(start, end);
+  assert.match(block, /MasterRepository\.deleteRows/);
+  assert.doesNotMatch(block, /MasterRepository\.deleteRow\(/);
+  assert.match(block, /purgeRows\[j\]\._rowIndex === low - 1/);
+});
