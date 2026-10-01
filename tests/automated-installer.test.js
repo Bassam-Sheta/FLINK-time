@@ -42,7 +42,8 @@ test('automated installer is isolated from the five-file production app', () => 
   const productionScopes = new Set(productionManifest.oauthScopes || []);
   assert.equal(productionScopes.has('https://www.googleapis.com/auth/script.projects'), false);
   assert.equal(productionScopes.has('https://www.googleapis.com/auth/script.deployments'), false);
-  assert.equal(productionScopes.has('https://www.googleapis.com/auth/script.external_request'), false);
+  assert.equal(productionScopes.has('https://www.googleapis.com/auth/script.external_request'), true);
+  assert.equal(productionScopes.has('https://www.googleapis.com/auth/cloudkms'), true);
 });
 
 test('installer release source is pinned to an immutable commit and five allowlisted files', () => {
