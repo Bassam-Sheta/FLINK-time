@@ -40,9 +40,11 @@ test('stored PBKDF2 iteration count drives upgrade-on-login', () => {
   try {
     mod.MasterRepository.getGlobalSettingFast = () => '25000';
     const legacy = '$pbkdf2$v1$i=10000$001122$deadbeef';
-    const current = '$pbkdf2$v1$i=25000$001122$deadbeef';
+    const current = '$pbkdf2$v2$i=25000$001122$deadbeef';
+    const legacySameCost = '$pbkdf2$v1$i=25000$001122$deadbeef';
     assert.equal(mod.SecurityService.getStoredPasswordIterations(legacy), 10000);
     assert.equal(mod.SecurityService.needsPasswordHashUpgrade(legacy), true);
+    assert.equal(mod.SecurityService.needsPasswordHashUpgrade(legacySameCost), true);
     assert.equal(mod.SecurityService.needsPasswordHashUpgrade(current), false);
   } finally {
     mod.MasterRepository.getGlobalSettingFast = original;
@@ -70,4 +72,25 @@ test('Super Admin health UI exposes the calibration action', () => {
   assert.match(html, /Calibrate Password Hashing/);
   assert.match(html, /security\.calibrateKdf/);
   assert.match(html, /recommendedIterations/);
+});
+
+
+test('new password hashes use v2 framing and transparent rehash does not rotate PasswordVersion', () => {
+  const originalPepper = mod.SecurityService.getPepper;
+  const originalSetting = mod.MasterRepository.getGlobalSettingFast;
+  try {
+    mod.SecurityService.getPepper = () => 'test-pepper';
+    mod.MasterRepository.getGlobalSettingFast = () => '10000';
+    const hash = mod.SecurityService.hashPassword('A-valid-test-password-123!');
+    assert.match(hash, /^\$pbkdf2\$v2\$i=10000\$[0-9a-f]+\$[0-9a-f]+$/);
+    assert.equal(mod.SecurityService.verifyPassword('A-valid-test-password-123!', hash), true);
+  } finally {
+    mod.SecurityService.getPepper = originalPepper;
+    mod.MasterRepository.getGlobalSettingFast = originalSetting;
+  }
+
+  const upgradeStart = source.indexOf('SecurityService.needsPasswordHashUpgrade(cred.PasswordHash)');
+  const upgradeEnd = source.indexOf("if (cred.MfaEnabled === true || cred.MfaEnabled === 'TRUE')", upgradeStart);
+  const upgradeBlock = source.slice(upgradeStart, upgradeEnd);
+  assert.doesNotMatch(upgradeBlock, /PasswordVersion\s*:/);
 });

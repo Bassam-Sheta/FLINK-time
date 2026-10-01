@@ -2268,10 +2268,19 @@ var SecurityService = (typeof global !== 'undefined' && global.SecurityService) 
     return derived.map(b => b.toString(16).padStart(2, '0')).join('');
   },
 
+  getStoredPasswordMetadata(storedHashString) {
+    if (!storedHashString) return { version: '', iterations: 0 };
+    const match = String(storedHashString).match(/^\$pbkdf2\$(v1|v2)\$i=(\d+)\$([^$]+)\$([^$]+)$/);
+    if (!match) return { version: '', iterations: 0 };
+    const iterations = parseInt(match[2], 10);
+    if (!Number.isInteger(iterations) || iterations < 10000 || iterations > 1000000) {
+      return { version: '', iterations: 0 };
+    }
+    return { version: match[1], iterations };
+  },
+
   getStoredPasswordIterations(storedHashString) {
-    if (!storedHashString) return 0;
-    const match = String(storedHashString).match(/\$pbkdf2\$v1\$i=(\d+)\$/);
-    return match ? parseInt(match[1], 10) || 0 : 0;
+    return this.getStoredPasswordMetadata(storedHashString).iterations;
   },
 
   getConfiguredPasswordIterations() {
@@ -2297,8 +2306,9 @@ var SecurityService = (typeof global !== 'undefined' && global.SecurityService) 
   },
 
   needsPasswordHashUpgrade(storedHashString) {
-    const stored = this.getStoredPasswordIterations(storedHashString);
-    return stored > 0 && stored < this.getConfiguredPasswordIterations();
+    const stored = this.getStoredPasswordMetadata(storedHashString);
+    if (!stored.iterations) return false;
+    return stored.version !== 'v2' || stored.iterations < this.getConfiguredPasswordIterations();
   },
 
   /**
@@ -2317,7 +2327,8 @@ var SecurityService = (typeof global !== 'undefined' && global.SecurityService) 
     const iterations = Math.min(1000000, Math.max(10000, requested || configured));
     const hash = this.pbkdf2Sync(saltedPepperedPassword, salt, iterations, CONSTANTS.SECURITY.PBKDF2_KEY_BYTES);
 
-    return `$pbkdf2$v1$i=${iterations}${salt}${hash}`;
+    const separator = String.fromCharCode(36);
+    return separator + 'pbkdf2' + separator + 'v2' + separator + 'i=' + iterations + separator + salt + separator + hash;
   },
 
   calibratePasswordKdf(targetMs = 700) {
@@ -2384,20 +2395,33 @@ var SecurityService = (typeof global !== 'undefined' && global.SecurityService) 
    */
   verifyPassword(plaintextPassword, storedHashString) {
     if (!plaintextPassword || !storedHashString) return false;
-    const parts = storedHashString.split('$');
-    // Expected parts: ["", "pbkdf2", "v1", "i=10000", "salt", "hash"]
-    if (parts.length < 6 || parts[1] !== 'pbkdf2' || parts[2] !== 'v1') {
+    const parts = String(storedHashString).split('$');
+    // Expected parts: ["", "pbkdf2", "v1|v2", "i=<iterations>", "salt", "hash"]
+    if (
+      parts.length !== 6 ||
+      parts[1] !== 'pbkdf2' ||
+      (parts[2] !== 'v1' && parts[2] !== 'v2')
+    ) {
       return false;
     }
 
-    const iterMatch = parts[3].match(/i=(\d+)/);
-    const iterations = iterMatch ? parseInt(iterMatch[1], 10) : CONSTANTS.SECURITY.PBKDF2_ITERATIONS;
+    const iterMatch = parts[3].match(/^i=(\d+)$/);
+    const iterations = iterMatch ? parseInt(iterMatch[1], 10) : 0;
+    if (!Number.isInteger(iterations) || iterations < 10000 || iterations > 1000000) {
+      return false;
+    }
     const salt = parts[4];
     const expectedHash = parts[5];
+    if (!salt || !expectedHash) return false;
 
     const pepper = this.getPepper();
     const saltedPepperedPassword = plaintextPassword + pepper;
-    const computedHash = this.pbkdf2Sync(saltedPepperedPassword, salt, iterations, CONSTANTS.SECURITY.PBKDF2_KEY_BYTES);
+    const computedHash = this.pbkdf2Sync(
+      saltedPepperedPassword,
+      salt,
+      iterations,
+      CONSTANTS.SECURITY.PBKDF2_KEY_BYTES
+    );
 
     return this.constantTimeEquals(computedHash, expectedHash);
   },
@@ -3717,12 +3741,10 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
         const targetIterations = SecurityService.getConfiguredPasswordIterations();
         const upgradedHash = SecurityService.hashPassword(password, targetIterations);
         MasterRepository.updateCredentials(account.UserID, {
-          PasswordHash: upgradedHash,
-          PasswordVersion: (parseInt(cred.PasswordVersion, 10) || 1) + 1
+          PasswordHash: upgradedHash
         });
         cred = Object.assign({}, cred, {
-          PasswordHash: upgradedHash,
-          PasswordVersion: (parseInt(cred.PasswordVersion, 10) || 1) + 1
+          PasswordHash: upgradedHash
         });
         MasterRepository.logSecurityEvent({
           UserID: account.UserID,
