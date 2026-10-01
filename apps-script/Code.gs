@@ -2581,8 +2581,10 @@ var SecurityService = (typeof global !== 'undefined' && global.SecurityService) 
   /**
    * Generates RFC 6238 TOTP code for a secret and time
    */
-  generateTotpCode(secret, timeMs = Date.now(), stepSeconds = 30, codeLength = 6) {
-    const rawSecret = this.decryptSecret(secret);
+  generateTotpCode(secret, timeMs = Date.now(), stepSeconds = 30, codeLength = 6, userId = '', secretIsPlaintext = false) {
+    const rawSecret = secretIsPlaintext
+      ? String(secret || '')
+      : KmsSecretService.decryptTotpSecret(userId, secret);
     const keyBytes = this.base32Decode(rawSecret);
     const counter = Math.floor(timeMs / 1000 / stepSeconds);
 
@@ -2634,19 +2636,17 @@ var SecurityService = (typeof global !== 'undefined' && global.SecurityService) 
   /**
    * Verifies an RFC 6238 TOTP code with time drift window tolerance and returns matched step
    */
-  verifyTotpWithStep(secret, code, window = 1, timeMs = Date.now(), stepSeconds = 30) {
+  verifyTotpWithStep(secret, code, window = 1, timeMs = Date.now(), stepSeconds = 30, userId = '') {
     if (!secret || !code) return { valid: false, timeStep: null };
     const cleanCode = String(code).trim();
     if (cleanCode.length !== 6) return { valid: false, timeStep: null };
 
-    // Decrypt once here — generateTotpCode will see it's already plaintext and pass through
-    const rawSecret = this.decryptSecret(secret);
+    // Decrypt once. KMS ciphertext is bound to this UserID through authenticated data.
+    const rawSecret = KmsSecretService.decryptTotpSecret(userId, secret);
 
     for (let errorStep = -window; errorStep <= window; errorStep++) {
       const checkTime = timeMs + (errorStep * stepSeconds * 1000);
-      // rawSecret is already decrypted; generateTotpCode's internal decryptSecret
-      // will detect it's not prefixed with 'enc$v1$' and pass through safely
-      const expectedCode = this.generateTotpCode(rawSecret, checkTime, stepSeconds, 6);
+      const expectedCode = this.generateTotpCode(rawSecret, checkTime, stepSeconds, 6, userId, true);
       if (this.constantTimeEquals(cleanCode, expectedCode)) {
         return {
           valid: true,
@@ -2660,8 +2660,8 @@ var SecurityService = (typeof global !== 'undefined' && global.SecurityService) 
   /**
    * Verifies an RFC 6238 TOTP code with time drift window tolerance (boolean response)
    */
-  verifyTotp(secret, code, window = 1, timeMs = Date.now(), stepSeconds = 30) {
-    return this.verifyTotpWithStep(secret, code, window, timeMs, stepSeconds).valid;
+  verifyTotp(secret, code, window = 1, timeMs = Date.now(), stepSeconds = 30, userId = '') {
+    return this.verifyTotpWithStep(secret, code, window, timeMs, stepSeconds, userId).valid;
   },
 
   /* ------------------- TAMPER-EVIDENT AUDIT HASH CHAINING ------------------- */
@@ -2716,6 +2716,260 @@ var SecurityService = (typeof global !== 'undefined' && global.SecurityService) 
     const message = `CHECKPOINT|${scope}|${dateStr}|${lastHash}|${totalRecords}`;
     const bytes = this.hmacSha256(auditKey, message);
     return Array.from(bytes).map(b => (b < 0 ? b + 256 : b).toString(16).padStart(2, '0')).join('');
+  }
+};
+
+/* ===== KmsSecretService.gs ===== */
+/**
+ * Versioned TOTP secret storage using Google Cloud KMS.
+ *
+ * Modes:
+ * - DISABLED: legacy enc$v1$ remains active for backwards compatibility.
+ * - DUAL_READ: new secrets are KMS-backed; legacy enc$v1$ can still be read for migration.
+ * - KMS_REQUIRED: only kms$v1$ is accepted by normal authentication paths.
+ */
+var KmsSecretService = {
+  MODES: {
+    DISABLED: 'DISABLED',
+    DUAL_READ: 'DUAL_READ',
+    KMS_REQUIRED: 'KMS_REQUIRED'
+  },
+
+  getMode() {
+    let mode = this.MODES.DISABLED;
+    if (typeof PropertiesService !== 'undefined' && PropertiesService.getScriptProperties) {
+      mode = String(
+        PropertiesService.getScriptProperties().getProperty('FLINK_KMS_MODE') ||
+        this.MODES.DISABLED
+      ).toUpperCase();
+    }
+    if (!Object.values(this.MODES).includes(mode)) {
+      throw new AppError(ERROR_CODES.CRYPTO_FAILURE, 'Invalid FLINK_KMS_MODE configuration.', 500);
+    }
+    return mode;
+  },
+
+  getKeyResource() {
+    if (typeof PropertiesService === 'undefined' || !PropertiesService.getScriptProperties) {
+      return '';
+    }
+    const value = String(
+      PropertiesService.getScriptProperties().getProperty('FLINK_KMS_KEY_RESOURCE') || ''
+    ).trim();
+    if (!value) return '';
+    if (!/^projects\/[^/]+\/locations\/[^/]+\/keyRings\/[^/]+\/cryptoKeys\/[^/]+$/.test(value)) {
+      throw new AppError(ERROR_CODES.CRYPTO_FAILURE, 'Invalid Cloud KMS key resource configuration.', 500);
+    }
+    return value;
+  },
+
+  _aad(userId) {
+    const id = String(userId || '').trim();
+    if (!id) {
+      throw new AppError(
+        ERROR_CODES.CRYPTO_FAILURE,
+        'User binding is required for protected MFA secrets.',
+        500
+      );
+    }
+    return 'FLINK_TOTP_V1|' + id;
+  },
+
+  _base64EncodeUtf8(value) {
+    const text = String(value === null || value === undefined ? '' : value);
+    if (typeof Buffer !== 'undefined') {
+      return Buffer.from(text, 'utf8').toString('base64');
+    }
+    return Utilities.base64Encode(text, Utilities.Charset.UTF_8);
+  },
+
+  _base64DecodeUtf8(value) {
+    const encoded = String(value || '');
+    if (typeof Buffer !== 'undefined') {
+      return Buffer.from(encoded, 'base64').toString('utf8');
+    }
+    const bytes = Utilities.base64Decode(encoded);
+    return Utilities.newBlob(bytes).getDataAsString('UTF-8');
+  },
+
+  _sleep(ms) {
+    if (typeof Utilities !== 'undefined' && Utilities.sleep) {
+      Utilities.sleep(ms);
+    }
+  },
+
+  _requestKms(operation, payload) {
+    const keyResource = this.getKeyResource();
+    if (!keyResource) {
+      throw new AppError(
+        ERROR_CODES.CRYPTO_FAILURE,
+        'Cloud KMS is not configured for FLINK Time.',
+        503
+      );
+    }
+    if (
+      typeof UrlFetchApp === 'undefined' ||
+      !UrlFetchApp.fetch ||
+      typeof ScriptApp === 'undefined' ||
+      !ScriptApp.getOAuthToken
+    ) {
+      throw new AppError(ERROR_CODES.CRYPTO_FAILURE, 'Cloud KMS runtime is unavailable.', 503);
+    }
+
+    const correlationId = SecurityService.generateRandomHex(8);
+    const url = 'https://cloudkms.googleapis.com/v1/' + keyResource + ':' + operation;
+    const token = ScriptApp.getOAuthToken();
+
+    for (let attempt = 0; attempt < 3; attempt++) {
+      let response;
+      let status = 0;
+      try {
+        response = UrlFetchApp.fetch(url, {
+          method: 'post',
+          contentType: 'application/json',
+          headers: { Authorization: 'Bearer ' + token },
+          payload: JSON.stringify(payload),
+          muteHttpExceptions: true
+        });
+        status = Number(response.getResponseCode() || 0);
+      } catch (err) {
+        if (attempt < 2) {
+          this._sleep(250 * (attempt + 1));
+          continue;
+        }
+        console.error('Cloud KMS transport failure', {
+          operation,
+          correlationId
+        });
+        throw new AppError(
+          ERROR_CODES.CRYPTO_FAILURE,
+          'Security service is temporarily unavailable. Reference: ' + correlationId,
+          503
+        );
+      }
+
+      if (status >= 200 && status < 300) {
+        try {
+          return JSON.parse(response.getContentText() || '{}');
+        } catch (err) {
+          throw new AppError(
+            ERROR_CODES.CRYPTO_FAILURE,
+            'Cloud KMS returned an invalid response.',
+            503
+          );
+        }
+      }
+
+      const transient = status === 429 || status >= 500;
+      if (transient && attempt < 2) {
+        this._sleep(250 * (attempt + 1));
+        continue;
+      }
+
+      console.error('Cloud KMS request rejected', {
+        operation,
+        status,
+        correlationId
+      });
+      throw new AppError(
+        ERROR_CODES.CRYPTO_FAILURE,
+        'Security service is temporarily unavailable. Reference: ' + correlationId,
+        503
+      );
+    }
+
+    throw new AppError(ERROR_CODES.CRYPTO_FAILURE, 'Cloud KMS request failed.', 503);
+  },
+
+  _encryptWithKms(userId, plaintextSecret) {
+    const result = this._requestKms('encrypt', {
+      plaintext: this._base64EncodeUtf8(plaintextSecret),
+      additionalAuthenticatedData: this._base64EncodeUtf8(this._aad(userId))
+    });
+    if (!result || !result.ciphertext) {
+      throw new AppError(ERROR_CODES.CRYPTO_FAILURE, 'Cloud KMS encryption failed.', 503);
+    }
+    return 'kms$v1$' + String(result.ciphertext);
+  },
+
+  _decryptWithKms(userId, storedCiphertext) {
+    const value = String(storedCiphertext || '');
+    if (!value.startsWith('kms$v1$')) {
+      throw new AppError(ERROR_CODES.CRYPTO_FAILURE, 'Malformed KMS-protected secret format.', 500);
+    }
+    const ciphertext = value.slice('kms$v1$'.length);
+    if (!ciphertext) {
+      throw new AppError(ERROR_CODES.CRYPTO_FAILURE, 'Malformed KMS-protected secret format.', 500);
+    }
+    const result = this._requestKms('decrypt', {
+      ciphertext,
+      additionalAuthenticatedData: this._base64EncodeUtf8(this._aad(userId))
+    });
+    if (!result || !result.plaintext) {
+      throw new AppError(ERROR_CODES.CRYPTO_FAILURE, 'Cloud KMS decryption failed.', 503);
+    }
+    return this._base64DecodeUtf8(result.plaintext);
+  },
+
+  encryptTotpSecret(userId, plaintextSecret) {
+    if (!plaintextSecret) return '';
+    const mode = this.getMode();
+    if (mode === this.MODES.DISABLED) {
+      return SecurityService.encryptSecret(String(plaintextSecret));
+    }
+    return this._encryptWithKms(userId, String(plaintextSecret));
+  },
+
+  decryptTotpSecret(userId, storedCiphertext) {
+    if (!storedCiphertext) return '';
+    const value = String(storedCiphertext);
+
+    // Never fall back from a KMS record to legacy cryptography.
+    if (value.startsWith('kms$v1$')) {
+      return this._decryptWithKms(userId, value);
+    }
+
+    const mode = this.getMode();
+    if (value.startsWith('enc$v1$')) {
+      if (mode === this.MODES.KMS_REQUIRED) {
+        throw new AppError(
+          ERROR_CODES.CRYPTO_FAILURE,
+          'Legacy MFA secret rejected because Cloud KMS is required.',
+          503
+        );
+      }
+      return SecurityService.decryptSecret(value);
+    }
+
+    // Plaintext compatibility is allowed only before KMS migration is activated.
+    if (mode === this.MODES.DISABLED) {
+      return SecurityService.decryptSecret(value);
+    }
+
+    throw new AppError(ERROR_CODES.CRYPTO_FAILURE, 'Unversioned MFA secret rejected.', 503);
+  },
+
+  migrateTotpSecret(userId, storedCiphertext) {
+    const value = String(storedCiphertext || '');
+    if (!value) return '';
+    if (value.startsWith('kms$v1$')) return value;
+
+    const plaintext = value.startsWith('enc$v1$')
+      ? SecurityService.decryptSecret(value)
+      : value;
+    const migrated = this._encryptWithKms(userId, plaintext);
+    const verified = this._decryptWithKms(userId, migrated);
+    if (!SecurityService.constantTimeEquals(String(plaintext), String(verified))) {
+      throw new AppError(ERROR_CODES.CRYPTO_FAILURE, 'KMS migration verification failed.', 503);
+    }
+    return migrated;
+  },
+
+  getStatus() {
+    return {
+      mode: this.getMode(),
+      keyConfigured: !!this.getKeyResource()
+    };
   }
 };
 
@@ -3981,7 +4235,14 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
       );
     }
 
-    const verification = SecurityService.verifyTotpWithStep(cred.TotpSecret, code);
+    const verification = SecurityService.verifyTotpWithStep(
+      cred.TotpSecret,
+      code,
+      1,
+      Date.now(),
+      30,
+      account.UserID
+    );
     if (!verification.valid) {
       const failedCount = (parseInt(cred.FailedLoginCount, 10) || 0) + 1;
       const credUpdates = {
@@ -4132,7 +4393,14 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
       );
     }
 
-    const verification = SecurityService.verifyTotpWithStep(cred.TotpSecret, totpCode);
+    const verification = SecurityService.verifyTotpWithStep(
+      cred.TotpSecret,
+      totpCode,
+      1,
+      Date.now(),
+      30,
+      authContext.userId
+    );
     const previousStep = parseInt(cred.LastSuccessfulTotpStep, 10);
     if (
       !verification.valid ||
@@ -4267,7 +4535,11 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
       }
       const currentVerification = SecurityService.verifyTotpWithStep(
         cred.TotpSecret,
-        currentMfaCode
+        currentMfaCode,
+        1,
+        Date.now(),
+        30,
+        authContext.userId
       );
       const previousStep = parseInt(cred.LastSuccessfulTotpStep, 10);
       if (
@@ -4282,7 +4554,7 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
     }
 
     const rawSecret = SecurityService.generateTotpSecret();
-    const encryptedSecret = SecurityService.encryptSecret(rawSecret);
+    const encryptedSecret = KmsSecretService.encryptTotpSecret(authContext.userId, rawSecret);
     const expiresAtMs =
       Date.now() +
       (CONSTANTS.LIMITS.MFA_ENROLLMENT_TTL_MINUTES || 10) * 60 * 1000;
@@ -4337,7 +4609,14 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
         throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'No pending MFA enrollment found. Call enrollMfa first.');
       }
 
-      const verification = SecurityService.verifyTotpWithStep(cred.PendingTotpSecret, code);
+      const verification = SecurityService.verifyTotpWithStep(
+        cred.PendingTotpSecret,
+        code,
+        1,
+        Date.now(),
+        30,
+        authContext.userId
+      );
       if (!verification.valid) {
         throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'Invalid verification code. Could not verify authenticator app.');
       }
@@ -4405,7 +4684,14 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
       throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'Fresh Super Admin password verification is required.', 401);
     }
     if (adminCred.MfaEnabled === true || adminCred.MfaEnabled === 'TRUE') {
-      const verification = SecurityService.verifyTotpWithStep(adminCred.TotpSecret, adminTotpCode);
+      const verification = SecurityService.verifyTotpWithStep(
+        adminCred.TotpSecret,
+        adminTotpCode,
+        1,
+        Date.now(),
+        30,
+        superAdminContext.userId
+      );
       const previousStep = parseInt(adminCred.LastSuccessfulTotpStep, 10);
       if (
         !verification.valid ||
@@ -14678,6 +14964,69 @@ var MigrationService = (typeof global !== 'undefined' && global.MigrationService
  * Apps Script runtime. It does not read or write user credentials. The sample
  * password and salt below are fixed, non-secret benchmark data.
  */
+/**
+ * Deployment-owner-only bounded migration of stored MFA secrets to Cloud KMS.
+ * Run repeatedly from the Apps Script editor until done=true.
+ */
+function migrateTotpSecretsToKms_() {
+  IdentityService.assertInstallationOwner();
+  const mode = KmsSecretService.getMode();
+  if (mode === KmsSecretService.MODES.DISABLED) {
+    throw new AppError(
+      ERROR_CODES.CRYPTO_FAILURE,
+      'Set FLINK_KMS_MODE to DUAL_READ before migrating MFA secrets.',
+      400
+    );
+  }
+
+  const props = PropertiesService.getScriptProperties();
+  const cursorKey = 'FLINK_KMS_MIGRATION_CURSOR';
+  const batchSize = 25;
+  const rows = MasterRepository.getTableData(CONSTANTS.MASTER_TABS.CREDENTIALS).rows;
+  let cursor = Math.max(0, parseInt(props.getProperty(cursorKey), 10) || 0);
+  let scanned = 0;
+  let migratedRecords = 0;
+
+  for (; cursor < rows.length && scanned < batchSize; cursor++, scanned++) {
+    const row = rows[cursor];
+    const userId = String(row.UserID || '').trim();
+    if (!userId) continue;
+
+    const updates = {};
+    for (const field of ['TotpSecret', 'PendingTotpSecret']) {
+      const current = String(row[field] || '');
+      if (!current || current.startsWith('kms$v1$')) continue;
+      updates[field] = KmsSecretService.migrateTotpSecret(userId, current);
+    }
+
+    if (Object.keys(updates).length) {
+      MasterRepository.updateCredentials(userId, updates);
+      migratedRecords++;
+      MasterRepository.logSecurityEvent({
+        UserID: userId,
+        Username: '',
+        EventType: 'TOTP_KMS_MIGRATED',
+        Success: true,
+        metadata: { fields: Object.keys(updates) }
+      });
+    }
+  }
+
+  const done = cursor >= rows.length;
+  if (done) props.deleteProperty(cursorKey);
+  else props.setProperty(cursorKey, String(cursor));
+
+  const report = {
+    scanned,
+    migratedRecords,
+    nextCursor: done ? null : cursor,
+    done,
+    mode
+  };
+  console.log(JSON.stringify(report));
+  return report;
+}
+
 function benchmarkPasswordKdf_() {
   const report = SecurityService.calibratePasswordKdf(700);
   console.log(JSON.stringify(report, null, 2));
@@ -14911,7 +15260,7 @@ if (typeof module !== 'undefined' && module.exports) {
     handleApiRequest: handleApiRequest_, handleClientRequest, executeApiRequest: executeApiRequest_,
     dispatchAction: dispatchAction_, buildJsonResponse: buildJsonResponse_,
     Flags, SettingsService,
-    IdentityService, SecurityService, AuthorizationService,
+    IdentityService, SecurityService, KmsSecretService, AuthorizationService,
     SessionService, AuthService, TrackingPolicyService,
     MasterRepository, SheetRepository, WorkspaceRouter,
     WorkspaceService, TimezoneService,

@@ -92,20 +92,26 @@ test('Admin capacity metrics require explicit authorized workspace access', () =
   assert.match(block, /JobService\.getCapacityMetrics\(requestedCapacityWorkspace\)/);
 });
 
-test('Apps Script manifest excludes unused advanced services and broad unused scopes', () => {
+test('Apps Script manifest keeps only runtime scopes required by storage, identity, and Cloud KMS', () => {
   const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
   assert.equal(manifest.dependencies, undefined);
   assert.deepEqual(
     manifest.oauthScopes.slice().sort(),
     [
+      'https://www.googleapis.com/auth/cloudkms',
       'https://www.googleapis.com/auth/drive',
+      'https://www.googleapis.com/auth/script.external_request',
       'https://www.googleapis.com/auth/spreadsheets',
       'https://www.googleapis.com/auth/userinfo.email'
     ].sort()
   );
   assert.equal(
     manifest.oauthScopes.includes('https://www.googleapis.com/auth/script.external_request'),
-    false
+    true
+  );
+  assert.deepEqual(
+    manifest.urlFetchWhitelist,
+    ['https://cloudkms.googleapis.com/']
   );
   assert.equal(
     manifest.oauthScopes.includes('https://www.googleapis.com/auth/userinfo.profile'),

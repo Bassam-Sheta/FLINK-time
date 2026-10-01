@@ -1,8 +1,8 @@
 # FLINK Time — Remaining Crypto Security Upgrade Plan
 
-Status: **Prepared, not yet activated in production**
+Status: **Source implementation complete; production KMS provisioning, migration, and final cutover still require deployment-owner activation**
 
-This plan covers the two security items intentionally left outside the previous hardening merge:
+The repository now contains the source changes for both items below. The remaining steps are deployment/runtime activation and verification:
 
 1. Upgrade password storage from the current PBKDF2-HMAC-SHA256 work factor of 10,000.
 2. Replace the custom TOTP secret-at-rest encryption with Google Cloud KMS.
