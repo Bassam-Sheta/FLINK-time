@@ -1,5 +1,5 @@
 {
-  "timeZone": "Etc/GMT",
+  "timeZone": "Africa/Cairo",
   "webapp": {
     "access": "DOMAIN",
     "executeAs": "USER_DEPLOYING"
