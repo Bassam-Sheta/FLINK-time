@@ -348,3 +348,30 @@ test('record ownership still gates update and delete before mutation', () => {
   );
   assert.equal(fx.writes.length, 0);
 });
+
+test('WorkMode (WFH / OFFICE) is recorded and updatable on time entries', () => {
+  const fx = fixture();
+  const created = fx.service.createManualEntry(
+    user,
+    'W1',
+    {
+      projectId: 'P1',
+      taskId: 'T1',
+      startUtc: '2026-10-04T08:00:00.000Z',
+      endUtc: '2026-10-04T12:00:00.000Z',
+      workMode: 'WFH',
+      description: 'Morning remote session'
+    }
+  );
+  assert.equal(created.workMode, 'WFH');
+
+  const updated = fx.service.updateEntry(
+    user,
+    'W1',
+    'E1',
+    { workMode: 'WFH' },
+    3
+  );
+  assert.equal(updated.workMode, 'WFH');
+  assert.equal(fx.stored.WorkMode, 'WFH');
+});

@@ -222,7 +222,7 @@
     /* Timer Bar */
     .timer-bar {
       display: grid;
-      grid-template-columns: 2fr 1.5fr 3fr 1fr auto;
+      grid-template-columns: 2fr 1.5fr 1fr 1fr 3fr 1fr auto;
       gap: 1rem;
       align-items: center;
       background: var(--bg-surface);
@@ -575,6 +575,13 @@
         <div>
           <label>Tags</label>
           <select id="timerTagsSelect" multiple title="Hold Ctrl/Cmd to select multiple tags"></select>
+        </div>
+        <div>
+          <label>Mode</label>
+          <select id="timerWorkModeSelect">
+            <option value="OFFICE">Office</option>
+            <option value="WFH">WFH</option>
+          </select>
         </div>
         <div>
           <label>What are you working on?</label>
@@ -1306,6 +1313,9 @@
         const timer = await apiCall('timer.getActive');
         if (timer) {
           state.activeTimer = timer;
+          if (timer.workMode && document.getElementById('timerWorkModeSelect')) {
+            document.getElementById('timerWorkModeSelect').value = timer.workMode;
+          }
           startLocalClock(timer.startedAtUTC);
           const btn = document.getElementById('timerToggleBtn');
           btn.innerText = 'STOP';
@@ -1396,6 +1406,7 @@
         const taskId = document.getElementById('timerTaskSelect').value;
         const description = document.getElementById('timerDescriptionInput').value;
         const tagIds = Array.from(document.getElementById('timerTagsSelect').selectedOptions).map(option => option.value);
+        const workMode = document.getElementById('timerWorkModeSelect') ? document.getElementById('timerWorkModeSelect').value : 'OFFICE';
         const operationId =
           state.pendingTimerStartOperationId || newOperationId();
         state.pendingTimerStartOperationId = operationId;
@@ -1406,6 +1417,7 @@
             taskId,
             description,
             tagIds,
+            workMode,
             operationId
           });
           state.pendingTimerStartOperationId = '';

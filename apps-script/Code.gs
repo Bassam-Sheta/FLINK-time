@@ -395,14 +395,14 @@ var WORKSPACE_SCHEMA = {
   ],
   ActiveTimers: [
     'TimerID', 'UserID', 'ProjectID', 'TaskID', 'Description',
-    'TagIDs', 'StartedAtUTC', 'StartedAtLocal', 'Billable', 'Source', 'LastHeartbeat'
+    'TagIDs', 'StartedAtUTC', 'StartedAtLocal', 'Billable', 'Source', 'LastHeartbeat', 'WorkMode'
   ],
   TimeEntries: [
     'EntryID', 'UserID', 'ProjectID', 'TaskID', 'Description', 'Tags',
     'StartUTC', 'EndUTC', 'DurationSeconds', 'Billable',
     'HourlyRateSnapshot', 'CostRateSnapshot', 'EntrySource', 'ManualEntry',
     'Status', 'ApprovalStatus', 'TimesheetID', 'Locked',
-    'CreatedAt', 'CreatedBy', 'UpdatedAt', 'UpdatedBy', 'DeletedAt', 'DeletedBy', 'Version'
+    'CreatedAt', 'CreatedBy', 'UpdatedAt', 'UpdatedBy', 'DeletedAt', 'DeletedBy', 'Version', 'WorkMode'
   ],
   Timesheets: [
     'TimesheetID', 'UserID', 'PeriodStart', 'PeriodEnd', 'TotalSeconds',
@@ -466,7 +466,16 @@ var SETTINGS_CATALOG = [
   { key:'SESSION_MAX_HOURS', group:'Security', label:'Maximum Session Length (Hours)', type:'number', default:24, min:1, max:168, options:[], scope:'GLOBAL', stepUp:true, help:'Absolute maximum session lifetime.' },
   { key:'PBKDF2_ITERATIONS', group:'Security', label:'Password Hash Iterations', type:'number', default:10000, min:10000, max:1000000, options:[], scope:'GLOBAL', stepUp:true, help:'PBKDF2 work factor. Use System Health calibration before increasing it.' },
 
-  { key:'FEATURE_TIMESHEET_APPROVAL', group:'Features', label:'Timesheet Approval', type:'bool', default:false, min:null, max:null, options:[], scope:'WORKSPACE', stepUp:true, help:'Approval workflow feature flag. Target design keeps this off.' },
+  { key:'FEATURE_TIMESHEET_APPROVAL', group:'Optional Modules', label:'Timesheet Approval', type:'bool', default:false, min:null, max:null, options:[], scope:'WORKSPACE', stepUp:true, help:'Approval workflow feature flag. Target design keeps this off.' },
+  { key:'FEATURE_TIME_OFF', group:'Optional Modules', label:'Time Off & Leaves', type:'bool', default:false, min:null, max:null, options:[], scope:'WORKSPACE', stepUp:false, help:'Time off and leave tracking module. Off by default.' },
+  { key:'FEATURE_SCHEDULING', group:'Optional Modules', label:'Scheduling & Shifts', type:'bool', default:false, min:null, max:null, options:[], scope:'WORKSPACE', stepUp:false, help:'Shift and schedule planning module. Off by default.' },
+  { key:'FEATURE_EXPENSES', group:'Optional Modules', label:'Expenses Tracking', type:'bool', default:false, min:null, max:null, options:[], scope:'WORKSPACE', stepUp:false, help:'Project expenses and reimbursables module. Off by default.' },
+  { key:'FEATURE_INVOICING', group:'Optional Modules', label:'Invoicing & Billing', type:'bool', default:false, min:null, max:null, options:[], scope:'WORKSPACE', stepUp:false, help:'Client invoicing and billing module. Off by default.' },
+
+  { key:'WEEK_STARTS', group:'Time Tracking', label:'Week Start Day', type:'select', default:'Sunday', min:null, max:null, options:['Sunday','Monday','Saturday'], scope:'WORKSPACE', stepUp:false, help:'First day of the business week for this workspace.' },
+  { key:'FEATURE_WFH_TRACKING', group:'Workforce Policy', label:'Enable WFH Labeling & Logging', type:'bool', default:true, min:null, max:null, options:[], scope:'WORKSPACE', stepUp:false, help:'Enables WFH / Office labeling and logs for managers and Super Admin.' },
+  { key:'WFH_DAYS_PER_WEEK', group:'Workforce Policy', label:'Allowed WFH Days / Week', type:'number', default:2, min:0, max:7, options:[], scope:'WORKSPACE', stepUp:false, help:'Maximum allowed work-from-home days per week for team members.' },
+
   { key:'ALLOW_USER_PROJECT_SWITCH', group:'Time Tracking', label:'Allow Project Switching', type:'bool', default:true, min:null, max:null, options:[], scope:'WORKSPACE', stepUp:false, help:'Allows users to change projects according to WP3 rules.' },
   { key:'ENTRY_EDIT_WINDOW_DAYS', group:'Time Tracking', label:'Entry Edit Window (Days)', type:'number', default:0, min:0, max:3650, options:[], scope:'WORKSPACE', stepUp:false, help:'0 means no edit-age limit.' },
   { key:'ALLOW_MANUAL_ENTRIES', group:'Time Tracking', label:'Allow Manual Entries', type:'bool', default:true, min:null, max:null, options:[], scope:'WORKSPACE', stepUp:false, help:'Allows manual time entry creation.' },
@@ -1750,7 +1759,7 @@ const App = {
 
 
 /* ===== SettingsService.gs ===== */
-var Flags = {
+var Flags = (typeof global !== 'undefined' && global.Flags) || {
   _requestCache: { FLAGS: null, workspaces: {} },
 
   beginRequest() {
@@ -6914,15 +6923,29 @@ var TimezoneService = (typeof global !== 'undefined' && global.TimezoneService) 
       'Sunday', 'Monday', 'Tuesday', 'Wednesday',
       'Thursday', 'Friday', 'Saturday'
     ];
-    const workspaceOverride = MasterRepository.getGlobalSetting(
-      `WS_${workspaceId}_WEEK_STARTS`,
-      ''
-    );
-    const configured = String(
-      workspaceOverride ||
-      MasterRepository.getGlobalSetting('WEEK_STARTS', 'Sunday') ||
-      'Sunday'
-    ).trim();
+    let configured = '';
+    // 1. Explicit workspace-specific override in MasterRepository (e.g. WS_W1_WEEK_STARTS)
+    if (typeof MasterRepository !== 'undefined' && MasterRepository.getGlobalSetting) {
+      configured = MasterRepository.getGlobalSetting(`WS_${workspaceId}_WEEK_STARTS`, '');
+    }
+    // 2. Explicit workspace setting via Flags if stored
+    if (!configured && typeof Flags !== 'undefined' && Flags._loadWorkspace) {
+      try {
+        const wsMap = Flags._loadWorkspace(workspaceId);
+        if (wsMap && wsMap.WEEK_STARTS) {
+          configured = wsMap.WEEK_STARTS;
+        }
+      } catch (e) {}
+    }
+    // 3. Global setting in MasterRepository (e.g. WEEK_STARTS)
+    if (!configured && typeof MasterRepository !== 'undefined' && MasterRepository.getGlobalSetting) {
+      configured = MasterRepository.getGlobalSetting('WEEK_STARTS', '');
+    }
+    // 4. Default to Sunday
+    if (!configured) {
+      configured = 'Sunday';
+    }
+    configured = String(configured).trim();
 
     const canonical = dayNames.find(
       day => day.toLowerCase() === configured.toLowerCase()
@@ -7582,7 +7605,8 @@ var TimeEntryService = (typeof global !== 'undefined' && global.TimeEntryService
         UpdatedBy: authContext.userId,
         DeletedAt: '',
         DeletedBy: '',
-        Version: 1
+        Version: 1,
+        WorkMode: payload.workMode === 'WFH' ? 'WFH' : 'OFFICE'
       };
 
       SheetRepository.createTimeEntry(workspaceId, timeEntry);
@@ -7630,7 +7654,7 @@ var TimeEntryService = (typeof global !== 'undefined' && global.TimeEntryService
     }
 
     const mutableFields = [
-      'projectId', 'taskId', 'description', 'tags', 'billable', 'startUtc', 'endUtc'
+      'projectId', 'taskId', 'description', 'tags', 'billable', 'startUtc', 'endUtc', 'workMode'
     ];
     if (!mutableFields.some(field => Object.prototype.hasOwnProperty.call(updates, field))) {
       throw new AppError(
@@ -7712,6 +7736,7 @@ var TimeEntryService = (typeof global !== 'undefined' && global.TimeEntryService
       if (updates.description !== undefined) allowed.Description = tracking.description;
       if (updates.tags !== undefined) allowed.Tags = tracking.tagIdsCsv;
       if (updates.billable !== undefined) allowed.Billable = tracking.billable;
+      if (updates.workMode !== undefined) allowed.WorkMode = updates.workMode === 'WFH' ? 'WFH' : 'OFFICE';
 
       if (updates.startUtc !== undefined || updates.endUtc !== undefined) {
         const nextStart = this._canonicalUtcTimestamp(
@@ -7796,6 +7821,7 @@ var TimeEntryService = (typeof global !== 'undefined' && global.TimeEntryService
       taskId: entry.TaskID || '',
       description: entry.Description || '',
       tags: entry.Tags || '',
+      workMode: entry.WorkMode || 'OFFICE',
       startUtc: entry.StartUTC,
       endUtc: entry.EndUTC,
       durationSeconds: durationSeconds,
@@ -7811,6 +7837,7 @@ var TimeEntryService = (typeof global !== 'undefined' && global.TimeEntryService
       // Non-financial compatibility aliases.
       EntryID: entry.EntryID,
       UserID: entry.UserID,
+      WorkMode: entry.WorkMode || 'OFFICE',
       DurationSeconds: durationSeconds,
       ApprovalStatus: entry.ApprovalStatus || 'OPEN',
       Locked: entry.Locked === true || entry.Locked === 'TRUE' || entry.Locked === 1,
@@ -8224,6 +8251,7 @@ var TimerService = (typeof global !== 'undefined' && global.TimerService) || {
       taskId: active.TaskID || '',
       description: active.Description || '',
       tagIds: active.TagIDs || '',
+      workMode: active.WorkMode || 'OFFICE',
       billable: active.Billable === true || active.Billable === 'TRUE' || active.Billable === 1,
       startedAtUTC: active.StartedAtUTC,
       source: active.Source || CONSTANTS.ENTRY_SOURCE.WEB,
@@ -8381,7 +8409,8 @@ var TimerService = (typeof global !== 'undefined' && global.TimerService) || {
         StartedAtLocal: this._formatWorkspaceLocalTime(workspaceId, now),
         Billable: tracking.billable ? true : false,
         Source: source,
-        LastHeartbeat: startedAtUTC
+        LastHeartbeat: startedAtUTC,
+        WorkMode: timerPayload.workMode === 'WFH' ? 'WFH' : 'OFFICE'
       };
 
       SheetRepository.createActiveTimer(workspaceId, timerRecord);
@@ -8541,7 +8570,8 @@ var TimerService = (typeof global !== 'undefined' && global.TimerService) || {
       DeletedBy: '',
       Version: existingEntry
         ? (parseInt(existingEntry.Version, 10) || 1) + 1
-        : 1
+        : 1,
+      WorkMode: (activeTimer && activeTimer.WorkMode === 'WFH') || stopPayload.workMode === 'WFH' ? 'WFH' : 'OFFICE'
     };
 
     let entryMutated = false;

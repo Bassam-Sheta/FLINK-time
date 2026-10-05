@@ -117,3 +117,18 @@ test('formatDateTime includes explicit workspace timezone', () => {
   assert.match(formatted, /Africa\/Cairo$/);
   assert.match(formatted, /^2026-09-27/);
 });
+
+test('workspace week start configured via Flags is honored', () => {
+  global.Flags = {
+    _loadWorkspace(wsId) {
+      if (wsId === 'W1') return { WEEK_STARTS: 'Saturday' };
+      return {};
+    }
+  };
+  const TimezoneService = loadService('UTC', 'Sunday', '');
+  const bounds = TimezoneService.getWeekBounds('W1', '2026-09-27');
+  assert.equal(bounds.startLocalDate, '2026-09-26');
+  assert.equal(bounds.endLocalDate, '2026-10-02');
+  assert.equal(bounds.dayLabels[0], 'Saturday');
+  delete global.Flags;
+});

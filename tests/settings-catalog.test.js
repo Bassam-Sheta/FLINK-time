@@ -12,6 +12,13 @@ const mod = require(codePath);
 
 const requiredKeys = [
   'FEATURE_TIMESHEET_APPROVAL',
+  'FEATURE_TIME_OFF',
+  'FEATURE_SCHEDULING',
+  'FEATURE_EXPENSES',
+  'FEATURE_INVOICING',
+  'WEEK_STARTS',
+  'FEATURE_WFH_TRACKING',
+  'WFH_DAYS_PER_WEEK',
   'ALLOW_USER_PROJECT_SWITCH',
   'ENTRY_EDIT_WINDOW_DAYS',
   'ALLOW_MANUAL_ENTRIES',
@@ -40,7 +47,12 @@ test('WP5 catalog contains every planned first setting with metadata', () => {
     assert.ok(['bool','number','select','text'].includes(entry.type));
     assert.ok(['GLOBAL','WORKSPACE'].includes(entry.scope));
   }
+  // All 5 optional modules default to off (false)
   assert.equal(byKey.get('FEATURE_TIMESHEET_APPROVAL').default, false);
+  assert.equal(byKey.get('FEATURE_TIME_OFF').default, false);
+  assert.equal(byKey.get('FEATURE_SCHEDULING').default, false);
+  assert.equal(byKey.get('FEATURE_EXPENSES').default, false);
+  assert.equal(byKey.get('FEATURE_INVOICING').default, false);
 });
 
 test('catalog validation rejects unknown and out-of-range values', () => {
