@@ -1,0 +1,4 @@
+# Keep line endings identical on every OS so tests and diffs behave the same on Windows and CI.
+* text=auto eol=lf
+*.png binary
+*.jpg binary
