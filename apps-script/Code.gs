@@ -1163,8 +1163,17 @@ const GET_SAFE_ACTIONS = new Set([
   'setup.status'
 ]);
 
+/**
+ * Own-property lookup so inherited names such as 'constructor' or '__proto__'
+ * can never be mistaken for an action. Returns the permission entry or null.
+ */
+function getActionPermission_(action) {
+  if (typeof action !== 'string') return null;
+  return Object.prototype.hasOwnProperty.call(ACTION_PERMISSIONS, action) ? ACTION_PERMISSIONS[action] : null;
+}
+
 function isHttpMethodAllowed_(action, method) {
-  if (!ACTION_PERMISSIONS[action]) return false;
+  if (!getActionPermission_(action)) return false;
   const normalized = String(method || '').toUpperCase();
   if (normalized === 'POST') return true;
   if (normalized === 'GET') return GET_SAFE_ACTIONS.has(action);
@@ -1191,7 +1200,7 @@ function executeApiRequest_(action, requestData, httpMethod = 'POST') {
     WorkspaceRouter.clearCache();
   }
 
-  const perm = ACTION_PERMISSIONS[action];
+  const perm = getActionPermission_(action);
 
   if (!perm) {
     return {
@@ -1208,6 +1217,15 @@ function executeApiRequest_(action, requestData, httpMethod = 'POST') {
         message: `HTTP method ${String(httpMethod || '').toUpperCase()} is not allowed for action ${action}.`,
         statusCode: 405
       }
+    };
+  }
+
+  // google.script.run may deliver null/undefined; anything that is not a plain object is a client error, not a 500.
+  if (requestData === undefined || requestData === null) requestData = {};
+  if (typeof requestData !== 'object' || Array.isArray(requestData)) {
+    return {
+      ok: false,
+      error: { code: ERROR_CODES.VALIDATION_ERROR, message: 'Request body must be an object.', statusCode: 400 }
     };
   }
 
@@ -1252,7 +1270,7 @@ function handleClientRequest(action, requestData) {
  * Action Router with Centralized Default-Deny Authorization
  */
 function dispatchAction_(action, data) {
-  const perm = ACTION_PERMISSIONS[action];
+  const perm = getActionPermission_(action);
   if (!perm) {
     throw new AppError(ERROR_CODES.NOT_FOUND, `Unknown API action: ${action}`, 404);
   }
@@ -15256,7 +15274,7 @@ if (typeof module !== 'undefined' && module.exports) {
     ERROR_CODES, AppError,
     CONSTANTS, MASTER_SCHEMA, WORKSPACE_SCHEMA, SETTINGS_CATALOG, Validation,
     ACTION_PERMISSIONS, PUBLIC_ACTIONS, GET_SAFE_ACTIONS,
-    isHttpMethodAllowed: isHttpMethodAllowed_, App, doGet, doPost,
+    isHttpMethodAllowed: isHttpMethodAllowed_, getActionPermission: getActionPermission_, App, doGet, doPost,
     handleApiRequest: handleApiRequest_, handleClientRequest, executeApiRequest: executeApiRequest_,
     dispatchAction: dispatchAction_, buildJsonResponse: buildJsonResponse_,
     Flags, SettingsService,
