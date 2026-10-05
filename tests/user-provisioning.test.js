@@ -313,3 +313,67 @@ test('successful user provisioning commits account, ACL, member, then audit', ()
     'audit'
   ]);
 });
+
+test('creating user with duplicate email throws CONFLICT', () => {
+  global.AppError = AppError;
+  global.ERROR_CODES = {
+    PERMISSION_DENIED: 'PERMISSION_DENIED',
+    CONFLICT: 'CONFLICT',
+    WORKSPACE_NOT_FOUND: 'WORKSPACE_NOT_FOUND',
+    WORKSPACE_DENIED: 'WORKSPACE_DENIED'
+  };
+  global.CONSTANTS = {
+    ROLES: { SUPER_ADMIN: 'SUPER_ADMIN', ADMIN: 'ADMIN', USER: 'USER' },
+    ACCOUNT_STATUS: { ACTIVE: 'ACTIVE' },
+    WORKSPACE_STATUS: { ACTIVE: 'ACTIVE' },
+    WORKSPACE_TABS: { MEMBERS: 'Members' },
+    AUDIT_EVENTS: { USER_CREATED: 'USER_CREATED' }
+  };
+  global.AuthorizationService = { assertRole() {} };
+  global.Validation = {
+    assertRequired() {},
+    validateUsername(v) { return String(v).toLowerCase(); },
+    validateRole(v) { return v; },
+    validatePassword(v) { return v; },
+    sanitizeCellValue(v) { return v; },
+    validateEmail(v) { return String(v).toLowerCase(); },
+    generateId(prefix) { return prefix === 'USR' ? 'USR-NEW' : prefix + '-1'; }
+  };
+  global.SecurityService = {
+    generateRandomHex() { return 'abcdef1234567890'; },
+    hashPassword() { return 'HASH'; }
+  };
+  global.LockService = {
+    getScriptLock() { return { waitLock() {}, releaseLock() {} }; }
+  };
+  global.SpreadsheetApp = { flush() {} };
+  global.MasterRepository = {
+    findAccountByUsername() { return null; },
+    findAccountByEmail(email) {
+      if (email === 'existing@flinksolutions.com') {
+        return { UserID: 'USR-EXISTING', Email: 'existing@flinksolutions.com' };
+      }
+      return null;
+    }
+  };
+
+  delete require.cache[require.resolve(servicePath)];
+  const { UserService } = require(servicePath);
+
+  assert.throws(
+    () => UserService.createUser(
+      { userId: 'SA1', role: 'SUPER_ADMIN' },
+      {
+        username: 'newuser',
+        displayName: 'New User',
+        email: 'existing@flinksolutions.com',
+        role: 'USER',
+        primaryWorkspaceId: 'W1',
+        temporaryPassword: 'Password123!'
+      }
+    ),
+    err => err instanceof AppError &&
+      err.code === 'CONFLICT' &&
+      /already registered/.test(err.message)
+  );
+});

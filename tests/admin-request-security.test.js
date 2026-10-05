@@ -176,3 +176,61 @@ test('approved lifecycle request revalidates target workspace membership', () =>
   assert.equal(executed, false);
   assert.equal(req.Status, 'PENDING', 'failed execution must release the APPROVED claim for retry');
 });
+
+test('NEW_USER request strips arbitrary extra fields to prevent mass assignment on approval', () => {
+  let createdPayload = null;
+  const req = {
+    RequestID: 'REQ-NEW-1',
+    RequestType: 'NEW_USER',
+    RequestedBy: 'A1',
+    WorkspaceID: 'W1',
+    TargetUserID: '',
+    Status: 'PENDING',
+    RequestedDataJSON: JSON.stringify({
+      username: 'cand1',
+      displayName: 'Candidate One',
+      email: 'cand1@example.com',
+      role: 'USER',
+      isAdmin: true,
+      permissions: ['ALL'],
+      extraSneakyProp: 'injected'
+    }),
+    Reason: 'new hire'
+  };
+
+  const svc = loadService({
+    MasterRepository: {
+      getRequest() { return req; },
+      getWorkspace() { return { WorkspaceID: 'W1', Status: 'ACTIVE' }; },
+      updateRequest(_id, patch) {
+        Object.assign(req, patch);
+        return { ...req };
+      },
+      logGlobalAudit() {}
+    },
+    UserService: {
+      createUser(ctx, payload) {
+        createdPayload = payload;
+        return { userId: 'USR-NEW' };
+      }
+    }
+  });
+
+  const res = svc.reviewRequest(
+    { userId: 'SA1', role: 'SUPER_ADMIN' },
+    'REQ-NEW-1',
+    { action: 'APPROVE' }
+  );
+
+  assert.equal(res.ok, true);
+  assert.deepEqual(createdPayload, {
+    username: 'cand1',
+    displayName: 'Candidate One',
+    email: 'cand1@example.com',
+    role: 'USER',
+    primaryWorkspaceId: 'W1'
+  });
+  assert.equal(createdPayload.isAdmin, undefined);
+  assert.equal(createdPayload.permissions, undefined);
+  assert.equal(createdPayload.extraSneakyProp, undefined);
+});

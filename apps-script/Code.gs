@@ -5441,6 +5441,16 @@ var MasterRepository = (typeof global !== 'undefined' && global.MasterRepository
     return this.findRowByKey(CONSTANTS.MASTER_TABS.ACCOUNTS, 'UserID', userId);
   },
 
+  findAccountByEmail(email) {
+    const cleanEmail = String(email || '').trim().toLowerCase();
+    return this.findRowByKey(
+      CONSTANTS.MASTER_TABS.ACCOUNTS,
+      'Email',
+      cleanEmail,
+      { matchCase: false }
+    );
+  },
+
   createAccount(accountData, credentialData) {
     if (!accountData || !accountData.UserID || !credentialData || credentialData.UserID !== accountData.UserID) {
       throw new AppError(
@@ -9379,6 +9389,14 @@ var ApprovalService = (typeof global !== 'undefined' && global.ApprovalService) 
       const timesheet = SheetRepository.getTimesheet(workspaceId, timesheetId);
       if (!timesheet) throw new AppError(ERROR_CODES.NOT_FOUND, `Timesheet ${timesheetId} not found.`);
 
+      if (timesheet.UserID === authContext.userId) {
+        throw new AppError(
+          ERROR_CODES.PERMISSION_DENIED,
+          'Self-approval is forbidden. Timesheets must be approved by another administrator.',
+          403
+        );
+      }
+
       this._assertTransition(
         timesheet.Status,
         CONSTANTS.TIMESHEET_STATUS.APPROVED
@@ -11062,6 +11080,14 @@ var UserService = (typeof global !== 'undefined' && global.UserService) || {
         throw new AppError(ERROR_CODES.CONFLICT, `Username '${username}' is already taken.`);
       }
 
+      // Verify email uniqueness inside lock
+      if (typeof MasterRepository.findAccountByEmail === 'function') {
+        const existingEmail = MasterRepository.findAccountByEmail(email);
+        if (existingEmail) {
+          throw new AppError(ERROR_CODES.CONFLICT, `Email '${email}' is already registered to another account.`);
+        }
+      }
+
       const userId = Validation.generateId('USR');
       const temporaryPassword = userPayload.temporaryPassword || userPayload.password || SecurityService.generateTemporaryPassword();
       Validation.validatePassword(temporaryPassword);
@@ -11601,6 +11627,7 @@ var AdminRequestService = (typeof global !== 'undefined' && global.AdminRequestS
       }
     }
 
+    let cleanRequestedData = null;
     if (requestType === CONSTANTS.REQUEST_TYPES.NEW_USER) {
       if (!requestedData || typeof requestedData !== 'object' || Array.isArray(requestedData)) {
         throw new AppError(
@@ -11613,7 +11640,11 @@ var AdminRequestService = (typeof global !== 'undefined' && global.AdminRequestS
         requestedData,
         ['username', 'displayName', 'email']
       );
-      requestedData.email = Validation.validateEmail(requestedData.email);
+      const cleanEmail = Validation.validateEmail(requestedData.email);
+      const cleanUsername = typeof Validation.validateUsername === 'function'
+        ? Validation.validateUsername(requestedData.username)
+        : String(requestedData.username || '').trim().toLowerCase();
+      const cleanDisplayName = Validation.sanitizeCellValue(String(requestedData.displayName || '').trim());
       const requestedRole = requestedData.role || CONSTANTS.ROLES.USER;
       if (requestedRole !== CONSTANTS.ROLES.USER) {
         throw new AppError(
@@ -11621,6 +11652,15 @@ var AdminRequestService = (typeof global !== 'undefined' && global.AdminRequestS
           'Admin-created user requests may only request ordinary USER accounts.',
           403
         );
+      }
+      cleanRequestedData = {
+        username: cleanUsername,
+        displayName: cleanDisplayName,
+        email: cleanEmail,
+        role: CONSTANTS.ROLES.USER
+      };
+      if (requestedData.temporaryPassword) {
+        cleanRequestedData.temporaryPassword = String(requestedData.temporaryPassword);
       }
     }
 
@@ -11633,7 +11673,7 @@ var AdminRequestService = (typeof global !== 'undefined' && global.AdminRequestS
       RequestedBy: adminContext.userId,
       WorkspaceID: workspaceId,
       TargetUserID: targetUserId || '',
-      RequestedDataJSON: requestedData ? JSON.stringify(Validation.sanitizeRow(requestedData)) : '',
+      RequestedDataJSON: cleanRequestedData ? JSON.stringify(cleanRequestedData) : (requestedData ? JSON.stringify(Validation.sanitizeRow(requestedData)) : ''),
       Reason: Validation.sanitizeCellValue(reason),
       Status: CONSTANTS.REQUEST_STATUS.PENDING,
       RequestedAt: now,
@@ -11786,13 +11826,20 @@ var AdminRequestService = (typeof global !== 'undefined' && global.AdminRequestS
           requestedData,
           ['username', 'displayName', 'email']
         );
-        requestedData.email = Validation.validateEmail(requestedData.email);
+        const cleanUserPayload = {
+          username: typeof Validation.validateUsername === 'function'
+            ? Validation.validateUsername(requestedData.username)
+            : String(requestedData.username || '').trim().toLowerCase(),
+          displayName: Validation.sanitizeCellValue(String(requestedData.displayName || '').trim()),
+          email: Validation.validateEmail(requestedData.email),
+          role: CONSTANTS.ROLES.USER,
+          primaryWorkspaceId: req.WorkspaceID
+        };
+        if (requestedData.temporaryPassword) {
+          cleanUserPayload.temporaryPassword = String(requestedData.temporaryPassword);
+        }
 
-        executionResult = UserService.createUser(superAdminContext, {
-          ...requestedData,
-          primaryWorkspaceId: req.WorkspaceID,
-          role: CONSTANTS.ROLES.USER
-        });
+        executionResult = UserService.createUser(superAdminContext, cleanUserPayload);
       } else if (
         req.RequestType === CONSTANTS.REQUEST_TYPES.MAKE_PASSIVE ||
         req.RequestType === CONSTANTS.REQUEST_TYPES.PASSWORD_RESET

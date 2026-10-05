@@ -92,7 +92,8 @@ function fixture(options = {}) {
     VALIDATION_ERROR:'VALIDATION_ERROR',
     NOT_FOUND:'NOT_FOUND',
     CONFLICT:'CONFLICT',
-    SERVER_BUSY:'SERVER_BUSY'
+    SERVER_BUSY:'SERVER_BUSY',
+    PERMISSION_DENIED:'PERMISSION_DENIED'
   };
   global.CONSTANTS = {
     ROLES:{ SUPER_ADMIN:'SUPER_ADMIN', ADMIN:'ADMIN', USER:'USER' },
@@ -321,4 +322,16 @@ test('audit failure after committed approval does not report business mutation a
   const result = fx.service.approveTimesheet(admin, 'W1', 'TMS-1', 'ok');
   assert.equal(result.Status, 'APPROVED');
   assert.equal(fx.timesheet.Status, 'APPROVED');
+});
+
+test('self-approval is forbidden and throws PERMISSION_DENIED', () => {
+  const fx = fixture();
+  const selfAdmin = { userId: 'USR-1', role: 'ADMIN' };
+  assert.throws(
+    () => fx.service.approveTimesheet(selfAdmin, 'W1', 'TMS-1', 'ok'),
+    err => err instanceof AppError &&
+      err.code === 'PERMISSION_DENIED' &&
+      /Self-approval is forbidden/.test(err.message)
+  );
+  assert.equal(fx.calls.length, 0);
 });
