@@ -214,7 +214,8 @@ var CONSTANTS = {
     STEP_UP_TTL_MINUTES: 5,
     MAX_SINGLE_ENTRY_HOURS: 24,
     DASHBOARD_LIVE_WINDOW_SECONDS: 60,
-    SESSION_RETENTION_DAYS: 7
+    SESSION_RETENTION_DAYS: 7,
+    AUDIT_CHECKPOINT_RETENTION_DAYS: 90
   },
 
   SECURITY: {
@@ -5545,11 +5546,23 @@ var MasterRepository = (typeof global !== 'undefined' && global.MasterRepository
   },
 
   getWorkspace(workspaceId) {
-    return this.findRowByKey(CONSTANTS.MASTER_TABS.WORKSPACES, 'WorkspaceID', workspaceId);
+    if (!workspaceId) return null;
+    const cacheKey = 'WS:' + workspaceId;
+    if (this._requestCache && this._requestCache[cacheKey] !== undefined) {
+      return this._requestCache[cacheKey];
+    }
+    const ws = this.findRowByKey(CONSTANTS.MASTER_TABS.WORKSPACES, 'WorkspaceID', workspaceId);
+    if (this._requestCache) {
+      this._requestCache[cacheKey] = ws;
+    }
+    return ws;
   },
 
   createWorkspace(workspaceData) {
     this.appendRow(CONSTANTS.MASTER_TABS.WORKSPACES, workspaceData);
+    if (this._requestCache && workspaceData && workspaceData.WorkspaceID) {
+      this._requestCache['WS:' + workspaceData.WorkspaceID] = workspaceData;
+    }
     return workspaceData;
   },
 
@@ -5558,6 +5571,10 @@ var MasterRepository = (typeof global !== 'undefined' && global.MasterRepository
     const ws = rows.find(r => r.WorkspaceID === workspaceId);
     if (!ws) throw new AppError(ERROR_CODES.NOT_FOUND, `Workspace ${workspaceId} not found.`);
     this.updateRow(CONSTANTS.MASTER_TABS.WORKSPACES, ws._rowIndex, updates);
+
+    if (this._requestCache) {
+      delete this._requestCache['WS:' + workspaceId];
+    }
 
     // Workspace status and physical-pointer changes must invalidate the router's
     // warm execution cache immediately; otherwise a previously cached ACTIVE
@@ -8457,7 +8474,6 @@ var TimerService = (typeof global !== 'undefined' && global.TimerService) || {
     }
 
     const now = new Date();
-    const endUTC = now.toISOString();
     const startedAtMs = new Date(activeTimer.StartedAtUTC).getTime();
     if (isNaN(startedAtMs)) {
       throw new AppError(
@@ -8467,12 +8483,32 @@ var TimerService = (typeof global !== 'undefined' && global.TimerService) || {
       );
     }
 
-    let durationSeconds = Math.max(
+    const elapsedSeconds = Math.max(
       1,
       Math.round((now.getTime() - startedAtMs) / 1000)
     );
-    const maxSeconds = CONSTANTS.LIMITS.MAX_SINGLE_ENTRY_HOURS * 3600;
-    if (durationSeconds > maxSeconds) durationSeconds = maxSeconds;
+    let configuredAutoStop = 0;
+    try {
+      if (
+        typeof Flags !== 'undefined' &&
+        Flags.getValue &&
+        typeof MasterRepository !== 'undefined' &&
+        typeof MasterRepository.getAllGlobalSettingsStrict === 'function'
+      ) {
+        configuredAutoStop = Number(Flags.getValue('AUTO_STOP_HOURS'));
+      }
+    } catch (e) {
+      configuredAutoStop = 0;
+    }
+    const effectiveMaxHours =
+      configuredAutoStop > 0
+        ? Math.min(CONSTANTS.LIMITS.MAX_SINGLE_ENTRY_HOURS, configuredAutoStop)
+        : CONSTANTS.LIMITS.MAX_SINGLE_ENTRY_HOURS;
+    const maxSeconds = effectiveMaxHours * 3600;
+    const durationSeconds = Math.min(elapsedSeconds, maxSeconds);
+    const endUTC = durationSeconds < elapsedSeconds
+      ? new Date(startedAtMs + durationSeconds * 1000).toISOString()
+      : now.toISOString();
 
     const mergedTrackingPayload = {
       projectId: stopPayload.projectId !== undefined
@@ -13418,6 +13454,7 @@ var JobService = (typeof global !== 'undefined' && global.JobService) || {
     let purgedMfaChallengesCount = 0;
     let purgedMfaEnrollmentsCount = 0;
     let purgedStepUpsCount = 0;
+    let purgedCheckpointsCount = 0;
 
     try {
       const { rows: sessions } = MasterRepository.getTableData(CONSTANTS.MASTER_TABS.SESSIONS);
@@ -13551,6 +13588,29 @@ var JobService = (typeof global !== 'undefined' && global.JobService) || {
               props.deleteProperty(key);
               purgedStepUpsCount++;
             }
+            continue;
+          }
+
+          const checkpointPrefix =
+            (CONSTANTS.SECURITY && CONSTANTS.SECURITY.CHECKPOINT_PROPERTY_PREFIX) ||
+            'FLINK_AUDIT_CHECKPOINT_';
+          if (key.startsWith(checkpointPrefix)) {
+            const checkpointRetentionDays =
+              (CONSTANTS.LIMITS && CONSTANTS.LIMITS.AUDIT_CHECKPOINT_RETENTION_DAYS) || 90;
+            const checkpointCutoffMs =
+              now - checkpointRetentionDays * 24 * 3600 * 1000;
+            let expired = false;
+            try {
+              const cp = JSON.parse(raw);
+              const cpDate = new Date(cp.date || cp.checkpointAt || '').getTime();
+              expired = !isNaN(cpDate) && cpDate < checkpointCutoffMs;
+            } catch (e) {
+              expired = true;
+            }
+            if (expired) {
+              props.deleteProperty(key);
+              purgedCheckpointsCount++;
+            }
           }
         }
       }
@@ -13565,10 +13625,10 @@ var JobService = (typeof global !== 'undefined' && global.JobService) || {
         DurationMs: Date.now() - startMs,
         ItemsProcessed:
           expiredSessionsCount + purgedSessionsCount + purgedMfaChallengesCount +
-          purgedMfaEnrollmentsCount + purgedStepUpsCount,
+          purgedMfaEnrollmentsCount + purgedStepUpsCount + purgedCheckpointsCount,
         Status: CONSTANTS.JOB_STATUS.COMPLETED,
         LogDetails:
-          `Housekeeping revoked ${expiredSessionsCount} expired sessions, purged ${purgedSessionsCount} retained session rows, removed ${purgedMfaChallengesCount} stale MFA challenges, ${purgedMfaEnrollmentsCount} stale MFA enrollments, and ${purgedStepUpsCount} expired step-up grants.`
+          `Housekeeping revoked ${expiredSessionsCount} expired sessions, purged ${purgedSessionsCount} retained session rows, removed ${purgedMfaChallengesCount} stale MFA challenges, ${purgedMfaEnrollmentsCount} stale MFA enrollments, ${purgedStepUpsCount} expired step-up grants, and ${purgedCheckpointsCount} stale audit checkpoints.`
       });
 
       return {
@@ -13577,7 +13637,8 @@ var JobService = (typeof global !== 'undefined' && global.JobService) || {
         purgedSessionsCount,
         purgedMfaChallengesCount,
         purgedMfaEnrollmentsCount,
-        purgedStepUpsCount
+        purgedStepUpsCount,
+        purgedCheckpointsCount
       };
     } catch (e) {
       this.logJobRun({

@@ -68,7 +68,7 @@ test('all browser portals obtain and attach privileged step-up grants', () => {
     const html = fs.readFileSync(file, 'utf8');
     assert.match(html, /async function ensurePrivilegedStepUp\(\)/);
     assert.match(html, /rawApiCall\('auth\.stepUp'/);
-    assert.match(html, /sessionStorage\.setItem\('flink_session_token', state\.token\)/);
+    assert.match(html, /(safeStorage|sessionStorage)\.setItem\('flink_session_token', state\.token\)/);
     assert.match(html, /stepUpToken:\s*await ensurePrivilegedStepUp\(\)/);
   }
 });

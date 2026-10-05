@@ -300,3 +300,61 @@ test('corrupted durable checkpoint fails verification', () => {
   assert.equal(result.verified, false);
   assert.match(result.message, /checkpoint/i);
 });
+
+test('JobService housekeeping prunes audit checkpoints older than retention days', () => {
+  const now = Date.now();
+  const ninetyOneDaysAgo = new Date(now - 91 * 24 * 3600 * 1000).toISOString().split('T')[0];
+  const fiveDaysAgo = new Date(now - 5 * 24 * 3600 * 1000).toISOString().split('T')[0];
+  const prefix = 'FLINK_AUDIT_CHECKPOINT_';
+
+  const propsStore = {
+    [prefix + 'MASTER_' + ninetyOneDaysAgo]: JSON.stringify({
+      scope: 'MASTER',
+      date: ninetyOneDaysAgo,
+      checkpointAt: ninetyOneDaysAgo + 'T00:00:00.000Z'
+    }),
+    [prefix + 'MASTER_' + fiveDaysAgo]: JSON.stringify({
+      scope: 'MASTER',
+      date: fiveDaysAgo,
+      checkpointAt: fiveDaysAgo + 'T00:00:00.000Z'
+    })
+  };
+
+  global.PropertiesService = {
+    getScriptProperties() {
+      return {
+        getProperties() { return { ...propsStore }; },
+        getProperty(key) { return propsStore[key]; },
+        deleteProperty(key) { delete propsStore[key]; }
+      };
+    }
+  };
+
+  global.MasterRepository = {
+    beginRequest() {},
+    getTableData(tabName) {
+      if (tabName === 'Sessions') return { rows: [] };
+      if (tabName === 'Accounts') return { rows: [] };
+      return { rows: [] };
+    }
+  };
+
+  delete global.CONSTANTS;
+  delete require.cache[require.resolve(servicePath)];
+  const code = require(servicePath);
+
+  const jobRunLogs = [];
+  const prevJobServiceLog = code.JobService.logJobRun;
+  code.JobService.logJobRun = (entry) => jobRunLogs.push(entry);
+
+  try {
+    const result = code.JobService.dispatchHousekeeping();
+    assert.equal(result.ok, true);
+    assert.equal(result.purgedCheckpointsCount, 1);
+    assert.equal(propsStore[prefix + 'MASTER_' + ninetyOneDaysAgo], undefined);
+    assert.ok(propsStore[prefix + 'MASTER_' + fiveDaysAgo]);
+  } finally {
+    code.JobService.logJobRun = prevJobServiceLog;
+  }
+});
+

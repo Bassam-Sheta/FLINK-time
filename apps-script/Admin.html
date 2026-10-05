@@ -245,6 +245,30 @@
       text-shadow: 0 0 15px rgba(52, 211, 153, 0.35);
     }
 
+    @media (max-width: 960px) {
+      .timer-bar {
+        grid-template-columns: 1fr 1fr;
+      }
+      .timer-clock {
+        text-align: center;
+        grid-column: span 2;
+      }
+      #timerActionBtn, #timerToggleBtn {
+        grid-column: span 2;
+      }
+    }
+    @media (max-width: 600px) {
+      .timer-bar {
+        grid-template-columns: 1fr;
+      }
+      .timer-clock, #timerActionBtn, #timerToggleBtn {
+        grid-column: span 1;
+      }
+      .grid-2, .grid-3, .grid-4, .grid-5 {
+        grid-template-columns: 1fr;
+      }
+    }
+
     /* Tables */
     .table-responsive {
       overflow-x: auto;
@@ -835,9 +859,36 @@
       alertBox.classList.remove('hidden');
     }
 
+    // Safe storage container for sandboxed/iframe environments
+    const safeStorage = {
+      getItem(key) {
+        try {
+          return (typeof window !== 'undefined' && window.sessionStorage)
+            ? window.sessionStorage.getItem(key)
+            : null;
+        } catch (e) {
+          return null;
+        }
+      },
+      setItem(key, val) {
+        try {
+          if (typeof window !== 'undefined' && window.sessionStorage) {
+            window.sessionStorage.setItem(key, val);
+          }
+        } catch (e) {}
+      },
+      removeItem(key) {
+        try {
+          if (typeof window !== 'undefined' && window.sessionStorage) {
+            window.sessionStorage.removeItem(key);
+          }
+        } catch (e) {}
+      }
+    };
+
     // State Container
     const state = {
-      token: sessionStorage.getItem('flink_session_token') || '',
+      token: safeStorage.getItem('flink_session_token') || '',
       pendingMfaChallengeToken: '',
       user: null,
       currentWorkspace: '',
@@ -1009,7 +1060,7 @@
       }
 
       state.token = result.sessionToken;
-      sessionStorage.setItem('flink_session_token', state.token);
+      safeStorage.setItem('flink_session_token', state.token);
       privilegedStepUpToken = result.stepUpToken;
       privilegedStepUpExpiresAt = new Date(result.stepUpExpiresAt || 0).getTime();
       return privilegedStepUpToken;
@@ -1055,7 +1106,7 @@
           state.user = normalizeUser(res.user, res.role);
           initApp();
         } catch (e) {
-          sessionStorage.removeItem('flink_session_token');
+          safeStorage.removeItem('flink_session_token');
           state.token = '';
           showLogin();
         }
@@ -1078,7 +1129,7 @@
       state.pendingMfaChallengeToken = '';
       state.token = res.sessionToken;
       state.user = normalizeUser(res.user);
-      sessionStorage.setItem('flink_session_token', res.sessionToken);
+      safeStorage.setItem('flink_session_token', res.sessionToken);
 
       const mfaCode = document.getElementById('mfaCode');
       if (mfaCode) mfaCode.value = '';
@@ -1262,9 +1313,10 @@
         // Local sign-out must still complete even if the server is temporarily
         // unreachable; server-side absolute/idle expiry remains the fallback.
       } finally {
-        sessionStorage.removeItem('flink_session_token');
+        safeStorage.removeItem('flink_session_token');
         state.token = '';
         state.user = null;
+        try { document.title = 'FLINK Time'; } catch (e) {}
         location.reload();
       }
     }
@@ -1334,8 +1386,9 @@
         const diffSecs = Math.max(0, Math.floor((Date.now() - startMs) / 1000));
         const hrs = Math.floor(diffSecs / 3600);
         const mins = Math.floor((diffSecs % 3600) / 60);
-        const secs = diffSecs % 60;
-        clockEl.innerText = `${String(hrs).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+        const timeStr = `${String(hrs).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+        clockEl.innerText = timeStr;
+        try { document.title = `[${timeStr}] FLINK Time`; } catch (e) {}
       };
 
       update();
@@ -1391,6 +1444,7 @@
           clearInterval(state.timerInterval);
           document.getElementById('timerClockDisplay').classList.remove('running');
           document.getElementById('timerClockDisplay').innerText = '00:00:00';
+          try { document.title = 'FLINK Time'; } catch (e) {}
           btn.innerText = 'START';
           btn.className = 'btn btn-success';
           loadRecentEntries();
@@ -1925,7 +1979,7 @@
           newPassword
         });
         state.token = result.sessionToken;
-        sessionStorage.setItem('flink_session_token', state.token);
+        safeStorage.setItem('flink_session_token', state.token);
         closeModal();
         alert('Password changed successfully.');
         if (!document.getElementById('accountView').classList.contains('hidden')) {
@@ -2737,7 +2791,7 @@
         const res = await apiCall('setup.completeStep', { step: 1, setupKey, fullName, username, password, confirmPassword });
         state.token = res.sessionToken;
         state.user = res.user;
-        sessionStorage.setItem('flink_session_token', res.sessionToken);
+        safeStorage.setItem('flink_session_token', res.sessionToken);
         renderWizardStep(2);
       } catch (e) {
         alert(e.message || 'Failed to initialize Super Admin.');

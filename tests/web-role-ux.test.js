@@ -100,7 +100,7 @@ test('all portals await server logout before clearing the browser session', () =
   for (const portal of [user, admin, superAdmin]) {
     assert.match(portal, /async function logout\(\)/);
     assert.match(portal, /await apiCall\('auth\.logout'\)/);
-    assert.match(portal, /sessionStorage\.removeItem\('flink_session_token'\)/);
+    assert.match(portal, /(safeStorage|sessionStorage)\.removeItem\('flink_session_token'\)/);
   }
 });
 
