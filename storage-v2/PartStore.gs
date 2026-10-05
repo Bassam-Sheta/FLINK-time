@@ -183,9 +183,16 @@ const PartStore = (function () {
       return { rebuilt: rows.length };
     }
 
+    /** Read-only lookup (full search). Returns the entry or null. */
+    function getEntry(ss, userId, entryId) {
+      const t = tabs_(ss, userId);
+      const row = findEntryRow_(t.entries, entryId);
+      return row ? readEntry_(t.entries, row) : null;
+    }
+
     return {
       names: names, ensureUserTabs: ensureUserTabs, allocatedCells: allocatedCells,
-      start: start, change: change, verify: verify, rebuildEntries: rebuildEntries
+      start: start, change: change, getEntry: getEntry, verify: verify, rebuildEntries: rebuildEntries
     };
   }
 
