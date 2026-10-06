@@ -4588,64 +4588,99 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
       );
     }
 
-    MasterRepository.updateCredentials(authContext.userId, {
-      LastSuccessfulTotpStep: verification.timeStep
-    });
+    // Expensive verification remains outside the lock. Its result is usable only
+    // if all mutable security state still agrees after acquiring the writer lock.
+    return this._withLoginStateLock(() => {
+      // A request may have loaded a whole-table snapshot before waiting. None of
+      // those snapshots can establish current authorization inside this lock.
+      [CONSTANTS.MASTER_TABS.CREDENTIALS, CONSTANTS.MASTER_TABS.ACCOUNTS,
+        CONSTANTS.MASTER_TABS.SESSIONS].forEach(tab => MasterRepository._invalidateTable(tab));
+      const latest = MasterRepository.getCredentials(authContext.userId);
+      const account = MasterRepository.findAccountById(authContext.userId);
+      const tokenHash = SecurityService.hashToken(String(rawSessionToken || '').trim());
+      const session = MasterRepository.findSessionByTokenHashFast(tokenHash);
+      const now = Date.now();
+      const isBlank = value => value === '' || value === undefined || value === null;
+      const integer = (value, blankValue) => {
+        if (isBlank(value)) return blankValue;
+        if ((typeof value !== 'number' && typeof value !== 'string') || !/^\d+$/.test(String(value))) return NaN;
+        const parsed = Number(value);
+        return Number.isSafeInteger(parsed) ? parsed : NaN;
+      };
+      const epoch = account && integer(account.SessionEpoch, 1);
+      const lastStep = latest && integer(latest.LastSuccessfulTotpStep, -1);
+      const lockUntil = latest && (isBlank(latest.LockUntil) ? 0 : new Date(latest.LockUntil).getTime());
+      if (!latest || !account || !session ||
+          account.UserID !== authContext.userId || latest.UserID !== authContext.userId ||
+          account.Status !== CONSTANTS.ACCOUNT_STATUS.ACTIVE || account.Role !== CONSTANTS.ROLES.SUPER_ADMIN ||
+          latest.PasswordHash !== cred.PasswordHash || latest.PasswordVersion !== cred.PasswordVersion ||
+          latest.TotpSecret !== cred.TotpSecret || !(latest.MfaEnabled === true || latest.MfaEnabled === 'TRUE') ||
+          !Number.isFinite(lockUntil) || lockUntil > now ||
+          !Number.isSafeInteger(lastStep) || verification.timeStep <= lastStep ||
+          !Number.isSafeInteger(verification.timeStep) || Math.abs(Math.floor(now / 30000) - verification.timeStep) > 1 ||
+          !Number.isSafeInteger(epoch) || epoch < 1 || integer(session.AccountEpoch, 1) !== epoch ||
+          integer(authContext.session.AccountEpoch, 1) !== epoch ||
+          session.SessionID !== authContext.session.SessionID || session.UserID !== authContext.userId ||
+          session.TokenHash !== tokenHash || session.Revoked === true || session.Revoked === 'TRUE' || session.Revoked === 1 ||
+          !(new Date(session.ExpiresAt).getTime() > now) || !(new Date(session.AbsoluteExpiresAt).getTime() > now)) {
+        throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'Security state changed. Sign in again before reauthenticating.', 401);
+      }
+      const email = IdentityService.assertAccountIdentity(account, session.ClientType);
+      if (IdentityService.normalizeEmail(session.ClientLabel) !== email) {
+        throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'Google identity changed. Sign in again.', 401);
+      }
+      const audit = action => MasterRepository.logGlobalAudit({
+        ActorUserID: authContext.userId, ActorRole: account.Role, WorkspaceID: 'MASTER',
+        EntityType: 'USER_SECURITY', EntityID: authContext.userId, Action: action,
+        BeforeJSON: { stepUpGranted: false, lastSuccessfulTotpStep: latest.LastSuccessfulTotpStep || '' },
+        AfterJSON: { stepUpGranted: true, lastSuccessfulTotpStep: verification.timeStep },
+        CorrelationID: authContext.session.SessionID,
+        Reason: action === 'STEP_UP_AUTHENTICATION_INTENT'
+          ? 'Proposed step-up state after fresh password and MFA verification'
+          : 'Step-up state written; response requires successful flush'
+      });
+      if (!audit('STEP_UP_AUTHENTICATION_INTENT')) {
+        throw new AppError(ERROR_CODES.CRYPTO_FAILURE, 'Security audit trail is unavailable. Step-up authentication was not activated.', 503);
+      }
+      if (typeof SpreadsheetApp !== 'undefined' && SpreadsheetApp.flush) SpreadsheetApp.flush();
 
-    const replacement = SessionService.createSession(
-      authContext.userId,
-      authContext.session.ClientType || 'WEB',
-      authContext.session.ClientLabel || ''
-    );
-    const stepUpToken = 'STP_' + SecurityService.generateRandomHex(32);
-    const stepUpExpiresAtMs =
-      Date.now() + (CONSTANTS.LIMITS.STEP_UP_TTL_MINUTES || 5) * 60 * 1000;
-    this._storeStepUp(replacement.sessionId, {
-      userId: authContext.userId,
-      sessionId: replacement.sessionId,
-      tokenHash: SecurityService.hashToken(stepUpToken),
-      expiresAtMs: stepUpExpiresAtMs
-    });
+      let replacement = null;
+      try {
+        MasterRepository.updateCredentials(authContext.userId, { LastSuccessfulTotpStep: verification.timeStep });
+        MasterRepository.invalidateUserCache(authContext.userId);
+        replacement = SessionService.createSession(authContext.userId, session.ClientType, email);
+        this._deleteStepUp(authContext.session.SessionID);
+        SessionService.revokeSession(rawSessionToken);
 
-    const auditOk = MasterRepository.logGlobalAudit({
-      ActorUserID: authContext.userId,
-      ActorRole: authContext.role,
-      WorkspaceID: 'MASTER',
-      EntityType: 'USER_SECURITY',
-      EntityID: authContext.userId,
-      Action: 'STEP_UP_AUTHENTICATED',
-      Reason: 'Fresh Super Admin password and MFA verification succeeded'
+        const stepUpToken = 'STP_' + SecurityService.generateRandomHex(32);
+        const stepUpExpiresAtMs = Date.now() + (CONSTANTS.LIMITS.STEP_UP_TTL_MINUTES || 5) * 60000;
+        this._storeStepUp(replacement.sessionId, {
+          userId: authContext.userId, sessionId: replacement.sessionId,
+          tokenHash: SecurityService.hashToken(stepUpToken), expiresAtMs: stepUpExpiresAtMs
+        });
+        if (!audit('STEP_UP_AUTHENTICATED')) {
+          throw new AppError(ERROR_CODES.CRYPTO_FAILURE, 'Security audit trail is unavailable. Step-up authentication was not activated.', 503);
+        }
+        MasterRepository.logSecurityEvent({
+          UserID: authContext.userId, Username: account.Username,
+          EventType: 'STEP_UP_SUCCESS', Success: true, metadata: { expiresAtMs: stepUpExpiresAtMs }
+        });
+        if (typeof SpreadsheetApp !== 'undefined' && SpreadsheetApp.flush) SpreadsheetApp.flush();
+        return { ok: true, sessionToken: replacement.sessionToken, expiresAt: replacement.expiresAt,
+          stepUpToken, stepUpExpiresAt: new Date(stepUpExpiresAtMs).toISOString() };
+      } catch (err) {
+        if (replacement) {
+          // Attempt both cleanups even when one backend is unavailable. Neither
+          // bearer token has been returned; retain the primary failure for callers.
+          try { this._deleteStepUp(replacement.sessionId); } catch (cleanupErr) {}
+          try { SessionService.revokeSession(replacement.sessionToken); } catch (cleanupErr) {}
+        }
+        try {
+          if (typeof SpreadsheetApp !== 'undefined' && SpreadsheetApp.flush) SpreadsheetApp.flush();
+        } catch (cleanupErr) {}
+        throw err;
+      }
     });
-    if (!auditOk) {
-      this._deleteStepUp(replacement.sessionId);
-      SessionService.revokeSession(replacement.sessionToken);
-      throw new AppError(
-        ERROR_CODES.CRYPTO_FAILURE,
-        'Security audit trail is unavailable. Step-up authentication was not activated.',
-        503
-      );
-    }
-
-    // Invalidate the previous session's privileged grant before revocation.
-    // Even if the old session row cannot be updated immediately, it must not
-    // retain high-risk authorization after the rotation.
-    this._deleteStepUp(authContext.session.SessionID);
-    SessionService.revokeSession(rawSessionToken);
-    MasterRepository.logSecurityEvent({
-      UserID: authContext.userId,
-      Username: authContext.user ? authContext.user.Username : '',
-      EventType: 'STEP_UP_SUCCESS',
-      Success: true,
-      metadata: { expiresAtMs: stepUpExpiresAtMs }
-    });
-
-    return {
-      ok: true,
-      sessionToken: replacement.sessionToken,
-      expiresAt: replacement.expiresAt,
-      stepUpToken,
-      stepUpExpiresAt: new Date(stepUpExpiresAtMs).toISOString()
-    };
   },
 
   assertStepUp(authContext, stepUpToken) {
@@ -4663,7 +4698,7 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
       !record ||
       record.userId !== authContext.userId ||
       record.sessionId !== authContext.session.SessionID ||
-      Number(record.expiresAtMs || 0) < Date.now() ||
+      !Number.isSafeInteger(record.expiresAtMs) || record.expiresAtMs <= Date.now() ||
       !record.tokenHash ||
       !SecurityService.constantTimeEquals(
         record.tokenHash,
