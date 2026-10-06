@@ -72,6 +72,8 @@ Client-side portal separation is a usability layer only. Server-side `ACTION_PER
 - Daily external checkpoints anchor the Master and each active workspace audit chain in Script Properties.
 - Checkpoints include a full-prefix snapshot HMAC so legacy audit fields become sealed against later mutation.
 - Privileged mutations require a successful pre-action audit write; if the security audit trail is unavailable, the mutation is blocked.
+- Workspace restore records and flushes a correlated `RESTORE_INTENT` with the original, candidate, source-backup and safety-backup identifiers before changing workspace status/pointer. Completion audit and final ACTIVE writes must flush before success is returned.
+- Restore failures treat attempted writes as potentially applied. Candidate cleanup requires either no pointer-switch attempt or a flushed, fresh read confirming the prior ACTIVE pointer. Unconfirmed rollback preserves the candidate, attempts MAINTENANCE containment, and returns `recoveryRequired: true`; it never claims successful rollback. Cleanup itself requires an audited intent. See `RESTORE_RECOVERY_VERIFICATION.md` for interruption and owner-recovery limits.
 
 ## Installation and repository policy
 
