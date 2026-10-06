@@ -5792,6 +5792,31 @@ var MasterRepository = (typeof global !== 'undefined' && global.MasterRepository
     }
   },
 
+  getLastAuditHash(tabName = CONSTANTS.MASTER_TABS.GLOBAL_AUDIT) {
+    try {
+      const ss = this.getMasterSpreadsheet();
+      const sheet = ss && ss.getSheetByName ? ss.getSheetByName(tabName) : null;
+      if (sheet && typeof sheet.getLastRow === 'function' && typeof sheet.getRange === 'function') {
+        const lastRow = sheet.getLastRow();
+        if (lastRow <= 1) return '0000000000000000000000000000000000000000000000000000000000000000';
+        const lastCol = typeof sheet.getLastColumn === 'function' ? sheet.getLastColumn() : (MASTER_SCHEMA[tabName] ? MASTER_SCHEMA[tabName].length : 15);
+        const headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
+        const colIdx = headers.indexOf('RecordHash');
+        if (colIdx >= 0) {
+          const val = sheet.getRange(lastRow, colIdx + 1, 1, 1).getValue();
+          if (val) return String(val).trim();
+        }
+      }
+    } catch (e) {
+      // Fallback to table data if sheet range methods are unmocked
+    }
+    const { rows } = this.getTableData(tabName);
+    if (rows && rows.length > 0 && rows[rows.length - 1].RecordHash) {
+      return rows[rows.length - 1].RecordHash;
+    }
+    return '0000000000000000000000000000000000000000000000000000000000000000';
+  },
+
   logGlobalAudit(auditData) {
     let auditLock = null;
     let acquiredAuditLock = false;
@@ -5821,11 +5846,7 @@ var MasterRepository = (typeof global !== 'undefined' && global.MasterRepository
         ? JSON.stringify(auditData.AfterJSON)
         : (auditData.AfterJSON || '');
 
-      let prevHash = '0000000000000000000000000000000000000000000000000000000000000000';
-      const { rows } = this.getTableData(CONSTANTS.MASTER_TABS.GLOBAL_AUDIT);
-      if (rows.length > 0 && rows[rows.length - 1].RecordHash) {
-        prevHash = rows[rows.length - 1].RecordHash;
-      }
+      const prevHash = this.getLastAuditHash(CONSTANTS.MASTER_TABS.GLOBAL_AUDIT);
 
       const record = Validation.sanitizeRow({
         AuditID: auditId,
@@ -6094,6 +6115,70 @@ var SheetRepository = (typeof global !== 'undefined' && global.SheetRepository) 
   },
 
   /**
+   * Finds one row in a workspace tab matching a key column without reading the whole tab
+   */
+  findRowByKey(workspaceId, tabName, columnName, value, options = {}) {
+    if (value === undefined || value === null || value === '') return null;
+    const cacheKey = this._cacheKey(workspaceId, tabName);
+    if (this._requestCache[cacheKey]) {
+      const cached = this._requestCache[cacheKey];
+      const match = cached.rows.find(r => {
+        const cell = r[columnName];
+        if (options.matchCase === false) {
+          return String(cell || '').toLowerCase() === String(value).toLowerCase();
+        }
+        return String(cell || '') === String(value);
+      });
+      return match || null;
+    }
+
+    try {
+      const ss = WorkspaceRouter.resolveSpreadsheet(workspaceId);
+      const sheet = ss && ss.getSheetByName ? ss.getSheetByName(tabName) : null;
+      const schemaHeaders = WORKSPACE_SCHEMA[tabName];
+      if (
+        sheet &&
+        schemaHeaders &&
+        typeof sheet.getLastRow === 'function' &&
+        typeof sheet.getRange === 'function'
+      ) {
+        const columnIndex = schemaHeaders.indexOf(columnName);
+        if (columnIndex >= 0) {
+          const lastRow = sheet.getLastRow();
+          if (lastRow < 2) return null;
+
+          const finderRange = sheet.getRange(2, columnIndex + 1, lastRow - 1, 1);
+          if (finderRange && typeof finderRange.createTextFinder === 'function') {
+            const cell = finderRange
+              .createTextFinder(String(value))
+              .matchEntireCell(true)
+              .matchCase(options.matchCase !== false)
+              .findNext();
+            if (!cell) return null;
+
+            const rowIndex = cell.getRow();
+            const values = sheet.getRange(rowIndex, 1, 1, schemaHeaders.length).getValues()[0];
+            const row = { _rowIndex: rowIndex };
+            for (let i = 0; i < schemaHeaders.length; i++) row[schemaHeaders[i]] = values[i];
+            return row;
+          }
+        }
+      }
+    } catch (e) {
+      // Fall back to table rows if sheet range methods are unavailable
+    }
+
+    const { rows } = this.getTableData(workspaceId, tabName);
+    return rows.find(r => {
+      const cell = r[columnName];
+      if (options.matchCase === false) {
+        return String(cell || '').toLowerCase() === String(value).toLowerCase();
+      }
+      return String(cell || '') === String(value);
+    }) || null;
+  },
+
+  /**
    * Appends an entity row to a workspace tab
    */
   appendRow(workspaceId, tabName, entity) {
@@ -6319,8 +6404,8 @@ var SheetRepository = (typeof global !== 'undefined' && global.SheetRepository) 
   },
 
   getEntryAnyStatus(workspaceId, entryId) {
-    const { rows } = this.getTableData(workspaceId, CONSTANTS.WORKSPACE_TABS.TIME_ENTRIES);
-    return rows.find(e => e.EntryID === entryId) || null;
+    if (!entryId) return null;
+    return this.findRowByKey(workspaceId, CONSTANTS.WORKSPACE_TABS.TIME_ENTRIES, 'EntryID', entryId);
   },
 
   getEntry(workspaceId, entryId) {
@@ -6333,8 +6418,7 @@ var SheetRepository = (typeof global !== 'undefined' && global.SheetRepository) 
   },
 
   updateTimeEntry(workspaceId, entryId, updates) {
-    const { rows } = this.getTableData(workspaceId, CONSTANTS.WORKSPACE_TABS.TIME_ENTRIES);
-    const entry = rows.find(e => e.EntryID === entryId);
+    const entry = this.getEntryAnyStatus(workspaceId, entryId);
     if (!entry) throw new AppError(ERROR_CODES.NOT_FOUND, `Time entry ${entryId} not found.`);
     this.updateRow(workspaceId, CONSTANTS.WORKSPACE_TABS.TIME_ENTRIES, entry._rowIndex, updates);
     return { ...entry, ...updates };
@@ -6352,8 +6436,8 @@ var SheetRepository = (typeof global !== 'undefined' && global.SheetRepository) 
   },
 
   getTimesheet(workspaceId, timesheetId) {
-    const { rows } = this.getTableData(workspaceId, CONSTANTS.WORKSPACE_TABS.TIMESHEETS);
-    return rows.find(ts => ts.TimesheetID === timesheetId) || null;
+    if (!timesheetId) return null;
+    return this.findRowByKey(workspaceId, CONSTANTS.WORKSPACE_TABS.TIMESHEETS, 'TimesheetID', timesheetId);
   },
 
   createTimesheet(workspaceId, tsData) {
@@ -6361,16 +6445,14 @@ var SheetRepository = (typeof global !== 'undefined' && global.SheetRepository) 
   },
 
   updateTimesheet(workspaceId, timesheetId, updates) {
-    const { rows } = this.getTableData(workspaceId, CONSTANTS.WORKSPACE_TABS.TIMESHEETS);
-    const ts = rows.find(t => t.TimesheetID === timesheetId);
+    const ts = this.getTimesheet(workspaceId, timesheetId);
     if (!ts) throw new AppError(ERROR_CODES.NOT_FOUND, `Timesheet ${timesheetId} not found.`);
     this.updateRow(workspaceId, CONSTANTS.WORKSPACE_TABS.TIMESHEETS, ts._rowIndex, updates);
     return { ...ts, ...updates };
   },
 
   deleteTimesheet(workspaceId, timesheetId) {
-    const { rows } = this.getTableData(workspaceId, CONSTANTS.WORKSPACE_TABS.TIMESHEETS);
-    const ts = rows.find(t => t.TimesheetID === timesheetId);
+    const ts = this.getTimesheet(workspaceId, timesheetId);
     if (!ts) return false;
     this.deleteRow(workspaceId, CONSTANTS.WORKSPACE_TABS.TIMESHEETS, ts._rowIndex);
     return true;
@@ -6381,6 +6463,31 @@ var SheetRepository = (typeof global !== 'undefined' && global.SheetRepository) 
   },
 
   /* ------------------- WORKSPACE AUDIT ------------------- */
+
+  getLastAuditHash(workspaceId, tabName = CONSTANTS.WORKSPACE_TABS.AUDIT_LOG) {
+    try {
+      const ss = WorkspaceRouter.resolveSpreadsheet(workspaceId);
+      const sheet = ss && ss.getSheetByName ? ss.getSheetByName(tabName) : null;
+      if (sheet && typeof sheet.getLastRow === 'function' && typeof sheet.getRange === 'function') {
+        const lastRow = sheet.getLastRow();
+        if (lastRow <= 1) return '0000000000000000000000000000000000000000000000000000000000000000';
+        const lastCol = typeof sheet.getLastColumn === 'function' ? sheet.getLastColumn() : (WORKSPACE_SCHEMA[tabName] ? WORKSPACE_SCHEMA[tabName].length : 13);
+        const headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
+        const colIdx = headers.indexOf('RecordHash');
+        if (colIdx >= 0) {
+          const val = sheet.getRange(lastRow, colIdx + 1, 1, 1).getValue();
+          if (val) return String(val).trim();
+        }
+      }
+    } catch (e) {
+      // Fallback to table data if sheet range methods are unmocked
+    }
+    const { rows } = this.getTableData(workspaceId, tabName);
+    if (rows && rows.length > 0 && rows[rows.length - 1].RecordHash) {
+      return rows[rows.length - 1].RecordHash;
+    }
+    return '0000000000000000000000000000000000000000000000000000000000000000';
+  },
 
   logWorkspaceAudit(workspaceId, auditData) {
     let auditLock = null;
@@ -6409,14 +6516,7 @@ var SheetRepository = (typeof global !== 'undefined' && global.SheetRepository) 
         ? JSON.stringify(auditData.AfterJSON)
         : (auditData.AfterJSON || '');
 
-      let prevHash = '0000000000000000000000000000000000000000000000000000000000000000';
-      const { rows } = this.getTableData(
-        workspaceId,
-        CONSTANTS.WORKSPACE_TABS.AUDIT_LOG
-      );
-      if (rows.length > 0 && rows[rows.length - 1].RecordHash) {
-        prevHash = rows[rows.length - 1].RecordHash;
-      }
+      const prevHash = this.getLastAuditHash(workspaceId, CONSTANTS.WORKSPACE_TABS.AUDIT_LOG);
 
       const record = Validation.sanitizeRow({
         AuditID: auditId,
@@ -8793,10 +8893,116 @@ var TimerService = (typeof global !== 'undefined' && global.TimerService) || {
       Math.round((Date.now() - startedAtMs) / 1000)
     );
 
+    let configuredAutoStop = 0;
+    try {
+      if (
+        typeof Flags !== 'undefined' &&
+        Flags.getValue &&
+        typeof MasterRepository !== 'undefined' &&
+        typeof MasterRepository.getAllGlobalSettingsStrict === 'function'
+      ) {
+        configuredAutoStop = Number(Flags.getValue('AUTO_STOP_HOURS'));
+      }
+    } catch (e) {
+      configuredAutoStop = 0;
+    }
+    const effectiveMaxHours =
+      configuredAutoStop > 0
+        ? Math.min(CONSTANTS.LIMITS.MAX_SINGLE_ENTRY_HOURS, configuredAutoStop)
+        : CONSTANTS.LIMITS.MAX_SINGLE_ENTRY_HOURS;
+    const maxSeconds = effectiveMaxHours * 3600;
+
     return {
       ...this._toActiveTimerResponse(workspaceId, active),
-      elapsedSeconds
+      elapsedSeconds,
+      maxAllowedSeconds: maxSeconds,
+      isOvertime: elapsedSeconds >= maxSeconds
     };
+  },
+
+  /**
+   * Scans active workspaces for runaway timers exceeding AUTO_STOP_HOURS and
+   * finalizes them into completed TimeEntry records clamped to the maximum duration.
+   */
+  autoStopRunawayTimers(asOfDate = new Date()) {
+    let scriptLock = null;
+    if (typeof LockService !== 'undefined' && LockService.getScriptLock) {
+      scriptLock = LockService.getScriptLock();
+      if (!scriptLock.tryLock(15000)) {
+        return { stoppedCount: 0, skipped: true, reason: 'LOCK_UNAVAILABLE' };
+      }
+    }
+
+    let configuredAutoStop = 0;
+    try {
+      if (
+        typeof Flags !== 'undefined' &&
+        Flags.getValue &&
+        typeof MasterRepository !== 'undefined' &&
+        typeof MasterRepository.getAllGlobalSettingsStrict === 'function'
+      ) {
+        configuredAutoStop = Number(Flags.getValue('AUTO_STOP_HOURS'));
+      }
+    } catch (e) {
+      configuredAutoStop = 0;
+    }
+    const effectiveMaxHours =
+      configuredAutoStop > 0
+        ? Math.min(CONSTANTS.LIMITS.MAX_SINGLE_ENTRY_HOURS, configuredAutoStop)
+        : CONSTANTS.LIMITS.MAX_SINGLE_ENTRY_HOURS;
+    const maxMs = effectiveMaxHours * 3600 * 1000;
+    const nowMs = asOfDate.getTime();
+
+    let stoppedCount = 0;
+    try {
+      const activeWorkspaces = (MasterRepository.listWorkspaces && MasterRepository.listWorkspaces()) ||
+        (MasterRepository.getAllWorkspaces && MasterRepository.getAllWorkspaces()) || [];
+      for (const ws of activeWorkspaces) {
+        if (ws.Status !== CONSTANTS.WORKSPACE_STATUS.ACTIVE) continue;
+        try {
+          const timers = SheetRepository.listActiveTimers(ws.WorkspaceID) || [];
+          for (const timer of timers) {
+            const startedAtMs = new Date(timer.StartedAtUTC).getTime();
+            if (isNaN(startedAtMs)) continue;
+            if (nowMs - startedAtMs >= maxMs) {
+              const account = MasterRepository.getAccount(timer.UserID);
+              const ownerContext = {
+                userId: timer.UserID,
+                email: (account && account.Email) || 'unknown@user',
+                role: (account && account.Role) || CONSTANTS.ROLES.USER,
+                isOwner: false,
+                allowedWorkspaces: [ws.WorkspaceID]
+              };
+              const systemAuditContext = {
+                userId: 'SYSTEM',
+                email: 'system@flink.local',
+                role: CONSTANTS.ROLES.SUPER_ADMIN,
+                isOwner: true
+              };
+              try {
+                this._finalizeActiveTimerLocked(
+                  ownerContext,
+                  ws.WorkspaceID,
+                  timer,
+                  { reason: 'AUTO_STOP_RUNAWAY' },
+                  systemAuditContext
+                );
+                stoppedCount++;
+              } catch (finErr) {
+                console.error(`Auto-stop failed for timer ${timer.TimerID} in workspace ${ws.WorkspaceID}: ${finErr.message}`);
+              }
+            }
+          }
+        } catch (wsErr) {
+          console.error(`Auto-stop failed checking workspace ${ws.WorkspaceID}: ${wsErr.message}`);
+        }
+      }
+    } finally {
+      if (scriptLock) {
+        try { scriptLock.releaseLock(); } catch (e) {}
+      }
+    }
+    return { stoppedCount };
   }
 };
 
@@ -13615,6 +13821,17 @@ var JobService = (typeof global !== 'undefined' && global.JobService) || {
         }
       }
 
+      // Auto-stop runaway active timers older than AUTO_STOP_HOURS
+      let autoStoppedTimersCount = 0;
+      try {
+        if (typeof TimerService !== 'undefined' && TimerService.autoStopRunawayTimers) {
+          const autoStopRes = TimerService.autoStopRunawayTimers(new Date(startMs));
+          autoStoppedTimersCount = (autoStopRes && autoStopRes.stoppedCount) || 0;
+        }
+      } catch (autoStopErr) {
+        console.warn('Runaway timer auto-stop notice: ' + autoStopErr.message);
+      }
+
       this.logJobRun({
         RunID: runId,
         JobID: 'JOB_HOUSEKEEPING',
@@ -13625,10 +13842,11 @@ var JobService = (typeof global !== 'undefined' && global.JobService) || {
         DurationMs: Date.now() - startMs,
         ItemsProcessed:
           expiredSessionsCount + purgedSessionsCount + purgedMfaChallengesCount +
-          purgedMfaEnrollmentsCount + purgedStepUpsCount + purgedCheckpointsCount,
+          purgedMfaEnrollmentsCount + purgedStepUpsCount + purgedCheckpointsCount +
+          autoStoppedTimersCount,
         Status: CONSTANTS.JOB_STATUS.COMPLETED,
         LogDetails:
-          `Housekeeping revoked ${expiredSessionsCount} expired sessions, purged ${purgedSessionsCount} retained session rows, removed ${purgedMfaChallengesCount} stale MFA challenges, ${purgedMfaEnrollmentsCount} stale MFA enrollments, ${purgedStepUpsCount} expired step-up grants, and ${purgedCheckpointsCount} stale audit checkpoints.`
+          `Housekeeping revoked ${expiredSessionsCount} expired sessions, purged ${purgedSessionsCount} retained session rows, removed ${purgedMfaChallengesCount} stale MFA challenges, ${purgedMfaEnrollmentsCount} stale MFA enrollments, ${purgedStepUpsCount} expired step-up grants, ${purgedCheckpointsCount} stale audit checkpoints, and auto-stopped ${autoStoppedTimersCount} runaway timers.`
       });
 
       return {
@@ -13638,7 +13856,8 @@ var JobService = (typeof global !== 'undefined' && global.JobService) || {
         purgedMfaChallengesCount,
         purgedMfaEnrollmentsCount,
         purgedStepUpsCount,
-        purgedCheckpointsCount
+        purgedCheckpointsCount,
+        autoStoppedTimersCount
       };
     } catch (e) {
       this.logJobRun({

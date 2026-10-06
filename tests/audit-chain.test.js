@@ -358,3 +358,130 @@ test('JobService housekeeping prunes audit checkpoints older than retention days
   }
 });
 
+test('getLastAuditHash reads single-cell RecordHash without full table scans', () => {
+  delete global.CONSTANTS;
+  delete global.MasterRepository;
+  delete global.SheetRepository;
+  delete require.cache[require.resolve(servicePath)];
+  const code = require(servicePath);
+
+  let getRangeCallCount = 0;
+  let getDataRangeCallCount = 0;
+
+  const mockSheet = {
+    getLastRow() { return 500; },
+    getLastColumn() { return 15; },
+    getRange(row, col, numRows, numCols) {
+      getRangeCallCount++;
+      if (row === 1 && col === 1) {
+        return {
+          getValues() {
+            return [['AuditID', 'TimestampUTC', 'ActorUserID', 'ActorRole', 'WorkspaceID', 'EntityType', 'EntityID', 'Action', 'BeforeJSON', 'AfterJSON', 'Reason', 'CorrelationID', 'ClientType', 'PreviousHash', 'RecordHash']];
+          }
+        };
+      }
+      if (row === 500 && col === 15) {
+        return {
+          getValue() { return '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'; }
+        };
+      }
+      throw new Error(`Unexpected range read: ${row}, ${col}`);
+    },
+    getDataRange() {
+      getDataRangeCallCount++;
+      throw new Error('getDataRange must not be called by getLastAuditHash');
+    }
+  };
+
+  code.MasterRepository.getMasterSpreadsheet = () => ({
+    getSheetByName(name) {
+      if (name === code.CONSTANTS.MASTER_TABS.GLOBAL_AUDIT) return mockSheet;
+      return null;
+    }
+  });
+
+  const hash = code.MasterRepository.getLastAuditHash(code.CONSTANTS.MASTER_TABS.GLOBAL_AUDIT);
+  assert.equal(hash, '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef');
+  assert.equal(getDataRangeCallCount, 0);
+  assert.equal(getRangeCallCount, 2);
+});
+
+test('autoStopRunawayTimers cleanly finalizes timers exceeding AUTO_STOP_HOURS', () => {
+  delete global.CONSTANTS;
+  delete global.MasterRepository;
+  delete global.SheetRepository;
+  delete global.SecurityService;
+  delete global.Utilities;
+  delete require.cache[require.resolve(servicePath)];
+  const code = require(servicePath);
+
+  const wsId = 'WS-AUTOSTOP-TEST';
+  code.MasterRepository.listWorkspaces = () => [
+    { WorkspaceID: wsId, WorkspaceName: 'Test WS', Status: 'ACTIVE' }
+  ];
+  code.MasterRepository.getAllWorkspaces = code.MasterRepository.listWorkspaces;
+  code.MasterRepository.getAllGlobalSettingsStrict = () => ({});
+  code.Flags = { getValue: (k) => k === 'AUTO_STOP_HOURS' ? 14 : null };
+  code.MasterRepository.getAccount = (uid) => ({
+    UserID: uid,
+    Email: 'dev@flink.local',
+    Role: code.CONSTANTS.ROLES.USER
+  });
+
+  const twentySixHoursAgo = new Date(Date.now() - 26 * 3600 * 1000).toISOString();
+  let deletedUserId = null;
+  let createdEntry = null;
+  let auditLogs = [];
+
+  code.SheetRepository.listActiveTimers = (w) => {
+    if (w === wsId) {
+      return [{
+        TimerID: 'TMR-RUNAWAY-1',
+        UserID: 'USR-DEV-1',
+        WorkspaceID: wsId,
+        StartedAtUTC: twentySixHoursAgo,
+        ProjectID: 'PRJ-1',
+        TaskID: 'TSK-1',
+        Description: 'Forgot to stop timer before weekend',
+        TagIDs: '[]',
+        Billable: true,
+        WorkMode: 'OFFICE',
+        Source: 'WEB'
+      }];
+    }
+    return [];
+  };
+
+  code.SheetRepository.getEntryAnyStatus = () => null;
+  code.SheetRepository.createTimeEntry = (w, entry) => {
+    createdEntry = entry;
+    return entry;
+  };
+  code.SheetRepository.deleteActiveTimer = (w, uid) => {
+    deletedUserId = uid;
+    return true;
+  };
+  code.SheetRepository.logWorkspaceAudit = (w, log) => {
+    auditLogs.push(log);
+  };
+
+  // Mock tracking policy
+  code.TrackingPolicyService.validateTrackingContext = () => ({
+    project: { HourlyRate: 100, CostRate: 50 },
+    task: null
+  });
+
+  const res = code.TimerService.autoStopRunawayTimers();
+  assert.equal(res.stoppedCount, 1);
+  assert.equal(deletedUserId, 'USR-DEV-1');
+  assert.ok(createdEntry);
+  assert.equal(createdEntry.UserID, 'USR-DEV-1');
+  // Maximum single entry duration is clamped to 14h (50400s)
+  assert.equal(createdEntry.DurationSeconds, 14 * 3600);
+  assert.equal(auditLogs.length, 1);
+  assert.equal(auditLogs[0].Action, 'TIMER_STOPPED');
+  assert.equal(auditLogs[0].Reason, 'AUTO_STOP_RUNAWAY');
+  assert.equal(auditLogs[0].ActorUserID, 'SYSTEM');
+});
+
+
