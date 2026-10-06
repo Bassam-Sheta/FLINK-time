@@ -278,3 +278,61 @@ test('MFA enrollment confirmation is rejected from another session', () => {
   );
   assert.equal(fx.cred.PendingTotpSecret, '');
 });
+
+test('verifyMfa strictly validates 6-digit numeric pattern before acquiring lock', () => {
+  const fx = loadFixture();
+  const first = fx.AuthService.login('worker', 'Password123!', 'WEB');
+
+  // Non-6-digit or non-numeric tokens must be rejected immediately
+  const invalidCodes = ['', '12345', '1234567', 'abcdef', '12345a', '12 456', 'null', null, undefined];
+  for (const badCode of invalidCodes) {
+    assert.throws(
+      () => fx.AuthService.verifyMfa(first.mfaChallengeToken, badCode, 'WEB'),
+      err => err instanceof AppError && err.code === 'AUTH_REQUIRED' && /6-digit code are required/i.test(err.message),
+      `Expected code "${badCode}" to be rejected by verifyMfa`
+    );
+  }
+});
+
+test('verifyMfa trims leading/trailing whitespace around valid 6-digit code', () => {
+  const fx = loadFixture();
+  const first = fx.AuthService.login('worker', 'Password123!', 'WEB');
+
+  const authenticated = fx.AuthService.verifyMfa(
+    first.mfaChallengeToken,
+    '  123456  ',
+    'WEB'
+  );
+  assert.equal(authenticated.sessionToken, 'SESSION-1');
+  assert.equal(fx.getSessionCount(), 1);
+});
+
+test('verifyMfa enforces caller rate limiting and cleans up challenge on rate limit', () => {
+  const fx = loadFixture();
+  const first = fx.AuthService.login('worker', 'Password123!', 'WEB');
+
+  const cacheValues = new Map();
+  global.CacheService = {
+    getScriptCache() {
+      return {
+        get(key) { return cacheValues.get(key) || null; },
+        put(key, value) { cacheValues.set(key, String(value)); }
+      };
+    }
+  };
+
+  // Pre-fill cache to simulate caller hitting attempt limit (30 per minute)
+  const minuteBucket = Math.floor(Date.now() / 60000);
+  const identityKey = crypto.createHash('sha256').update('worker@example.com').digest('hex').substring(0, 20);
+  const callerKey = `FLINK_LOGIN_CALLER_${identityKey}_${minuteBucket}`;
+  cacheValues.set(callerKey, '30');
+
+  assert.throws(
+    () => fx.AuthService.verifyMfa(first.mfaChallengeToken, '123456', 'WEB'),
+    err => err instanceof AppError && err.code === 'AUTH_REQUIRED' && err.statusCode === 401
+  );
+
+  // Challenge must be deleted so it cannot be abused after rate limiting
+  assert.equal(fx.AuthService._getMfaChallenge('USR-1'), null);
+});
+

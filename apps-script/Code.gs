@@ -698,12 +698,27 @@ var Validation = {
   },
 
   generateId(prefix = 'ID') {
-    // Use Utilities.getUuid() for better entropy than Math.random()
+    // 1. Google Apps Script native UUID
     if (typeof Utilities !== 'undefined' && Utilities.getUuid) {
       const uuid = Utilities.getUuid().replace(/-/g, '').substring(0, 12);
       return `${prefix}-${uuid}`.toUpperCase();
     }
-    // Fallback for testing environments without Apps Script Utilities
+    // 2. Cryptographic random entropy (Node.js crypto / modern Web Crypto)
+    try {
+      let nodeCrypto = (typeof global !== 'undefined' && global.crypto) || (typeof crypto !== 'undefined' && crypto);
+      if (!nodeCrypto && typeof require === 'function') {
+        nodeCrypto = require('crypto');
+      }
+      if (nodeCrypto && typeof nodeCrypto.randomUUID === 'function') {
+        const uuid = nodeCrypto.randomUUID().replace(/-/g, '').substring(0, 12);
+        return `${prefix}-${uuid}`.toUpperCase();
+      }
+      if (nodeCrypto && typeof nodeCrypto.randomBytes === 'function') {
+        const hex = nodeCrypto.randomBytes(6).toString('hex');
+        return `${prefix}-${hex}`.toUpperCase();
+      }
+    } catch (e) {}
+    // 3. Fallback for testing environments without Apps Script Utilities or Node crypto
     const randomHex = () => Math.floor((1 + Math.random()) * 0x10000).toString(16).substring(1);
     const ts = Date.now().toString(36);
     return `${prefix}-${ts}-${randomHex()}${randomHex()}`.toUpperCase();
@@ -2689,7 +2704,7 @@ var SecurityService = (typeof global !== 'undefined' && global.SecurityService) 
   verifyTotpWithStep(secret, code, window = 1, timeMs = Date.now(), stepSeconds = 30, userId = '') {
     if (!secret || !code) return { valid: false, timeStep: null };
     const cleanCode = String(code).trim();
-    if (cleanCode.length !== 6) return { valid: false, timeStep: null };
+    if (!/^\d{6}$/.test(cleanCode)) return { valid: false, timeStep: null };
 
     // Decrypt once. KMS ciphertext is bound to this UserID through authenticated data.
     const rawSecret = KmsSecretService.decryptTotpSecret(userId, secret);
@@ -3646,7 +3661,7 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
     }
   },
 
-  _enforceLoginRateLimit(googleEmail) {
+  _enforceLoginRateLimit(googleEmail, errorMessage = 'Invalid username or password.') {
     if (
       typeof CacheService === 'undefined' ||
       !CacheService.getScriptCache
@@ -3675,7 +3690,7 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
         ) {
           throw new AppError(
             ERROR_CODES.AUTH_REQUIRED,
-            'Invalid username or password.',
+            errorMessage,
             401
           );
         }
@@ -3688,7 +3703,7 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
         ) {
           throw new AppError(
             ERROR_CODES.AUTH_REQUIRED,
-            'Invalid username or password.',
+            errorMessage,
             401
           );
         }
@@ -4156,7 +4171,8 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
    * Verifies RFC 6238 TOTP code during two-factor login challenge
    */
   verifyMfa(mfaChallengeToken, code, clientType = 'WEB') {
-    if (!mfaChallengeToken || !code) {
+    const cleanCode = String(code || '').trim();
+    if (!mfaChallengeToken || !cleanCode || !/^\d{6}$/.test(cleanCode)) {
       throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'MFA challenge token and 6-digit code are required.', 401);
     }
 
@@ -4269,6 +4285,15 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
       );
     }
 
+    try {
+      this._enforceLoginRateLimit(googleEmail, 'Invalid two-factor authentication code.');
+    } catch (rateLimitErr) {
+      if (rateLimitErr instanceof AppError) {
+        this._deleteMfaChallenge(userId);
+      }
+      throw rateLimitErr;
+    }
+
     if (
       account.Status === CONSTANTS.ACCOUNT_STATUS.LOCKED ||
       (cred.LockUntil && new Date(cred.LockUntil).getTime() > now)
@@ -4288,7 +4313,7 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
 
     const verification = SecurityService.verifyTotpWithStep(
       cred.TotpSecret,
-      code,
+      cleanCode,
       1,
       Date.now(),
       30,

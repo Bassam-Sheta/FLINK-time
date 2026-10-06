@@ -113,3 +113,37 @@ test('byte-safe HMAC preserves values above 0x7f', () => {
     .join('');
   assert.equal(actual, expected);
 });
+
+test('verifyTotpWithStep rejects non-6-digit or non-numeric tokens immediately', () => {
+  const SecurityService = loadAppsScriptFallback();
+  const secret = 'GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ';
+
+  const invalidCodes = ['', '12345', '1234567', 'abcdef', '12345a', '12 345', null, undefined];
+  for (const badCode of invalidCodes) {
+    const res = SecurityService.verifyTotpWithStep(secret, badCode, 1, 59000, 30);
+    assert.deepEqual(res, { valid: false, timeStep: null });
+  }
+});
+
+test('Validation.generateId generates cryptographically random IDs without collisions', () => {
+  delete require.cache[require.resolve(servicePath)];
+  const { Validation } = require(servicePath);
+
+  // Test prefixing and format
+  const entId = Validation.generateId('ENT');
+  assert.match(entId, /^ENT-[A-F0-9]{12}$/);
+
+  const tmsId = Validation.generateId('TMS');
+  assert.match(tmsId, /^TMS-[A-F0-9]{12}$/);
+
+  // Test uniqueness across 1000 generated IDs
+  const generated = new Set();
+  const total = 1000;
+  for (let i = 0; i < total; i++) {
+    const id = Validation.generateId('ID');
+    assert.match(id, /^ID-[A-F0-9]{12}$/);
+    generated.add(id);
+  }
+  assert.equal(generated.size, total, 'Zero collisions expected across 1000 generated IDs');
+});
+
