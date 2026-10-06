@@ -627,4 +627,173 @@ test('JobService.getCapacityMetrics accounts for allocated grid cells (getMaxRow
   assert.equal(metrics.tabBreakdown[0].cells, 26000);
 });
 
+test('SheetRepository.getLastAuditHash and MasterRepository.getLastAuditHash reuse _headerCache across calls', () => {
+  cleanGlobals();
+  let masterHeaderReads = 0;
+  let wsHeaderReads = 0;
+
+  const mockMasterSheet = {
+    getLastRow() { return 10; },
+    getLastColumn() { return 15; },
+    getRange(row, col, numRows, numCols) {
+      if (row === 1 && numRows === 1) {
+        masterHeaderReads++;
+        return { getValues() { return [['AuditID', 'TimestampUTC', 'RecordHash']]; } };
+      }
+      return { getValue() { return 'HASH_MASTER_123'; } };
+    }
+  };
+
+  const mockWsSheet = {
+    getLastRow() { return 20; },
+    getLastColumn() { return 13; },
+    getRange(row, col, numRows, numCols) {
+      if (row === 1 && numRows === 1) {
+        wsHeaderReads++;
+        return { getValues() { return [['AuditID', 'TimestampUTC', 'RecordHash']]; } };
+      }
+      return { getValue() { return 'HASH_WS_456'; } };
+    }
+  };
+
+  global.WorkspaceRouter = {
+    resolveSpreadsheet() {
+      return { getSheetByName() { return mockWsSheet; } };
+    }
+  };
+
+  const backend = require(codePath);
+  const { MasterRepository, SheetRepository } = backend;
+
+  MasterRepository.getMasterSpreadsheet = () => ({
+    getSheetByName() { return mockMasterSheet; }
+  });
+
+  MasterRepository.beginRequest();
+  SheetRepository.beginRequest();
+
+  // First calls populate _headerCache
+  const hashM1 = MasterRepository.getLastAuditHash('GlobalAudit');
+  const hashW1 = SheetRepository.getLastAuditHash('W1', 'AuditLog');
+  assert.equal(hashM1, 'HASH_MASTER_123');
+  assert.equal(hashW1, 'HASH_WS_456');
+  assert.equal(masterHeaderReads, 1);
+  assert.equal(wsHeaderReads, 1);
+
+  // Subsequent calls reuse _headerCache without re-reading row 1
+  const hashM2 = MasterRepository.getLastAuditHash('GlobalAudit');
+  const hashW2 = SheetRepository.getLastAuditHash('W1', 'AuditLog');
+  assert.equal(hashM2, 'HASH_MASTER_123');
+  assert.equal(hashW2, 'HASH_WS_456');
+  assert.equal(masterHeaderReads, 1);
+  assert.equal(wsHeaderReads, 1);
+});
+
+test('RollupService._updateProjectRollup derives contributor count from MonthlyRollups without calling listTimeEntries', () => {
+  cleanGlobals();
+  let listTimeEntriesCalled = false;
+  let updateRowPayload = null;
+
+  const mockProject = { ProjectID: 'P1', EstimateHours: 50 };
+  const mockMonthlyRollups = [
+    { MonthKey: '2026-10', UserID: 'U1', ProjectID: 'P1' },
+    { MonthKey: '2026-10', UserID: 'U2', ProjectID: 'P1' }
+  ];
+  const mockProjectRollups = [
+    { ProjectID: 'P1', TotalSeconds: 7200, TotalCost: 200, TotalRevenue: 400, ContributorCount: 2, _rowIndex: 2 }
+  ];
+
+  const backend = require(codePath);
+  const { RollupService, SheetRepository } = backend;
+
+  SheetRepository.getProject = () => mockProject;
+  SheetRepository.listTimeEntries = () => {
+    listTimeEntriesCalled = true;
+    return [];
+  };
+  SheetRepository.getTableData = (_ws, tab) => {
+    if (tab === 'ProjectRollups') return { rows: mockProjectRollups };
+    if (tab === 'MonthlyRollups') return { rows: mockMonthlyRollups };
+    return { rows: [] };
+  };
+  SheetRepository.updateRow = (_ws, _tab, _rowIdx, updates) => {
+    updateRowPayload = updates;
+  };
+
+  const contribution = {
+    projectId: 'P1',
+    userId: 'U3', // New contributor
+    seconds: 3600,
+    billableSeconds: 3600,
+    costCents: 5000,
+    revenueCents: 10000
+  };
+
+  RollupService._updateProjectRollup('W1', contribution, '2026-10-06T12:00:00Z');
+
+  // Verify listTimeEntries was bypassed completely
+  assert.equal(listTimeEntriesCalled, false);
+  // Verify contributor count increased from 2 to 3 (U1, U2 + new U3)
+  assert.ok(updateRowPayload);
+  assert.equal(updateRowPayload.ContributorCount, 3);
+});
+
+test('TimerService._findActiveTimerAcrossWorkspaces prioritizes preferredWorkspaceId', () => {
+  cleanGlobals();
+  const checkedWorkspaces = [];
+
+  const backend = require(codePath);
+  const { TimerService, MasterRepository, SheetRepository } = backend;
+
+  MasterRepository.getWorkspace = (id) => ({ WorkspaceID: id, Status: 'ACTIVE' });
+  SheetRepository.getActiveTimer = (wsId) => {
+    checkedWorkspaces.push(wsId);
+    if (wsId === 'W2') {
+      return { TimerID: 'TMR-ACTIVE-W2', UserID: 'U1', StartedAtUTC: '2026-10-06T10:00:00Z' };
+    }
+    return null;
+  };
+
+  const authContext = {
+    userId: 'U1',
+    role: 'USER',
+    accesses: [
+      { WorkspaceID: 'W1', Active: true },
+      { WorkspaceID: 'W2', Active: true },
+      { WorkspaceID: 'W3', Active: true }
+    ]
+  };
+
+  // When W2 is passed as preferredWorkspaceId, W2 must be inspected first and terminate early
+  const result = TimerService._findActiveTimerAcrossWorkspaces(authContext, 'W2');
+  assert.ok(result);
+  assert.equal(result.workspaceId, 'W2');
+  assert.equal(result.timer.TimerID, 'TMR-ACTIVE-W2');
+  assert.deepEqual(checkedWorkspaces, ['W2']); // Only W2 was queried!
+});
+
+test('WorkspaceService.listWorkspaces filters out revoked/inactive access records', () => {
+  cleanGlobals();
+  const backend = require(codePath);
+  const { WorkspaceService, MasterRepository } = backend;
+
+  MasterRepository.listWorkspaces = () => [
+    { WorkspaceID: 'W1', WorkspaceName: 'Active Team', Status: 'ACTIVE' },
+    { WorkspaceID: 'W2', WorkspaceName: 'Revoked Team', Status: 'ACTIVE' }
+  ];
+
+  const authContext = {
+    userId: 'U1',
+    role: 'USER',
+    accesses: [
+      { WorkspaceID: 'W1', Active: true },
+      { WorkspaceID: 'W2', Active: false } // Inactive access
+    ]
+  };
+
+  const list = WorkspaceService.listWorkspaces(authContext);
+  assert.equal(list.length, 1);
+  assert.equal(list[0].WorkspaceID, 'W1');
+});
+
 

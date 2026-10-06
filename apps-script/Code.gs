@@ -3077,10 +3077,10 @@ var AuthorizationService = (typeof global !== 'undefined' && global.Authorizatio
 
     // Authorization is based only on active WorkspaceAccess mappings.
     // PrimaryWorkspaceID is profile/default-selection metadata, not an ACL.
-    const userBundle = MasterRepository.getUserAuthBundle
-      ? MasterRepository.getUserAuthBundle(authContext.userId)
-      : { account: authContext.user, accesses: MasterRepository.getWorkspaceAccessForUser(authContext.userId) };
-    const accesses = userBundle.accesses || [];
+    const accesses = (authContext && authContext.accesses) ||
+      (MasterRepository.getUserAuthBundle
+        ? (MasterRepository.getUserAuthBundle(authContext.userId) || {}).accesses
+        : MasterRepository.getWorkspaceAccessForUser(authContext.userId)) || [];
     const hasAccess = accesses.some(a =>
       a.WorkspaceID === requestedWorkspaceId &&
       (a.Active === true || a.Active === 'TRUE' || a.Active === 1)
@@ -3459,7 +3459,8 @@ var SessionService = (typeof global !== 'undefined' && global.SessionService) ||
       user,
       username: user.Username,
       role: user.Role,
-      userId: user.UserID
+      userId: user.UserID,
+      accesses: userBundle.accesses || []
     };
   },
 
@@ -5948,8 +5949,7 @@ var MasterRepository = (typeof global !== 'undefined' && global.MasterRepository
       if (sheet && typeof sheet.getLastRow === 'function' && typeof sheet.getRange === 'function') {
         const lastRow = sheet.getLastRow();
         if (lastRow <= 1) return '0000000000000000000000000000000000000000000000000000000000000000';
-        const lastCol = typeof sheet.getLastColumn === 'function' ? sheet.getLastColumn() : (MASTER_SCHEMA[tabName] ? MASTER_SCHEMA[tabName].length : 15);
-        const headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
+        const headers = this._getHeaders(tabName, sheet);
         const colIdx = headers.indexOf('RecordHash');
         if (colIdx >= 0) {
           const val = sheet.getRange(lastRow, colIdx + 1, 1, 1).getValue();
@@ -6691,8 +6691,7 @@ var SheetRepository = (typeof global !== 'undefined' && global.SheetRepository) 
       if (sheet && typeof sheet.getLastRow === 'function' && typeof sheet.getRange === 'function') {
         const lastRow = sheet.getLastRow();
         if (lastRow <= 1) return '0000000000000000000000000000000000000000000000000000000000000000';
-        const lastCol = typeof sheet.getLastColumn === 'function' ? sheet.getLastColumn() : (WORKSPACE_SCHEMA[tabName] ? WORKSPACE_SCHEMA[tabName].length : 13);
-        const headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
+        const headers = this._getHeaders(workspaceId, tabName, sheet);
         const colIdx = headers.indexOf('RecordHash');
         if (colIdx >= 0) {
           const val = sheet.getRange(lastRow, colIdx + 1, 1, 1).getValue();
@@ -7192,8 +7191,13 @@ var WorkspaceService = (typeof global !== 'undefined' && global.WorkspaceService
       return allWorkspaces.map(w => this._toWorkspaceDTO(w, true));
     }
 
-    const accesses = MasterRepository.getWorkspaceAccessForUser(authContext.userId);
-    const allowedIds = new Set(accesses.map(a => a.WorkspaceID));
+    const accesses = (authContext && authContext.accesses) ||
+      MasterRepository.getWorkspaceAccessForUser(authContext.userId);
+    const allowedIds = new Set(
+      accesses
+        .filter(a => !(a.Active === false || a.Active === 'FALSE' || a.Active === 0))
+        .map(a => a.WorkspaceID)
+    );
 
     // Admin/User workspace selectors contain only operational workspaces.
     // Suspended/Maintenance workspaces remain visible to Super Admin only.
@@ -8630,7 +8634,7 @@ var TimerService = (typeof global !== 'undefined' && global.TimerService) || {
     };
   },
 
-  _findActiveTimerAcrossWorkspaces(authContext) {
+  _findActiveTimerAcrossWorkspaces(authContext, preferredWorkspaceId = null) {
     let workspaceIds = [];
 
     if (authContext.role === CONSTANTS.ROLES.SUPER_ADMIN) {
@@ -8638,7 +8642,10 @@ var TimerService = (typeof global !== 'undefined' && global.TimerService) || {
         .filter(ws => ws.Status === CONSTANTS.WORKSPACE_STATUS.ACTIVE)
         .map(ws => ws.WorkspaceID);
     } else {
-      workspaceIds = MasterRepository.getWorkspaceAccessForUser(authContext.userId)
+      const accesses = (authContext && authContext.accesses) ||
+        MasterRepository.getWorkspaceAccessForUser(authContext.userId);
+      workspaceIds = accesses
+        .filter(a => !(a.Active === false || a.Active === 'FALSE' || a.Active === 0))
         .map(access => access.WorkspaceID)
         .filter(workspaceId => {
           const workspace = MasterRepository.getWorkspace(workspaceId);
@@ -8646,7 +8653,13 @@ var TimerService = (typeof global !== 'undefined' && global.TimerService) || {
         });
     }
 
-    for (const wsId of [...new Set(workspaceIds)]) {
+    const uniqueIds = [...new Set(workspaceIds)];
+    if (preferredWorkspaceId && uniqueIds.includes(preferredWorkspaceId)) {
+      uniqueIds.splice(uniqueIds.indexOf(preferredWorkspaceId), 1);
+      uniqueIds.unshift(preferredWorkspaceId);
+    }
+
+    for (const wsId of uniqueIds) {
       try {
         const active = SheetRepository.getActiveTimer(wsId, authContext.userId);
         if (active) {
@@ -8699,7 +8712,7 @@ var TimerService = (typeof global !== 'undefined' && global.TimerService) || {
     }
 
     try {
-      const activeAnywhere = this._findActiveTimerAcrossWorkspaces(authContext);
+      const activeAnywhere = this._findActiveTimerAcrossWorkspaces(authContext, workspaceId);
       if (activeAnywhere) {
         const active = activeAnywhere.timer;
 
@@ -11183,10 +11196,22 @@ var RollupService = (typeof global !== 'undefined' && global.RollupService) || {
     const project = SheetRepository.getProject(workspaceId, contribution.projectId);
     const estimateHours = project ? (parseFloat(project.EstimateHours) || 0) : 0;
 
-    const allProjectEntries = SheetRepository.listTimeEntries(workspaceId, {
-      projectId: contribution.projectId
-    });
-    const contributorCount = new Set(allProjectEntries.map(e => e.UserID)).size;
+    let contributorCount = 1;
+    if (existing) {
+      const monthlyData = SheetRepository.getTableData(
+        workspaceId,
+        CONSTANTS.WORKSPACE_TABS.MONTHLY_ROLLUPS
+      );
+      const contributorSet = new Set(
+        (monthlyData.rows || [])
+          .filter(r => r.ProjectID === contribution.projectId)
+          .map(r => r.UserID)
+      );
+      if (contribution.userId) {
+        contributorSet.add(contribution.userId);
+      }
+      contributorCount = Math.max(parseInt(existing.ContributorCount, 10) || 0, contributorSet.size);
+    }
 
     if (existing) {
       const totalSeconds =
