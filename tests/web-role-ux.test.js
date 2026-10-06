@@ -125,3 +125,11 @@ test('all portals provide standalone breakout link, WCAG AA contrast, session ex
   }
 });
 
+test('all portals support Escape key and backdrop click to dismiss modal dialogs', () => {
+  for (const portal of [user, admin, superAdmin]) {
+    assert.match(portal, /e\.key === 'Escape'/);
+    assert.match(portal, /modal-backdrop/);
+    assert.match(portal, /closeModal\(\)/);
+  }
+});
+
