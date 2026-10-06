@@ -77,7 +77,9 @@ function loadAudit(rows, checkpoints = {}) {
     getScriptProperties() {
       return {
         getProperties() { return { ...checkpoints }; },
-        getProperty(key) { return checkpoints[key] || ''; }
+        getProperty(key) { return checkpoints[key] || ''; },
+        setProperty(key, val) { checkpoints[key] = String(val); },
+        deleteProperty(key) { delete checkpoints[key]; }
       };
     }
   };
@@ -483,5 +485,51 @@ test('autoStopRunawayTimers cleanly finalizes timers exceeding AUTO_STOP_HOURS',
   assert.equal(auditLogs[0].Reason, 'AUTO_STOP_RUNAWAY');
   assert.equal(auditLogs[0].ActorUserID, 'SYSTEM');
 });
+
+test('createAuditCheckpoint prunes old checkpoints beyond MAX_AUDIT_CHECKPOINTS_RETAINED', () => {
+  const row = legacyRow(GENESIS, 'A1');
+  const stored = {};
+  for (let i = 1; i <= 65; i++) {
+    const pad = String(i).padStart(2, '0');
+    stored[`CP_MASTER_2026-01-${pad}`] = JSON.stringify({
+      scope: 'MASTER',
+      date: `2026-01-${pad}`,
+      lastHash: 'HASH',
+      count: i,
+      rootHash: 'ROOT',
+      snapshotHash: 'SNAP'
+    });
+  }
+
+  const auditService = loadAudit([row], stored);
+  const deletedKeys = [];
+  global.PropertiesService = {
+    getScriptProperties() {
+      return {
+        getProperties() { return { ...stored }; },
+        getProperty(k) { return stored[k] || ''; },
+        setProperty(k, v) { stored[k] = String(v); },
+        deleteProperty(k) {
+          deletedKeys.push(k);
+          delete stored[k];
+        }
+      };
+    }
+  };
+
+  auditService.verifyAuditChain = () => ({
+    ok: true,
+    verified: true,
+    count: 1,
+    lastRecordHash: row.RecordHash
+  });
+  const result = auditService.createAuditCheckpoint();
+  assert.equal(result.ok, true);
+  // 65 existing + 1 new = 66 checkpoints. With maxRetained = 60, 6 old ones must be deleted.
+  assert.equal(deletedKeys.length, 6);
+  assert.equal(deletedKeys[0], 'CP_MASTER_2026-01-01');
+  assert.equal(deletedKeys[5], 'CP_MASTER_2026-01-06');
+});
+
 
 

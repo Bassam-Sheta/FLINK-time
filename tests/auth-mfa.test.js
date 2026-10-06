@@ -336,3 +336,77 @@ test('verifyMfa enforces caller rate limiting and cleans up challenge on rate li
   assert.equal(fx.AuthService._getMfaChallenge('USR-1'), null);
 });
 
+test('stepUp strictly validates 6-digit numeric pattern on TOTP code', () => {
+  const fx = loadFixture();
+  const superAdminContext = {
+    userId: 'SA1',
+    role: 'SUPER_ADMIN',
+    user: { UserID: 'SA1', Username: 'admin', Email: 'admin@example.com' },
+    session: { SessionID: 'SES-ADMIN', ClientType: 'WEB', ClientLabel: 'admin@example.com' }
+  };
+
+  const invalidCodes = ['', '12345', '1234567', 'abcdef', '12345a', null, undefined];
+  for (const badCode of invalidCodes) {
+    assert.throws(
+      () => fx.AuthService.stepUp(superAdminContext, 'SES-ADMIN-TOKEN', 'Pass123!', badCode),
+      err => err instanceof AppError && err.code === 'AUTH_REQUIRED' && err.statusCode === 401
+    );
+  }
+});
+
+test('stepUp enforces caller rate limiting', () => {
+  const fx = loadFixture();
+  const superAdminContext = {
+    userId: 'SA1',
+    role: 'SUPER_ADMIN',
+    user: { UserID: 'SA1', Username: 'admin', Email: 'admin@example.com' },
+    session: { SessionID: 'SES-ADMIN', ClientType: 'WEB', ClientLabel: 'admin@example.com' }
+  };
+
+  const cacheValues = new Map();
+  global.CacheService = {
+    getScriptCache() {
+      return {
+        get(key) { return cacheValues.get(key) || null; },
+        put(key, value) { cacheValues.set(key, String(value)); }
+      };
+    }
+  };
+
+  const minuteBucket = Math.floor(Date.now() / 60000);
+  const identityKey = crypto.createHash('sha256').update('admin@example.com').digest('hex').substring(0, 20);
+  const callerKey = `FLINK_LOGIN_CALLER_${identityKey}_${minuteBucket}`;
+  cacheValues.set(callerKey, '30');
+
+  assert.throws(
+    () => fx.AuthService.stepUp(superAdminContext, 'SES-ADMIN-TOKEN', 'Pass123!', '123456'),
+    err => err instanceof AppError && err.code === 'AUTH_REQUIRED' && err.statusCode === 401
+  );
+});
+
+test('confirmMfa strictly rejects non-6-digit verification code', () => {
+  const fx = loadFixture();
+  fx.cred.PendingTotpSecret = 'PENDING-SECRET';
+  fx.cred.MfaEnabled = false;
+  fx.AuthService._storeMfaEnrollment('USR-1', {
+    sessionId: 'S1',
+    expiresAtMs: Date.now() + 60000,
+    replacing: false
+  });
+
+  const authContext = {
+    userId: 'USR-1',
+    role: 'USER',
+    user: fx.account,
+    session: { SessionID: 'S1', ClientType: 'WEB', ClientLabel: 'worker@example.com' }
+  };
+
+  const invalidCodes = ['', '12345', '1234567', 'abcdef', '12345a', null, undefined];
+  for (const badCode of invalidCodes) {
+    assert.throws(
+      () => fx.AuthService.confirmMfa(authContext, badCode),
+      err => err instanceof AppError && err.code === 'AUTH_REQUIRED' && err.statusCode === 401
+    );
+  }
+});
+

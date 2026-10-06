@@ -228,6 +228,7 @@ var CONSTANTS = {
     PEPPER_PROPERTY_KEY: 'FLINK_SECURITY_PEPPER',
     DEFAULT_PEPPER: 'FLINK_TIME_PEPPER_SECURE_2026',
     CHECKPOINT_PROPERTY_PREFIX: 'FLINK_AUDIT_CHECKPOINT_',
+    MAX_AUDIT_CHECKPOINTS_RETAINED: 60,
     AUDIT_KEY_SUFFIX: '_FLINK_AUDIT_KEY',
     SECRET_KEY_SUFFIX: '_FLINK_SECRET_KEY'
   },
@@ -3674,9 +3675,12 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
       if (!cache || !cache.get || !cache.put) return;
 
       const minuteBucket = Math.floor(Date.now() / 60000);
-      const identityKey = SecurityService
-        .hashToken(IdentityService.normalizeEmail(googleEmail || 'unknown'))
-        .substring(0, 20);
+      const rawIdentity = (typeof IdentityService !== 'undefined' && IdentityService.normalizeEmail)
+        ? IdentityService.normalizeEmail(googleEmail || 'unknown')
+        : String(googleEmail || 'unknown').trim().toLowerCase();
+      const identityKey = (typeof SecurityService !== 'undefined' && SecurityService.hashToken)
+        ? SecurityService.hashToken(rawIdentity).substring(0, 20)
+        : rawIdentity.substring(0, 20);
       const callerKey = `FLINK_LOGIN_CALLER_${identityKey}_${minuteBucket}`;
       const globalKey = `FLINK_LOGIN_GLOBAL_${minuteBucket}`;
 
@@ -4448,6 +4452,24 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
       throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'A current authenticated session is required.', 401);
     }
 
+    const callerEmail = (authContext.user && authContext.user.Email) ||
+      (authContext.session && authContext.session.ClientLabel) ||
+      IdentityService.getCurrentGoogleEmail(false) ||
+      authContext.userId;
+    this._enforceLoginRateLimit(callerEmail, 'Fresh Super Admin reauthentication failed.');
+
+    const cleanTotpCode = String(totpCode || '').trim();
+    if (!/^\d{6}$/.test(cleanTotpCode)) {
+      MasterRepository.logSecurityEvent({
+        UserID: authContext.userId,
+        Username: authContext.user ? authContext.user.Username : '',
+        EventType: 'STEP_UP_FAILED',
+        Success: false,
+        metadata: { reason: 'Invalid TOTP code format' }
+      });
+      throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'Fresh Super Admin reauthentication failed.', 401);
+    }
+
     const cred = MasterRepository.getCredentials(authContext.userId);
     if (!cred || !SecurityService.verifyPassword(currentPassword, cred.PasswordHash)) {
       MasterRepository.logSecurityEvent({
@@ -4471,7 +4493,7 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
 
     const verification = SecurityService.verifyTotpWithStep(
       cred.TotpSecret,
-      totpCode,
+      cleanTotpCode,
       1,
       Date.now(),
       30,
@@ -4596,6 +4618,13 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
     if (!authContext || !authContext.userId || !authContext.session || !authContext.session.SessionID) {
       throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'A current authenticated session is required.', 401);
     }
+
+    const callerEmail = (authContext.user && authContext.user.Email) ||
+      (authContext.session && authContext.session.ClientLabel) ||
+      IdentityService.getCurrentGoogleEmail(false) ||
+      authContext.userId;
+    this._enforceLoginRateLimit(callerEmail, 'Fresh password verification is required before changing MFA.');
+
     const cred = MasterRepository.getCredentials(authContext.userId);
     if (!cred || !SecurityService.verifyPassword(currentPassword, cred.PasswordHash)) {
       throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'Fresh password verification is required before changing MFA.', 401);
@@ -4606,12 +4635,13 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
       cred.MfaEnabled === 'TRUE';
 
     if (replacing) {
-      if (!currentMfaCode || !cred.TotpSecret) {
+      const cleanCurrentCode = String(currentMfaCode || '').trim();
+      if (!cleanCurrentCode || !/^\d{6}$/.test(cleanCurrentCode) || !cred.TotpSecret) {
         throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'The existing authenticator code is required before replacing MFA.', 401);
       }
       const currentVerification = SecurityService.verifyTotpWithStep(
         cred.TotpSecret,
-        currentMfaCode,
+        cleanCurrentCode,
         1,
         Date.now(),
         30,
@@ -4685,16 +4715,21 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
         throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'No pending MFA enrollment found. Call enrollMfa first.');
       }
 
+      const cleanCode = String(code || '').trim();
+      if (!/^\d{6}$/.test(cleanCode)) {
+        throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'Invalid verification code. Could not verify authenticator app.', 401);
+      }
+
       const verification = SecurityService.verifyTotpWithStep(
         cred.PendingTotpSecret,
-        code,
+        cleanCode,
         1,
         Date.now(),
         30,
         authContext.userId
       );
       if (!verification.valid) {
-        throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'Invalid verification code. Could not verify authenticator app.');
+        throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'Invalid verification code. Could not verify authenticator app.', 401);
       }
 
       MasterRepository.updateCredentials(authContext.userId, {
@@ -4755,14 +4790,24 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
       );
     }
 
+    const callerEmail = (superAdminContext.user && superAdminContext.user.Email) ||
+      (superAdminContext.session && superAdminContext.session.ClientLabel) ||
+      IdentityService.getCurrentGoogleEmail(false) ||
+      superAdminContext.userId;
+    this._enforceLoginRateLimit(callerEmail, 'Fresh Super Admin password verification is required.');
+
     const adminCred = MasterRepository.getCredentials(superAdminContext.userId);
     if (!adminCred || !SecurityService.verifyPassword(adminPassword, adminCred.PasswordHash)) {
       throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'Fresh Super Admin password verification is required.', 401);
     }
     if (adminCred.MfaEnabled === true || adminCred.MfaEnabled === 'TRUE') {
+      const cleanAdminCode = String(adminTotpCode || '').trim();
+      if (!/^\d{6}$/.test(cleanAdminCode)) {
+        throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'Fresh Super Admin MFA verification is required.', 401);
+      }
       const verification = SecurityService.verifyTotpWithStep(
         adminCred.TotpSecret,
-        adminTotpCode,
+        cleanAdminCode,
         1,
         Date.now(),
         30,
@@ -4816,8 +4861,21 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
       const cred = MasterRepository.getCredentials(authContext.userId);
       if (!cred) throw new AppError(ERROR_CODES.NOT_FOUND, 'Credentials record not found.');
 
+      const callerEmail = (authContext.user && authContext.user.Email) ||
+        (authContext.session && authContext.session.ClientLabel) ||
+        IdentityService.getCurrentGoogleEmail(false) ||
+        authContext.userId;
+      this._enforceLoginRateLimit(callerEmail, 'Current password is incorrect.');
+
       const isOldValid = SecurityService.verifyPassword(oldPassword, cred.PasswordHash);
       if (!isOldValid) {
+        MasterRepository.logSecurityEvent({
+          UserID: authContext.userId,
+          Username: authContext.user ? authContext.user.Username : '',
+          EventType: 'PASSWORD_CHANGE_FAILED',
+          Success: false,
+          metadata: { reason: 'Incorrect current password' }
+        });
         throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'Current password is incorrect.');
       }
       if (SecurityService.verifyPassword(newPassword, cred.PasswordHash)) {
@@ -15274,7 +15332,8 @@ var AuditService = (typeof global !== 'undefined' && global.AuditService) || {
       );
     }
     try {
-      PropertiesService.getScriptProperties().setProperty(checkpointKey, JSON.stringify({
+      const props = PropertiesService.getScriptProperties();
+      props.setProperty(checkpointKey, JSON.stringify({
         scope,
         date: dateStr,
         lastHash,
@@ -15283,7 +15342,26 @@ var AuditService = (typeof global !== 'undefined' && global.AuditService) || {
         snapshotHash,
         checkpointAt: new Date().toISOString()
       }));
+
+      // Prune old checkpoints to protect the 500 KB Script Properties quota
+      if (typeof props.getProperties === 'function' && typeof props.deleteProperty === 'function') {
+        const prefix = (CONSTANTS.SECURITY.CHECKPOINT_PROPERTY_PREFIX || 'FLINK_AUDIT_CHECKPOINT_') + `${scope}_`;
+        const allProps = props.getProperties() || {};
+        const scopeCheckpoints = Object.keys(allProps)
+          .filter(k => k.startsWith(prefix))
+          .sort();
+        const maxRetained = (CONSTANTS.SECURITY && CONSTANTS.SECURITY.MAX_AUDIT_CHECKPOINTS_RETAINED) ||
+          (CONSTANTS.LIMITS && CONSTANTS.LIMITS.AUDIT_CHECKPOINT_RETENTION_DAYS) ||
+          60;
+        if (scopeCheckpoints.length > maxRetained) {
+          const toDelete = scopeCheckpoints.slice(0, scopeCheckpoints.length - maxRetained);
+          for (const oldKey of toDelete) {
+            props.deleteProperty(oldKey);
+          }
+        }
+      }
     } catch (e) {
+      if (e instanceof AppError) throw e;
       throw new AppError(
         ERROR_CODES.CRYPTO_FAILURE,
         'Audit checkpoint could not be persisted.',

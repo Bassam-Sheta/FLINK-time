@@ -29,6 +29,7 @@ function fixture() {
   };
   const accountUpdates = [];
   const credentialUpdates = [];
+  const events = [];
   let revoked = 0;
   let sessionsCreated = 0;
 
@@ -52,7 +53,8 @@ function fixture() {
       if (hash === 'OLDHASH') return password === 'OldPass123!';
       return false;
     },
-    hashPassword(password) { return 'HASH:' + password; }
+    hashPassword(password) { return 'HASH:' + password; },
+    hashToken(v) { return require('node:crypto').createHash('sha256').update(String(v)).digest('hex'); }
   };
   global.AuthorizationService = {
     assertRole(ctx, roles) { assert.ok(roles.includes(ctx.role)); }
@@ -83,7 +85,7 @@ function fixture() {
       accountUpdates.push({ ...updates });
       Object.assign(account, updates);
     },
-    logSecurityEvent() {},
+    logSecurityEvent(e) { events.push({ ...e }); },
     logGlobalAudit() {}
   };
   global.LockService = {
@@ -96,7 +98,7 @@ function fixture() {
   AuthService._mfaChallengeMemory = {};
 
   return {
-    AuthService, account, cred, accountUpdates, credentialUpdates,
+    AuthService, account, cred, accountUpdates, credentialUpdates, events,
     getRevoked: () => revoked,
     getSessionsCreated: () => sessionsCreated
   };
@@ -139,3 +141,46 @@ test('admin reset cannot set temporary password equal to current password', () =
   assert.equal(fx.credentialUpdates.length, 0);
   assert.equal(fx.getRevoked(), 0);
 });
+
+test('changePassword logs PASSWORD_CHANGE_FAILED on incorrect current password', () => {
+  const fx = fixture();
+  assert.throws(
+    () => fx.AuthService.changePassword('SESSION', 'WrongPassword!', 'NewPass456!'),
+    err => err instanceof AppError &&
+      err.code === 'VALIDATION_ERROR' &&
+      /Current password is incorrect/.test(err.message)
+  );
+
+  assert.equal(
+    fx.events.some(e => e.EventType === 'PASSWORD_CHANGE_FAILED' && e.Success === false),
+    true
+  );
+  assert.equal(fx.credentialUpdates.length, 0);
+  assert.equal(fx.getRevoked(), 0);
+});
+
+test('changePassword enforces caller rate limiting', () => {
+  const fx = fixture();
+  const cacheValues = new Map();
+  global.CacheService = {
+    getScriptCache() {
+      return {
+        get(key) { return cacheValues.get(key) || null; },
+        put(key, value) { cacheValues.set(key, String(value)); }
+      };
+    }
+  };
+
+  const minuteBucket = Math.floor(Date.now() / 60000);
+  // caller identity key for user1 (normalized)
+  const identityKey = require('node:crypto').createHash('sha256').update('u1').digest('hex').substring(0, 20);
+  const callerKey = `FLINK_LOGIN_CALLER_${identityKey}_${minuteBucket}`;
+  cacheValues.set(callerKey, '30');
+
+  assert.throws(
+    () => fx.AuthService.changePassword('SESSION', 'OldPass123!', 'NewPass456!'),
+    err => err instanceof AppError && err.code === 'AUTH_REQUIRED' && err.statusCode === 401
+  );
+  assert.equal(fx.credentialUpdates.length, 0);
+});
+
