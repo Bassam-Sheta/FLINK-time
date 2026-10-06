@@ -163,3 +163,38 @@ test('workspace-access lookup call count is independent of table size', () => {
   assert.equal(small.rows.length, 2);
   assert.ok(small.counters.getRange <= 3);
 });
+
+test('MasterRepository.findRowByKey and findRowsByKey reuse in-memory _requestCache without sheet calls', () => {
+  delete require.cache[require.resolve(codePath)];
+  const mod = require(codePath);
+  mod.MasterRepository.beginRequest();
+
+  // Populate cache directly as getTableData would
+  mod.MasterRepository._requestCache['Accounts'] = {
+    headers: ['UserID', 'Email', 'Role', 'Status'],
+    rows: [
+      { _rowIndex: 2, UserID: 'USR-CACHED-1', Email: 'cached1@flink.test', Role: 'USER', Status: 'ACTIVE' },
+      { _rowIndex: 3, UserID: 'USR-CACHED-2', Email: 'cached2@flink.test', Role: 'ADMIN', Status: 'ACTIVE' }
+    ]
+  };
+
+  let getSheetCalls = 0;
+  global.SpreadsheetApp = {
+    openById() {
+      getSheetCalls++;
+      throw new Error('SpreadsheetApp should not be called when table is cached');
+    }
+  };
+
+  const single = mod.MasterRepository.findRowByKey('Accounts', 'Email', 'cached2@flink.test');
+  assert.ok(single);
+  assert.equal(single.UserID, 'USR-CACHED-2');
+  assert.equal(single._rowIndex, 3);
+  assert.equal(getSheetCalls, 0);
+
+  const multiple = mod.MasterRepository.findRowsByKey('Accounts', 'Role', 'USER');
+  assert.equal(multiple.length, 1);
+  assert.equal(multiple[0].UserID, 'USR-CACHED-1');
+  assert.equal(getSheetCalls, 0);
+});
+

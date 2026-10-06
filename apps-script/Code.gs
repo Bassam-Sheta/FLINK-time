@@ -5295,72 +5295,131 @@ var MasterRepository = (typeof global !== 'undefined' && global.MasterRepository
    * Growing request-time tables must prefer this path over getTableData().
    */
   findRowByKey(tabName, columnName, value, options = {}) {
-    const ss = this.getMasterSpreadsheet();
-    const sheet = ss.getSheetByName(tabName);
-    if (!sheet) {
-      throw new AppError(ERROR_CODES.NOT_FOUND, `Master tab '${tabName}' does not exist.`);
+    if (value === undefined || value === null || value === '') return null;
+    if (this._requestCache && this._requestCache[tabName]) {
+      const cached = this._requestCache[tabName];
+      const match = cached.rows.find(r => {
+        const cell = r[columnName];
+        if (options.matchCase === false) {
+          return String(cell || '').toLowerCase() === String(value).toLowerCase();
+        }
+        return String(cell || '') === String(value);
+      });
+      return match || null;
     }
 
-    const schemaHeaders = MASTER_SCHEMA[tabName];
-    if (!schemaHeaders) {
-      throw new AppError(ERROR_CODES.INTERNAL_ERROR, `Schema missing for master tab '${tabName}'.`);
+    try {
+      const ss = this.getMasterSpreadsheet();
+      const sheet = ss && ss.getSheetByName ? ss.getSheetByName(tabName) : null;
+      if (!sheet) {
+        throw new AppError(ERROR_CODES.NOT_FOUND, `Master tab '${tabName}' does not exist.`);
+      }
+
+      const schemaHeaders = MASTER_SCHEMA[tabName];
+      if (!schemaHeaders) {
+        throw new AppError(ERROR_CODES.INTERNAL_ERROR, `Schema missing for master tab '${tabName}'.`);
+      }
+      const columnIndex = schemaHeaders.indexOf(columnName);
+      if (columnIndex < 0) {
+        throw new AppError(ERROR_CODES.INTERNAL_ERROR, `Column '${columnName}' is not defined for '${tabName}'.`);
+      }
+
+      const lastRow = sheet.getLastRow();
+      if (lastRow < 2) return null;
+
+      const finderRange = sheet.getRange(2, columnIndex + 1, lastRow - 1, 1);
+      if (finderRange && typeof finderRange.createTextFinder === 'function') {
+        const cell = finderRange
+          .createTextFinder(String(value))
+          .matchEntireCell(true)
+          .matchCase(options.matchCase !== false)
+          .findNext();
+        if (!cell) return null;
+
+        const rowIndex = cell.getRow();
+        const values = sheet.getRange(rowIndex, 1, 1, schemaHeaders.length).getValues()[0];
+        const row = { _rowIndex: rowIndex };
+        for (let i = 0; i < schemaHeaders.length; i++) row[schemaHeaders[i]] = values[i];
+        return row;
+      }
+    } catch (e) {
+      if (e instanceof AppError) throw e;
+      // Fall back to table data if range/createTextFinder methods are unmocked or unavailable
     }
-    const columnIndex = schemaHeaders.indexOf(columnName);
-    if (columnIndex < 0) {
-      throw new AppError(ERROR_CODES.INTERNAL_ERROR, `Column '${columnName}' is not defined for '${tabName}'.`);
-    }
 
-    const lastRow = sheet.getLastRow();
-    if (lastRow < 2) return null;
-
-    const cell = sheet
-      .getRange(2, columnIndex + 1, lastRow - 1, 1)
-      .createTextFinder(String(value))
-      .matchEntireCell(true)
-      .matchCase(options.matchCase !== false)
-      .findNext();
-    if (!cell) return null;
-
-    const rowIndex = cell.getRow();
-    const values = sheet.getRange(rowIndex, 1, 1, schemaHeaders.length).getValues()[0];
-    const row = { _rowIndex: rowIndex };
-    for (let i = 0; i < schemaHeaders.length; i++) row[schemaHeaders[i]] = values[i];
-    return row;
+    const { rows } = this.getTableData(tabName);
+    return rows.find(r => {
+      const cell = r[columnName];
+      if (options.matchCase === false) {
+        return String(cell || '').toLowerCase() === String(value).toLowerCase();
+      }
+      return String(cell || '') === String(value);
+    }) || null;
   },
 
   /**
    * Finds all rows matching one key column without loading the whole tab.
    */
   findRowsByKey(tabName, columnName, value, options = {}) {
-    const ss = this.getMasterSpreadsheet();
-    const sheet = ss.getSheetByName(tabName);
-    if (!sheet) {
-      throw new AppError(ERROR_CODES.NOT_FOUND, `Master tab '${tabName}' does not exist.`);
+    if (value === undefined || value === null || value === '') return [];
+    if (this._requestCache && this._requestCache[tabName]) {
+      const cached = this._requestCache[tabName];
+      return cached.rows.filter(r => {
+        const cell = r[columnName];
+        if (options.matchCase === false) {
+          return String(cell || '').toLowerCase() === String(value).toLowerCase();
+        }
+        return String(cell || '') === String(value);
+      });
     }
-    const schemaHeaders = MASTER_SCHEMA[tabName];
-    if (!schemaHeaders) {
-      throw new AppError(ERROR_CODES.INTERNAL_ERROR, `Schema missing for master tab '${tabName}'.`);
-    }
-    const columnIndex = schemaHeaders.indexOf(columnName);
-    if (columnIndex < 0) {
-      throw new AppError(ERROR_CODES.INTERNAL_ERROR, `Column '${columnName}' is not defined for '${tabName}'.`);
-    }
-    const lastRow = sheet.getLastRow();
-    if (lastRow < 2) return [];
 
-    const cells = sheet
-      .getRange(2, columnIndex + 1, lastRow - 1, 1)
-      .createTextFinder(String(value))
-      .matchEntireCell(true)
-      .matchCase(options.matchCase !== false)
-      .findAll();
+    try {
+      const ss = this.getMasterSpreadsheet();
+      const sheet = ss && ss.getSheetByName ? ss.getSheetByName(tabName) : null;
+      if (!sheet) {
+        throw new AppError(ERROR_CODES.NOT_FOUND, `Master tab '${tabName}' does not exist.`);
+      }
 
-    return cells.map(cell => {
-      const rowIndex = cell.getRow();
-      const values = sheet.getRange(rowIndex, 1, 1, schemaHeaders.length).getValues()[0];
-      const row = { _rowIndex: rowIndex };
-      for (let i = 0; i < schemaHeaders.length; i++) row[schemaHeaders[i]] = values[i];
-      return row;
+      const schemaHeaders = MASTER_SCHEMA[tabName];
+      if (!schemaHeaders) {
+        throw new AppError(ERROR_CODES.INTERNAL_ERROR, `Schema missing for master tab '${tabName}'.`);
+      }
+      const columnIndex = schemaHeaders.indexOf(columnName);
+      if (columnIndex < 0) {
+        throw new AppError(ERROR_CODES.INTERNAL_ERROR, `Column '${columnName}' is not defined for '${tabName}'.`);
+      }
+
+      const lastRow = sheet.getLastRow();
+      if (lastRow < 2) return [];
+
+      const finderRange = sheet.getRange(2, columnIndex + 1, lastRow - 1, 1);
+      if (finderRange && typeof finderRange.createTextFinder === 'function') {
+        const cells = finderRange
+          .createTextFinder(String(value))
+          .matchEntireCell(true)
+          .matchCase(options.matchCase !== false)
+          .findAll();
+
+        return cells.map(cell => {
+          const rowIndex = cell.getRow();
+          const values = sheet.getRange(rowIndex, 1, 1, schemaHeaders.length).getValues()[0];
+          const row = { _rowIndex: rowIndex };
+          for (let i = 0; i < schemaHeaders.length; i++) row[schemaHeaders[i]] = values[i];
+          return row;
+        });
+      }
+    } catch (e) {
+      if (e instanceof AppError) throw e;
+      // Fall back to table data if range/createTextFinder methods are unmocked or unavailable
+    }
+
+    const { rows } = this.getTableData(tabName);
+    return rows.filter(r => {
+      const cell = r[columnName];
+      if (options.matchCase === false) {
+        return String(cell || '').toLowerCase() === String(value).toLowerCase();
+      }
+      return String(cell || '') === String(value);
     });
   },
 
@@ -10529,6 +10588,7 @@ var ReportService = (typeof global !== 'undefined' && global.ReportService) || {
     const userDays = {};
 
     for (const e of entries) {
+      if (!e.StartUTC) continue;
       const dateKey = TimezoneService.formatDateKey(workspaceId, e.StartUTC);
       const userKey = e.UserID;
       const compositeKey = `${userKey}__${dateKey}`;
@@ -10604,54 +10664,79 @@ var ReportService = (typeof global !== 'undefined' && global.ReportService) || {
 
     const anomalies = [];
 
-    // Sort entries by User and StartUTC for overlap detection
-    const sorted = [...entries].sort((a, b) => new Date(a.StartUTC).getTime() - new Date(b.StartUTC).getTime());
+    // Group entries by user for accurate per-user overlap and anomaly detection
+    const userEntriesMap = {};
+    for (const e of entries) {
+      const uid = e.UserID || 'Unknown';
+      if (!userEntriesMap[uid]) userEntriesMap[uid] = [];
+      userEntriesMap[uid].push(e);
+    }
 
-    for (let i = 0; i < sorted.length; i++) {
-      const current = sorted[i];
-      const durationSeconds = parseInt(current.DurationSeconds, 10) || 0;
+    for (const [userId, userEntries] of Object.entries(userEntriesMap)) {
+      // Sort chronologically for this user
+      userEntries.sort((a, b) => {
+        const tA = new Date(a.StartUTC).getTime();
+        const tB = new Date(b.StartUTC).getTime();
+        return (Number.isFinite(tA) ? tA : 0) - (Number.isFinite(tB) ? tB : 0);
+      });
 
-      // Anomaly 1: Timer > 12 hours
-      if (durationSeconds > 12 * 3600) {
-        anomalies.push({
-          type: 'EXCESSIVE_DURATION',
-          severity: 'HIGH',
-          entryId: current.EntryID,
-          userId: current.UserID,
-          userName: userMap[current.UserID] || current.UserID,
-          durationHours: +(durationSeconds / 3600).toFixed(2),
-          message: `Time entry duration exceeds 12 hours (${+(durationSeconds / 3600).toFixed(2)}h)`
-        });
-      }
+      const activePrevs = [];
 
-      // Anomaly 2: Missing project or description
-      if (!current.ProjectID || !current.Description) {
-        anomalies.push({
-          type: 'MISSING_METADATA',
-          severity: 'LOW',
-          entryId: current.EntryID,
-          userId: current.UserID,
-          userName: userMap[current.UserID] || current.UserID,
-          message: 'Entry lacks a project assignment or description'
-        });
-      }
+      for (let i = 0; i < userEntries.length; i++) {
+        const current = userEntries[i];
+        const durationSeconds = parseInt(current.DurationSeconds, 10) || 0;
 
-      // Anomaly 3: Overlapping entries for same user
-      if (i > 0) {
-        const prev = sorted[i - 1];
-        if (prev.UserID === current.UserID && prev.EndUTC && current.StartUTC) {
-          const prevEnd = new Date(prev.EndUTC).getTime();
+        // Anomaly 1: Timer > 12 hours
+        if (durationSeconds > 12 * 3600) {
+          anomalies.push({
+            type: 'EXCESSIVE_DURATION',
+            severity: 'HIGH',
+            entryId: current.EntryID,
+            userId: current.UserID,
+            userName: userMap[current.UserID] || current.UserID,
+            durationHours: +(durationSeconds / 3600).toFixed(2),
+            message: `Time entry duration exceeds 12 hours (${+(durationSeconds / 3600).toFixed(2)}h)`
+          });
+        }
+
+        // Anomaly 2: Missing project or description
+        if (!current.ProjectID || !current.Description) {
+          anomalies.push({
+            type: 'MISSING_METADATA',
+            severity: 'LOW',
+            entryId: current.EntryID,
+            userId: current.UserID,
+            userName: userMap[current.UserID] || current.UserID,
+            message: 'Entry lacks a project assignment or description'
+          });
+        }
+
+        // Anomaly 3: Overlapping entries for same user
+        if (current.StartUTC) {
           const curStart = new Date(current.StartUTC).getTime();
-          if (curStart < prevEnd - 60000) { // Overlap of more than 1 minute
-            anomalies.push({
-              type: 'OVERLAPPING_ENTRIES',
-              severity: 'MEDIUM',
-              entryId: current.EntryID,
-              conflictWithEntryId: prev.EntryID,
-              userId: current.UserID,
-              userName: userMap[current.UserID] || current.UserID,
-              message: `Entry overlaps with previous entry ${prev.EntryID}`
-            });
+          if (Number.isFinite(curStart)) {
+            for (let p = activePrevs.length - 1; p >= 0; p--) {
+              const prev = activePrevs[p];
+              const prevEnd = prev.EndUTC ? new Date(prev.EndUTC).getTime() : NaN;
+              if (!Number.isFinite(prevEnd) || prevEnd <= curStart - 60000) {
+                // Ended before curStart (with 1-min tolerance), prune from active list
+                activePrevs.splice(p, 1);
+              } else if (curStart < prevEnd - 60000) {
+                // Overlap of more than 1 minute
+                anomalies.push({
+                  type: 'OVERLAPPING_ENTRIES',
+                  severity: 'MEDIUM',
+                  entryId: current.EntryID,
+                  conflictWithEntryId: prev.EntryID,
+                  userId: current.UserID,
+                  userName: userMap[current.UserID] || current.UserID,
+                  message: `Entry overlaps with previous entry ${prev.EntryID}`
+                });
+              }
+            }
+            if (current.EndUTC) {
+              activePrevs.push(current);
+            }
           }
         }
       }

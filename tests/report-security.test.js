@@ -211,3 +211,84 @@ test('Admin may filter to another user who belongs to the assigned workspace', (
   assert.equal(fx.seenFilters[0].userId, 'U2');
   assert.equal(result.entries[0].userId, 'U2');
 });
+
+test('Admin getExceptionsReport detects overlaps across interleaved entries of multiple users', () => {
+  const fx = fixture();
+  global.SheetRepository.listTimeEntries = () => [
+    {
+      EntryID: 'E1',
+      UserID: 'U1',
+      ProjectID: 'P1',
+      Description: 'Task 1',
+      StartUTC: '2026-09-29T09:00:00.000Z',
+      EndUTC: '2026-09-29T11:00:00.000Z',
+      DurationSeconds: 7200
+    },
+    {
+      EntryID: 'E2',
+      UserID: 'U2',
+      ProjectID: 'P1',
+      Description: 'Interleaved User 2 Task',
+      StartUTC: '2026-09-29T09:30:00.000Z',
+      EndUTC: '2026-09-29T09:45:00.000Z',
+      DurationSeconds: 900
+    },
+    {
+      EntryID: 'E3',
+      UserID: 'U1',
+      ProjectID: 'P1',
+      Description: 'Overlapping Task for User 1',
+      StartUTC: '2026-09-29T10:00:00.000Z',
+      EndUTC: '2026-09-29T10:30:00.000Z',
+      DurationSeconds: 1800
+    },
+    {
+      EntryID: 'E4',
+      UserID: 'U1',
+      ProjectID: 'P1',
+      Description: 'Second Overlapping Task for User 1',
+      StartUTC: '2026-09-29T10:45:00.000Z',
+      EndUTC: '2026-09-29T11:15:00.000Z',
+      DurationSeconds: 1800
+    }
+  ];
+
+  const report = fx.service.getExceptionsReport(admin, 'W1', {});
+  const overlaps = report.anomalies.filter(a => a.type === 'OVERLAPPING_ENTRIES');
+
+  assert.equal(overlaps.length, 2);
+  assert.equal(overlaps[0].entryId, 'E3');
+  assert.equal(overlaps[0].conflictWithEntryId, 'E1');
+  assert.equal(overlaps[0].userId, 'U1');
+
+  assert.equal(overlaps[1].entryId, 'E4');
+  assert.equal(overlaps[1].conflictWithEntryId, 'E1');
+  assert.equal(overlaps[1].userId, 'U1');
+});
+
+test('Admin getAttendanceReport gracefully skips entries lacking StartUTC without throwing', () => {
+  const fx = fixture();
+  global.SheetRepository.listTimeEntries = () => [
+    {
+      EntryID: 'E-VALID',
+      UserID: 'U1',
+      StartUTC: '2026-09-29T08:00:00.000Z',
+      EndUTC: '2026-09-29T16:00:00.000Z',
+      DurationSeconds: 28800
+    },
+    {
+      EntryID: 'E-NO-START',
+      UserID: 'U1',
+      StartUTC: '',
+      EndUTC: '',
+      DurationSeconds: 0
+    }
+  ];
+
+  const report = fx.service.getAttendanceReport(admin, 'W1', {});
+  assert.ok(report.attendance);
+  assert.equal(report.attendance.length, 1);
+  assert.equal(report.attendance[0].userId, 'U1');
+  assert.equal(report.attendance[0].trackedHours, 8);
+});
+
