@@ -16,6 +16,7 @@
 
 var ERROR_CODES = {
   AUTH_REQUIRED: 'AUTH_REQUIRED',
+  MFA_REQUIRED: 'MFA_REQUIRED',
   UNAUTHORIZED: 'UNAUTHORIZED',
   SESSION_EXPIRED: 'SESSION_EXPIRED',
   ACCOUNT_LOCKED: 'ACCOUNT_LOCKED',
@@ -323,7 +324,7 @@ var MASTER_SCHEMA = {
   ],
   Sessions: [
     'SessionID', 'UserID', 'TokenHash', 'ClientType', 'ClientLabel',
-    'CreatedAt', 'LastSeenAt', 'ExpiresAt', 'AbsoluteExpiresAt', 'Revoked', 'RevokedAt', 'RevokeReason', 'AccountEpoch'
+    'CreatedAt', 'LastSeenAt', 'ExpiresAt', 'AbsoluteExpiresAt', 'Revoked', 'RevokedAt', 'RevokeReason', 'AccountEpoch', 'AuthLevel'
   ],
   GlobalSettings: [
     'SettingKey', 'SettingValue', 'Description', 'UpdatedAt', 'UpdatedBy'
@@ -461,7 +462,7 @@ var SETTINGS_CATALOG = [
   { key:'IDLE_TIMEOUT_HOURS', group:'Compatibility', label:'Legacy Idle Timeout (Hours)', type:'number', default:8, min:1, max:24, options:[], scope:'GLOBAL', stepUp:false, help:'Compatibility setting retained for older installations.', visible:false },
 
   { key:'PASSWORD_RECOVERY_EMAIL', group:'Security', label:'Email Password Recovery', type:'bool', default:false, min:null, max:null, options:[], scope:'GLOBAL', stepUp:true, help:'Enables the email recovery workflow once WP6 is installed.' },
-  { key:'MFA_REQUIRED', group:'Security', label:'Require MFA', type:'bool', default:true, min:null, max:null, options:[], scope:'GLOBAL', stepUp:true, help:'Security policy flag for mandatory authenticator verification.' },
+  { key:'MFA_REQUIRED', group:'Security', label:'Require MFA (mandatory)', type:'bool', default:true, min:null, max:null, options:[], scope:'GLOBAL', stepUp:true, readOnly:true, help:'Authenticator verification is mandatory and cannot be disabled.' },
   { key:'SESSION_IDLE_MINUTES', group:'Security', label:'Session Idle Timeout (Minutes)', type:'number', default:480, min:5, max:1440, options:[], scope:'GLOBAL', stepUp:true, help:'Maximum inactivity before a session expires.' },
   { key:'SESSION_MAX_HOURS', group:'Security', label:'Maximum Session Length (Hours)', type:'number', default:24, min:1, max:168, options:[], scope:'GLOBAL', stepUp:true, help:'Absolute maximum session lifetime.' },
   { key:'PBKDF2_ITERATIONS', group:'Security', label:'Password Hash Iterations', type:'number', default:10000, min:10000, max:1000000, options:[], scope:'GLOBAL', stepUp:true, help:'PBKDF2 work factor. Use System Health calibration before increasing it.' },
@@ -608,6 +609,9 @@ var Validation = {
         clean[key] = (raw === true || raw === 1 || raw === 'true' || raw === 'TRUE' || raw === '1')
           ? 'true'
           : 'false';
+        if (key === 'MFA_REQUIRED' && clean[key] !== 'true') {
+          throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'MFA is mandatory and cannot be disabled.', 400);
+        }
         continue;
       }
 
@@ -1283,6 +1287,12 @@ function dispatchAction_(action, data) {
   // All other actions require authenticated session
   const authContext = SessionService.validateSession(token);
 
+  // Password-only sessions are capabilities for enrollment, never app access.
+  const enrollmentRequired = authContext.session && authContext.session.AuthLevel === 'MFA_ENROLLMENT';
+  if (enrollmentRequired && !['auth.validateSession', 'auth.enrollMfa', 'auth.confirmMfa', 'auth.logout', 'auth.changePassword'].includes(action)) {
+    throw new AppError(ERROR_CODES.MFA_REQUIRED, 'Set up your authenticator before using the application.', 403);
+  }
+
   // Forced password change is a server-side security state, not a UI hint.
   // Temporary/reset-password sessions may only validate, change password, or logout.
   const mustChangePassword = authContext.user &&
@@ -1291,6 +1301,8 @@ function dispatchAction_(action, data) {
     const allowedDuringForcedChange = new Set([
       'auth.validateSession',
       'auth.changePassword',
+      'auth.enrollMfa',
+      'auth.confirmMfa',
       'auth.logout'
     ]);
     if (!allowedDuringForcedChange.has(action)) {
@@ -1329,7 +1341,7 @@ function dispatchAction_(action, data) {
 
   switch (action) {
     case 'auth.validateSession':
-      return { user: authContext.user, role: authContext.role };
+      return { user: authContext.user, role: authContext.role, enrollmentRequired: !!enrollmentRequired };
 
     case 'auth.stepUp':
       return AuthService.stepUp(
@@ -1791,6 +1803,7 @@ var Flags = {
     if (!entry) {
       throw new AppError(ERROR_CODES.VALIDATION_ERROR, `Unknown setting: ${key}`, 400);
     }
+    if (entry.key === 'MFA_REQUIRED') return true;
     const stored = entry.scope === 'WORKSPACE'
       ? this._loadWorkspace(workspaceId)
       : this._loadGlobal();
@@ -1849,6 +1862,7 @@ var SettingsService = {
           options: entry.options,
           scope: entry.scope,
           stepUp: entry.stepUp,
+          readOnly: entry.readOnly === true,
           help: entry.help,
           value: Flags.getValue(entry.key, entry.scope === 'WORKSPACE' ? id : '')
         }))
@@ -3140,7 +3154,10 @@ var SessionService = (typeof global !== 'undefined' && global.SessionService) ||
   /**
    * Creates and registers a new authenticated session
    */
-  createSession(userId, clientType = 'WEB', clientLabel = '') {
+  createSession(userId, clientType = 'WEB', clientLabel = '', authLevel = 'MFA_ENROLLMENT') {
+    if (!['MFA', 'MFA_ENROLLMENT'].includes(authLevel)) {
+      throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'Invalid authentication assurance.', 401);
+    }
     const normalizedClientType = String(clientType || 'WEB').toUpperCase();
     let verifiedClientLabel = String(clientLabel || '').trim();
     let sessionAccount = null;
@@ -3204,8 +3221,9 @@ var SessionService = (typeof global !== 'undefined' && global.SessionService) ||
     } catch (err) {}
     const idleTimeoutMs = idleTimeoutMinutes * 60 * 1000;
     const absoluteTimeoutMs = absoluteTimeoutHours * 3600 * 1000;
-    const expiresAt = new Date(now.getTime() + idleTimeoutMs);
-    const absoluteExpiresAt = new Date(now.getTime() + absoluteTimeoutMs);
+    const enrollmentMs = (CONSTANTS.LIMITS.MFA_ENROLLMENT_TTL_MINUTES || 10) * 60000;
+    const expiresAt = new Date(now.getTime() + (authLevel === 'MFA_ENROLLMENT' ? Math.min(idleTimeoutMs, enrollmentMs) : idleTimeoutMs));
+    const absoluteExpiresAt = new Date(now.getTime() + (authLevel === 'MFA_ENROLLMENT' ? enrollmentMs : absoluteTimeoutMs));
 
     const sessionRecord = {
       SessionID: sessionId,
@@ -3219,6 +3237,7 @@ var SessionService = (typeof global !== 'undefined' && global.SessionService) ||
       AbsoluteExpiresAt: absoluteExpiresAt.toISOString(),
       Revoked: false,
       RevokedAt: '',
+      AuthLevel: authLevel,
       AccountEpoch:
         sessionAccount && Number(sessionAccount.SessionEpoch) > 0
           ? Number(sessionAccount.SessionEpoch)
@@ -3254,6 +3273,11 @@ var SessionService = (typeof global !== 'undefined' && global.SessionService) ||
 
     if (!session) {
       throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'Invalid or expired session.', 401);
+    }
+
+    if (!['MFA', 'MFA_ENROLLMENT'].includes(session.AuthLevel)) {
+      this._deleteCachedSession(tokenHash);
+      throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'Sign in again to complete mandatory MFA.', 401);
     }
 
     const now = Date.now();
@@ -3455,11 +3479,13 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
     return 'FLINK_MFA_CHALLENGE_' + String(userId || '').replace(/[^A-Za-z0-9_-]/g, '');
   },
 
-  _storeMfaChallenge(userId, challengeToken, expiresAtMs, googleEmail = '') {
+  _storeMfaChallenge(userId, challengeToken, expiresAtMs, googleEmail = '', passwordVersion = null, accountEpoch = null) {
     const record = JSON.stringify({
       tokenHash: SecurityService.hashToken(challengeToken),
       expiresAtMs: Number(expiresAtMs),
-      googleEmail: IdentityService.normalizeEmail(googleEmail)
+      googleEmail: IdentityService.normalizeEmail(googleEmail),
+      passwordVersion,
+      accountEpoch
     });
 
     if (typeof PropertiesService !== 'undefined' && PropertiesService.getScriptProperties) {
@@ -4026,7 +4052,9 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
         account.UserID,
         mfaChallengeToken,
         timestamp + 5 * 60 * 1000,
-        googleEmail
+        googleEmail,
+        Number(cred.PasswordVersion || 1),
+        Number(account.SessionEpoch || 1)
       );
 
       MasterRepository.logSecurityEvent({
@@ -4048,28 +4076,7 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
       };
     }
 
-    MasterRepository.updateCredentials(account.UserID, {
-      FailedLoginCount: 0,
-      LastFailedAt: '',
-      LockUntil: ''
-    });
-
-    MasterRepository.updateAccount(account.UserID, {
-      LastLoginAt: new Date().toISOString()
-    });
-
-    MasterRepository.logSecurityEvent({
-      UserID: account.UserID,
-      Username: account.Username,
-      EventType: CONSTANTS.AUDIT_EVENTS.LOGIN_SUCCESS,
-      Success: true,
-      metadata: {
-        clientType: normalizedClientType,
-        mfa: false,
-        googleIdentity: googleEmail || ''
-      }
-    });
-
+    // Enrollment does not complete login or reset durable failure counters.
     const sessionData = SessionService.createSession(
       account.UserID,
       normalizedClientType,
@@ -4080,6 +4087,7 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
     const assignedWorkspaces = accesses.map(a => a.WorkspaceID);
 
     return {
+      enrollmentRequired: true,
       sessionToken: sessionData.sessionToken,
       expiresAt: sessionData.expiresAt,
       user: {
@@ -4164,7 +4172,10 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
 
     const account = MasterRepository.findAccountById(userId);
     const cred = MasterRepository.getCredentials(userId);
-    if (!account || !cred || !cred.TotpSecret) {
+    if (!account || !cred || !cred.TotpSecret ||
+        !(cred.MfaEnabled === true || cred.MfaEnabled === 'TRUE' || cred.MfaEnabled === 1) ||
+        lockedChallenge.passwordVersion !== Number(cred.PasswordVersion || 1) ||
+        lockedChallenge.accountEpoch !== Number(account.SessionEpoch || 1)) {
       throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'User credentials or MFA configuration not found.', 401);
     }
 
@@ -4337,7 +4348,8 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
     const sessionData = SessionService.createSession(
       account.UserID,
       normalizedClientType,
-      googleEmail
+      googleEmail,
+      'MFA'
     );
     const accesses = MasterRepository.getWorkspaceAccessForUser(account.UserID);
     const assignedWorkspaces = accesses.map(a => a.WorkspaceID);
@@ -4427,7 +4439,8 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
     const replacement = SessionService.createSession(
       authContext.userId,
       authContext.session.ClientType || 'WEB',
-      authContext.session.ClientLabel || ''
+      authContext.session.ClientLabel || '',
+      'MFA'
     );
     const stepUpToken = 'STP_' + SecurityService.generateRandomHex(32);
     const stepUpExpiresAtMs =
@@ -4516,18 +4529,74 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
    * Enrolls or replaces TOTP MFA only after fresh credential verification.
    * Pending enrollment is bound to the current authenticated session and expires.
    */
+  _assertEnrollmentAccount(authContext) {
+    if (!authContext || !authContext.userId || !authContext.session || !authContext.session.SessionID) {
+      throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'A current authenticated session is required.', 401);
+    }
+    const account = MasterRepository.findAccountById(authContext.userId);
+    const cred = MasterRepository.getCredentials(authContext.userId);
+    if (!account || !cred || account.Status !== CONSTANTS.ACCOUNT_STATUS.ACTIVE ||
+        Number(account.SessionEpoch || 1) !== Number(authContext.session.AccountEpoch || 1) ||
+        (cred.LockUntil && new Date(cred.LockUntil).getTime() > Date.now())) {
+      throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'Sign in again before changing MFA.', 401);
+    }
+    const email = IdentityService.assertAccountIdentity(account, authContext.session.ClientType || 'WEB');
+    if (email !== IdentityService.normalizeEmail(authContext.session.ClientLabel)) {
+      throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'Enrollment identity changed. Sign in again.', 401);
+    }
+    return { account, cred };
+  },
+
+  _requireEnrollmentAudit(authContext, action, before, after) {
+    const ok = MasterRepository.logGlobalAudit({
+      ActorUserID: authContext.userId,
+      ActorRole: authContext.role,
+      WorkspaceID: 'MASTER',
+      EntityType: 'USER_SECURITY',
+      EntityID: authContext.userId,
+      Action: action,
+      BeforeJSON: before,
+      AfterJSON: after,
+      Reason: 'Mandatory authenticator enrollment; secrets excluded'
+    });
+    if (!ok) throw new AppError(ERROR_CODES.CRYPTO_FAILURE, 'Security audit is unavailable. Please retry.', 503);
+  },
+
+  _recordEnrollmentFailure(authContext, cred) {
+    const attempts = (parseInt(cred.FailedLoginCount, 10) || 0) + 1;
+    const locked = attempts >= CONSTANTS.LIMITS.MAX_FAILED_LOGIN_ATTEMPTS;
+    const updates = { FailedLoginCount: attempts, LastFailedAt: new Date().toISOString() };
+    if (locked) {
+      updates.LockUntil = new Date(Date.now() + CONSTANTS.LIMITS.LOCKOUT_DURATION_MINUTES * 60000).toISOString();
+    }
+    MasterRepository.updateCredentials(authContext.userId, updates);
+    if (locked) {
+      MasterRepository.updateAccount(authContext.userId, { Status: CONSTANTS.ACCOUNT_STATUS.LOCKED });
+      this._deleteMfaEnrollment(authContext.userId);
+      SessionService.revokeAllUserSessions(authContext.userId);
+    }
+    MasterRepository.logSecurityEvent({ UserID: authContext.userId, EventType: CONSTANTS.AUDIT_EVENTS.LOGIN_FAIL,
+      Success: false, metadata: { reason: 'Invalid MFA enrollment verification', failedAttempts: attempts } });
+    throw new AppError(locked ? ERROR_CODES.ACCOUNT_LOCKED : ERROR_CODES.AUTH_REQUIRED,
+      locked ? 'Account locked after repeated enrollment failures.' : 'Invalid authenticator verification.', locked ? 403 : 401);
+  },
+
   enrollMfa(authContext, currentPassword, currentMfaCode = '') {
     if (!authContext || !authContext.userId || !authContext.session || !authContext.session.SessionID) {
       throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'A current authenticated session is required.', 401);
     }
-    const cred = MasterRepository.getCredentials(authContext.userId);
-    if (!cred || !SecurityService.verifyPassword(currentPassword, cred.PasswordHash)) {
-      throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'Fresh password verification is required before changing MFA.', 401);
+    const initial = this._assertEnrollmentAccount(authContext);
+    const passwordValid = SecurityService.verifyPassword(currentPassword, initial.cred.PasswordHash);
+    return this._withLoginStateLock(() => {
+    const { cred } = this._assertEnrollmentAccount(authContext);
+    if (cred.PasswordHash !== initial.cred.PasswordHash) {
+      throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'Credentials changed. Sign in again.', 401);
     }
+    if (!passwordValid) return this._recordEnrollmentFailure(authContext, cred);
 
     const replacing =
       cred.MfaEnabled === true ||
-      cred.MfaEnabled === 'TRUE';
+      cred.MfaEnabled === 'TRUE' || cred.MfaEnabled === 1;
 
     if (replacing) {
       if (!currentMfaCode || !cred.TotpSecret) {
@@ -4546,7 +4615,7 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
         !currentVerification.valid ||
         (!isNaN(previousStep) && currentVerification.timeStep <= previousStep)
       ) {
-        throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'Existing MFA verification failed.', 401);
+        return this._recordEnrollmentFailure(authContext, cred);
       }
       MasterRepository.updateCredentials(authContext.userId, {
         LastSuccessfulTotpStep: currentVerification.timeStep
@@ -4559,20 +4628,25 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
       Date.now() +
       (CONSTANTS.LIMITS.MFA_ENROLLMENT_TTL_MINUTES || 10) * 60 * 1000;
 
+    this._requireEnrollmentAudit(authContext, 'MFA_ENROLLMENT_STARTED',
+      { pendingEnrollment: !!cred.PendingTotpSecret, mfaEnabled: replacing },
+      { pendingEnrollment: true, mfaEnabled: replacing, phase: 'INTENT' });
     MasterRepository.updateCredentials(authContext.userId, {
       PendingTotpSecret: encryptedSecret
     });
     this._storeMfaEnrollment(authContext.userId, {
       sessionId: authContext.session.SessionID,
       expiresAtMs,
-      replacing
+      replacing,
+      passwordVersion: Number(cred.PasswordVersion || 1),
+      accountEpoch: Number(authContext.session.AccountEpoch || 1)
     });
 
     const username =
       authContext.username ||
       (authContext.user && (authContext.user.Username || authContext.user.username)) ||
       'user';
-    const uri = `otpauth://totp/FLINK:${username}?secret=${rawSecret}&issuer=FLINK`;
+    const uri = `otpauth://totp/FLINK:${encodeURIComponent(username)}?secret=${encodeURIComponent(rawSecret)}&issuer=FLINK`;
     return {
       secret: rawSecret,
       qrUri: uri,
@@ -4580,6 +4654,7 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
       replacing,
       message: 'Scan the QR code or enter the secret in your authenticator app, then confirm with a 6-digit code.'
     };
+    });
   },
 
   /**
@@ -4592,18 +4667,18 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
       if (!authContext || !authContext.session || !authContext.session.SessionID) {
         throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'A current authenticated session is required.', 401);
       }
+      const { cred } = this._assertEnrollmentAccount(authContext);
       const enrollment = this._getMfaEnrollment(authContext.userId);
       if (
         !enrollment ||
         enrollment.sessionId !== authContext.session.SessionID ||
-        Number(enrollment.expiresAtMs || 0) < Date.now()
+        Number(enrollment.expiresAtMs || 0) <= Date.now() ||
+        enrollment.passwordVersion !== Number(cred.PasswordVersion || 1) ||
+        enrollment.accountEpoch !== Number(authContext.session.AccountEpoch || 1)
       ) {
-        this._deleteMfaEnrollment(authContext.userId);
-        MasterRepository.updateCredentials(authContext.userId, { PendingTotpSecret: '' });
         throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'MFA enrollment is invalid, expired, or belongs to another session.', 401);
       }
 
-      const cred = MasterRepository.getCredentials(authContext.userId);
       if (!cred || !cred.PendingTotpSecret) {
         this._deleteMfaEnrollment(authContext.userId);
         throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'No pending MFA enrollment found. Call enrollMfa first.');
@@ -4618,37 +4693,31 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
         authContext.userId
       );
       if (!verification.valid) {
-        throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'Invalid verification code. Could not verify authenticator app.');
+        return this._recordEnrollmentFailure(authContext, cred);
       }
 
+      const before = { mfaEnabled: cred.MfaEnabled === true || cred.MfaEnabled === 'TRUE' || cred.MfaEnabled === 1, pendingEnrollment: true };
+      const after = { mfaEnabled: true, pendingEnrollment: false };
+      this._requireEnrollmentAudit(authContext, 'MFA_ENROLLMENT_COMMIT_INTENT', before, after);
       MasterRepository.updateCredentials(authContext.userId, {
         TotpSecret: cred.PendingTotpSecret,
         MfaEnabled: true,
         PendingTotpSecret: '',
-        LastSuccessfulTotpStep: verification.timeStep
+        LastSuccessfulTotpStep: verification.timeStep,
+        FailedLoginCount: 0,
+        LastFailedAt: '',
+        LockUntil: ''
       });
       this._deleteMfaEnrollment(authContext.userId);
 
-      let replacementSession = null;
-      if (enrollment.replacing === true) {
-        SessionService.revokeAllUserSessions(authContext.userId);
-        replacementSession = SessionService.createSession(
-          authContext.userId,
-          authContext.session.ClientType || 'WEB',
-          authContext.session.ClientLabel || ''
-        );
-      }
-
-      MasterRepository.logGlobalAudit({
-        ActorUserID: authContext.userId,
-        ActorRole: authContext.role,
-        EntityType: 'USER_SECURITY',
-        EntityID: authContext.userId,
-        Action: CONSTANTS.AUDIT_EVENTS.MFA_ENROLLED,
-        Reason: enrollment.replacing === true
-          ? 'TOTP multi-factor authentication replaced after fresh reauthentication'
-          : 'TOTP multi-factor authentication successfully enabled'
-      });
+      SessionService.revokeAllUserSessions(authContext.userId);
+      this._requireEnrollmentAudit(authContext, CONSTANTS.AUDIT_EVENTS.MFA_ENROLLED, before, after);
+      const replacementSession = SessionService.createSession(
+        authContext.userId,
+        authContext.session.ClientType || 'WEB',
+        authContext.session.ClientLabel || '',
+        'MFA'
+      );
 
       return {
         ok: true,
@@ -4660,7 +4729,11 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
           : 'Two-factor authentication successfully enabled.'
       };
     } finally {
-      lock.releaseLock();
+      try {
+        if (typeof SpreadsheetApp !== 'undefined' && SpreadsheetApp.flush) SpreadsheetApp.flush();
+      } finally {
+        lock.releaseLock();
+      }
     }
   },
 
@@ -4668,63 +4741,7 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
    * Disables MFA for a user (Super Admin only or user password confirmation)
    */
   disableMfa(superAdminContext, targetUserId, adminPassword, adminTotpCode = '') {
-    AuthorizationService.assertRole(superAdminContext, [CONSTANTS.ROLES.SUPER_ADMIN]);
-    const targetAccount = MasterRepository.findAccountById(targetUserId);
-    if (!targetAccount) throw new AppError(ERROR_CODES.NOT_FOUND, `User ${targetUserId} not found.`);
-    if (targetAccount.Role === CONSTANTS.ROLES.SUPER_ADMIN) {
-      throw new AppError(
-        ERROR_CODES.PERMISSION_DENIED,
-        'MFA cannot be disabled for the root Super Admin through the web application.',
-        403
-      );
-    }
-
-    const adminCred = MasterRepository.getCredentials(superAdminContext.userId);
-    if (!adminCred || !SecurityService.verifyPassword(adminPassword, adminCred.PasswordHash)) {
-      throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'Fresh Super Admin password verification is required.', 401);
-    }
-    if (adminCred.MfaEnabled === true || adminCred.MfaEnabled === 'TRUE') {
-      const verification = SecurityService.verifyTotpWithStep(
-        adminCred.TotpSecret,
-        adminTotpCode,
-        1,
-        Date.now(),
-        30,
-        superAdminContext.userId
-      );
-      const previousStep = parseInt(adminCred.LastSuccessfulTotpStep, 10);
-      if (
-        !verification.valid ||
-        (!isNaN(previousStep) && verification.timeStep <= previousStep)
-      ) {
-        throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'Fresh Super Admin MFA verification is required.', 401);
-      }
-      MasterRepository.updateCredentials(superAdminContext.userId, {
-        LastSuccessfulTotpStep: verification.timeStep
-      });
-    }
-
-    MasterRepository.updateCredentials(targetUserId, {
-      TotpSecret: '',
-      MfaEnabled: false,
-      PendingTotpSecret: '',
-      LastSuccessfulTotpStep: ''
-    });
-
-    this._deleteMfaChallenge(targetUserId);
-    this._deleteMfaEnrollment(targetUserId);
-    SessionService.revokeAllUserSessions(targetUserId);
-
-    MasterRepository.logGlobalAudit({
-      ActorUserID: superAdminContext.userId,
-      ActorRole: superAdminContext.role,
-      EntityType: 'USER_SECURITY',
-      EntityID: targetUserId,
-      Action: CONSTANTS.AUDIT_EVENTS.MFA_DISABLED,
-      Reason: 'Two-factor authentication disabled by Super Admin after fresh reauthentication'
-    });
-
-    return { ok: true, message: `MFA disabled for user ${targetAccount.Username}. Active sessions were revoked.` };
+    throw new AppError(ERROR_CODES.PERMISSION_DENIED, 'MFA is mandatory and cannot be disabled. Use authenticator replacement or recovery.', 403);
   },
 
   /**
@@ -4777,7 +4794,9 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
           : 'WEB';
       const newSession = SessionService.createSession(
         authContext.userId,
-        replacementClientType
+        replacementClientType,
+        authContext.session.ClientLabel || '',
+        authContext.session.AuthLevel || 'MFA_ENROLLMENT'
       );
 
       MasterRepository.logSecurityEvent({
@@ -12082,6 +12101,7 @@ var SetupService = (typeof global !== 'undefined' && global.SetupService) || {
     return {
       ok: true,
       message: 'Super Admin initialized successfully.',
+      enrollmentRequired: true,
       user: {
         userId: adminUserId,
         username: cleanUsername,

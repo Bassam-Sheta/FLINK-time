@@ -22,6 +22,7 @@ function fixture(lastSeenAgeMinutes, options = {}) {
   const writes = [];
   const session = {
     SessionID: 'S1',
+    AuthLevel: 'MFA',
     UserID: 'U1',
     CreatedAt: new Date(now - 60 * 60 * 1000).toISOString(),
     LastSeenAt: new Date(now - lastSeenAgeMinutes * 60 * 1000).toISOString(),

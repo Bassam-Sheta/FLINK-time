@@ -551,6 +551,25 @@
           </div>
           <button type="submit" class="btn" style="width: 100%;">Sign In</button>
         </form>
+        <form id="mfaEnrollmentForm" class="hidden" onsubmit="beginAuthenticatorEnrollment(event)">
+          <h2>Set up your authenticator</h2>
+          <p>MFA is required before you can use FLINK. Re-enter your password to generate a setup key.</p>
+          <label for="enrollmentPassword">Current password</label>
+          <input id="enrollmentPassword" type="password" autocomplete="current-password" required>
+          <button class="btn" type="submit">Generate setup key</button>
+          <button class="btn btn-secondary" type="button" onclick="logout()">Sign Out</button>
+        </form>
+        <form id="mfaEnrollmentConfirmForm" class="hidden" onsubmit="confirmAuthenticatorEnrollment(event)">
+          <h2>Connect your authenticator</h2>
+          <p>Add a time-based account named FLINK in your authenticator app using this key. Keep it private.</p>
+          <label for="enrollmentSecret">Setup key</label>
+          <output id="enrollmentSecret" style="display:block; overflow-wrap:anywhere; user-select:all;"></output>
+          <p id="enrollmentExpiry"></p>
+          <label for="enrollmentCode">New authenticator code</label>
+          <input id="enrollmentCode" type="text" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required>
+          <button class="btn" type="submit">Confirm authenticator</button>
+          <button class="btn btn-secondary" type="button" onclick="logout()">Sign Out</button>
+        </form>
         <form id="mfaLoginForm" class="hidden" onsubmit="handleMfaVerification(event)">
           <div style="margin-bottom:0.75rem; font-weight:700;">Two-Factor Verification</div>
           <div style="margin-bottom:1.25rem; color:var(--text-secondary); font-size:0.85rem;">
@@ -1056,8 +1075,7 @@
       if (state.token) {
         try {
           const res = await apiCall('auth.validateSession');
-          state.user = normalizeUser(res.user, res.role);
-          initApp();
+          completeBrowserLogin(Object.assign({}, res, { sessionToken: state.token }));
         } catch (e) {
           sessionStorage.removeItem('flink_session_token');
           state.token = '';
@@ -1076,21 +1094,84 @@
       const mfaForm = document.getElementById('mfaLoginForm');
       if (passwordForm) passwordForm.classList.remove('hidden');
       if (mfaForm) mfaForm.classList.add('hidden');
+      clearEnrollmentScreen();
     }
 
     function completeBrowserLogin(res) {
       state.pendingMfaChallengeToken = '';
       state.token = res.sessionToken;
       state.user = normalizeUser(res.user);
+      if (res.enrollmentRequired) {
+        sessionStorage.removeItem('flink_session_token');
+        showLogin();
+        document.getElementById('passwordLoginForm').classList.add('hidden');
+        document.getElementById('mfaEnrollmentForm').classList.remove('hidden');
+        document.getElementById('enrollmentPassword').focus();
+        return;
+      }
       sessionStorage.setItem('flink_session_token', res.sessionToken);
+      clearEnrollmentScreen();
 
       const mfaCode = document.getElementById('mfaCode');
       if (mfaCode) mfaCode.value = '';
 
       if (state.user.mustChangePassword) {
         openPasswordChangeModal();
+      } else if (EMBED_MODE === 'SUPER_ADMIN' && state.setupStatus && !state.setupStatus.initialized) {
+        document.getElementById('loginView').classList.add('hidden');
+        document.getElementById('setupWizardContainer').classList.remove('hidden');
+        renderWizardStep(2);
       } else {
         initApp();
+      }
+    }
+
+    function clearEnrollmentScreen() {
+      for (const id of ['mfaEnrollmentForm', 'mfaEnrollmentConfirmForm']) document.getElementById(id).classList.add('hidden');
+      for (const id of ['enrollmentPassword', 'enrollmentCode']) document.getElementById(id).value = '';
+      document.getElementById('enrollmentSecret').textContent = '';
+      document.getElementById('enrollmentExpiry').textContent = '';
+    }
+
+    async function beginAuthenticatorEnrollment(event) {
+      event.preventDefault();
+      const button = event.submitter;
+      if (button) button.disabled = true;
+      const password = document.getElementById('enrollmentPassword');
+      try {
+        const res = await apiCall('auth.enrollMfa', { currentPassword: password.value });
+        document.getElementById('enrollmentSecret').textContent = res.secret;
+        document.getElementById('enrollmentExpiry').textContent = 'Confirm before ' + new Date(res.expiresAt).toLocaleTimeString();
+        document.getElementById('mfaEnrollmentForm').classList.add('hidden');
+        document.getElementById('mfaEnrollmentConfirmForm').classList.remove('hidden');
+        document.getElementById('enrollmentCode').focus();
+      } catch (err) {
+        const alertBox = document.getElementById('loginAlert');
+        alertBox.textContent = err.message || 'Could not start enrollment. Sign in again to retry.';
+        alertBox.classList.remove('hidden');
+      } finally {
+        password.value = '';
+        if (button) button.disabled = false;
+      }
+    }
+
+    async function confirmAuthenticatorEnrollment(event) {
+      event.preventDefault();
+      const button = event.submitter;
+      if (button) button.disabled = true;
+      try {
+        const res = await apiCall('auth.confirmMfa', { code: document.getElementById('enrollmentCode').value });
+        state.token = res.sessionToken;
+        clearEnrollmentScreen();
+        const validated = await apiCall('auth.validateSession');
+        completeBrowserLogin(Object.assign({}, validated, { sessionToken: res.sessionToken }));
+      } catch (err) {
+        const alertBox = document.getElementById('loginAlert');
+        alertBox.textContent = err.message || 'Could not confirm enrollment. Sign in again to retry.';
+        alertBox.classList.remove('hidden');
+      } finally {
+        document.getElementById('enrollmentCode').value = '';
+        if (button) button.disabled = false;
       }
     }
 
@@ -1143,6 +1224,7 @@
 
       try {
         const res = await apiCall('auth.login', { username, password, clientType: 'WEB' });
+        document.getElementById('loginPassword').value = '';
         if (res.mfaRequired) {
           showMfaChallenge(res.mfaChallengeToken);
           return;
@@ -2739,10 +2821,7 @@
 
       try {
         const res = await apiCall('setup.completeStep', { step: 1, fullName, username, password, confirmPassword });
-        state.token = res.sessionToken;
-        state.user = res.user;
-        sessionStorage.setItem('flink_session_token', res.sessionToken);
-        renderWizardStep(2);
+        completeBrowserLogin(res);
       } catch (e) {
         alert(e.message || 'Failed to initialize Super Admin.');
       }
@@ -4042,6 +4121,7 @@
       input.dataset.settingKey = entry.key;
       input.dataset.settingScope = entry.scope;
       input.dataset.settingType = entry.type;
+      input.disabled = entry.readOnly === true;
 
       const hint = document.createElement('div');
       hint.className = 'field-hint';

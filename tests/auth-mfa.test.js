@@ -89,10 +89,12 @@ function loadFixture() {
       Object.assign(account, updates);
     },
     logSecurityEvent(event) { events.push({ ...event }); },
-    logGlobalAudit() {},
+    logGlobalAudit() { return true; },
+    revokeAllUserSessions() {},
     getWorkspaceAccessForUser() { return [{ WorkspaceID: 'W1' }]; }
   };
   global.SessionService = {
+    revokeAllUserSessions() {},
     createSession() {
       sessionCount++;
       return { sessionToken: 'SESSION-' + sessionCount, expiresAt: 'later' };
@@ -235,6 +237,8 @@ test('MFA enrollment consumes the confirmation TOTP timestep', () => {
   fx.AuthService._storeMfaEnrollment('USR-1', {
     sessionId: 'S1',
     expiresAtMs: Date.now() + 60000,
+    passwordVersion: 1,
+    accountEpoch: 1,
     replacing: false
   });
 
@@ -261,6 +265,8 @@ test('MFA enrollment confirmation is rejected from another session', () => {
   fx.AuthService._storeMfaEnrollment('USR-1', {
     sessionId: 'S1',
     expiresAtMs: Date.now() + 60000,
+    passwordVersion: 1,
+    accountEpoch: 1,
     replacing: false
   });
 
@@ -276,5 +282,5 @@ test('MFA enrollment confirmation is rejected from another session', () => {
     ),
     err => err instanceof AppError && err.code === 'AUTH_REQUIRED'
   );
-  assert.equal(fx.cred.PendingTotpSecret, '');
+  assert.equal(fx.cred.PendingTotpSecret, 'PENDING-SECRET', 'another session must not erase the active enrollment');
 });
