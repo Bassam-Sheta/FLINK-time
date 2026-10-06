@@ -36,3 +36,24 @@ test('all three browser portals bind visibilitychange to restore active timer cl
     );
   }
 });
+
+test('all three browser portals bind pagehide to clean up running timer interval on page unload', () => {
+  const portals = ['User.html', 'Admin.html', 'SuperAdmin.html'];
+  for (const portal of portals) {
+    const portalHtml = fs.readFileSync(
+      path.resolve(__dirname, '../apps-script', portal),
+      'utf8'
+    );
+    assert.match(
+      portalHtml,
+      /window\.addEventListener\(['"]pagehide['"]/,
+      `${portal} must register a pagehide listener`
+    );
+    assert.match(
+      portalHtml,
+      /clearInterval\(state\.timerInterval\)/,
+      `${portal} must clear timerInterval on pagehide`
+    );
+  }
+});
+

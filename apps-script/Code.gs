@@ -6601,6 +6601,13 @@ var SheetRepository = (typeof global !== 'undefined' && global.SheetRepository) 
 
   listTimeEntries(workspaceId, filters = {}) {
     const { rows } = this.getTableData(workspaceId, CONSTANTS.WORKSPACE_TABS.TIME_ENTRIES);
+    const filterStartMs = (filters.startDate !== undefined && filters.startDate !== null && filters.startDate !== '')
+      ? new Date(filters.startDate).getTime()
+      : null;
+    const filterEndMs = (filters.endDate !== undefined && filters.endDate !== null && filters.endDate !== '')
+      ? new Date(filters.endDate).getTime()
+      : null;
+
     return rows.filter(entry => {
       // Exclude soft-deleted
       if (entry.Status === 'DELETED') return false;
@@ -6609,15 +6616,13 @@ var SheetRepository = (typeof global !== 'undefined' && global.SheetRepository) 
       if (filters.taskId && entry.TaskID !== filters.taskId) return false;
       if (filters.approvalStatus && entry.ApprovalStatus !== filters.approvalStatus) return false;
 
-      if (filters.startDate) {
+      if (filterStartMs !== null && Number.isFinite(filterStartMs)) {
         const start = new Date(entry.StartUTC).getTime();
-        const filterStart = new Date(filters.startDate).getTime();
-        if (start < filterStart) return false;
+        if (start < filterStartMs) return false;
       }
-      if (filters.endDate) {
+      if (filterEndMs !== null && Number.isFinite(filterEndMs)) {
         const end = new Date(entry.EndUTC || entry.StartUTC).getTime();
-        const filterEnd = new Date(filters.endDate).getTime();
-        if (end > filterEnd) return false;
+        if (end > filterEndMs) return false;
       }
       return true;
     });
@@ -7230,11 +7235,20 @@ var TimezoneService = (typeof global !== 'undefined' && global.TimezoneService) 
     } else {
       this._timezoneCache = {};
       this._weekStartCache = {};
+      this._formatterCache = {};
     }
   },
 
   beginRequest() {
     this._clearCache();
+  },
+
+  _getFormatter(cacheKey, locale, options) {
+    if (!this._formatterCache) this._formatterCache = {};
+    if (!this._formatterCache[cacheKey]) {
+      this._formatterCache[cacheKey] = new Intl.DateTimeFormat(locale, options);
+    }
+    return this._formatterCache[cacheKey];
   },
 
   _assertValidTimezone(timezone) {
@@ -7361,7 +7375,7 @@ var TimezoneService = (typeof global !== 'undefined' && global.TimezoneService) 
     // Node/test fallback. Compute timezone offset by formatting parts in the
     // target timezone and comparing those wall-clock components to UTC.
     if (typeof Intl !== 'undefined' && Intl.DateTimeFormat) {
-      const formatter = new Intl.DateTimeFormat('en-US', {
+      const formatter = this._getFormatter(`offset_${timezone}`, 'en-US', {
         timeZone: timezone,
         year: 'numeric',
         month: '2-digit',
@@ -7415,7 +7429,7 @@ var TimezoneService = (typeof global !== 'undefined' && global.TimezoneService) 
       return Utilities.formatDate(date, timezone, 'yyyy-MM-dd');
     }
     if (typeof Intl !== 'undefined' && Intl.DateTimeFormat) {
-      const parts = new Intl.DateTimeFormat('en-CA', {
+      const parts = this._getFormatter(`dateKey_${timezone}`, 'en-CA', {
         timeZone: timezone,
         year: 'numeric',
         month: '2-digit',
@@ -7440,7 +7454,7 @@ var TimezoneService = (typeof global !== 'undefined' && global.TimezoneService) 
       return Utilities.formatDate(date, timezone, 'yyyy-MM-dd HH:mm:ss') + ' ' + timezone;
     }
     if (typeof Intl !== 'undefined' && Intl.DateTimeFormat) {
-      return new Intl.DateTimeFormat('sv-SE', {
+      return this._getFormatter(`dateTime_${timezone}`, 'sv-SE', {
         timeZone: timezone,
         year: 'numeric',
         month: '2-digit',
@@ -9458,18 +9472,22 @@ var TimesheetService = (typeof global !== 'undefined' && global.TimesheetService
       totalSeconds += secs;
     }
 
-    const projects = SheetRepository.listProjects(workspaceId);
-    const tasks = SheetRepository.listTasks(workspaceId);
-    const projectMap = {};
-    const taskMap = {};
-    projects.forEach(p => { projectMap[p.ProjectID] = p.ProjectName; });
-    tasks.forEach(t => { taskMap[t.TaskID] = t.TaskName; });
+    const matrixKeys = Object.keys(matrixMap);
+    let rows = [];
+    if (matrixKeys.length > 0) {
+      const projects = SheetRepository.listProjects(workspaceId);
+      const tasks = SheetRepository.listTasks(workspaceId);
+      const projectMap = {};
+      const taskMap = {};
+      projects.forEach(p => { projectMap[p.ProjectID] = p.ProjectName; });
+      tasks.forEach(t => { taskMap[t.TaskID] = t.TaskName; });
 
-    const rows = Object.values(matrixMap).map(row => ({
-      ...row,
-      projectName: projectMap[row.projectId] || (row.projectId === 'unassigned' ? 'Unassigned' : row.projectId),
-      taskName: taskMap[row.taskId] || (row.taskId === 'none' ? '' : row.taskId)
-    }));
+      rows = Object.values(matrixMap).map(row => ({
+        ...row,
+        projectName: projectMap[row.projectId] || (row.projectId === 'unassigned' ? 'Unassigned' : row.projectId),
+        taskName: taskMap[row.taskId] || (row.taskId === 'none' ? '' : row.taskId)
+      }));
+    }
 
     return {
       userId,
@@ -10593,6 +10611,8 @@ var ReportService = (typeof global !== 'undefined' && global.ReportService) || {
     const taskMap = {};
     tasks.forEach(t => { taskMap[t.TaskID] = t.TaskName; });
 
+    const wsTimezone = TimezoneService.getWorkspaceTimezone(workspaceId);
+
     const rows = entries.map(e => {
       const dur = parseInt(e.DurationSeconds, 10) || 0;
       return {
@@ -10610,7 +10630,7 @@ var ReportService = (typeof global !== 'undefined' && global.ReportService) || {
         businessDate: e.StartUTC ? TimezoneService.formatDateKey(workspaceId, e.StartUTC) : '',
         startLocal: e.StartUTC ? TimezoneService.formatDateTime(workspaceId, e.StartUTC) : '',
         endLocal: e.EndUTC ? TimezoneService.formatDateTime(workspaceId, e.EndUTC) : '',
-        timezone: TimezoneService.getWorkspaceTimezone(workspaceId),
+        timezone: wsTimezone,
         durationSeconds: dur,
         durationFormatted: this._formatSeconds(dur),
         billable: e.Billable === true || e.Billable === 'TRUE' || e.Billable === 1,

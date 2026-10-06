@@ -186,3 +186,26 @@ test('TimezoneService memoizes timezone and week start lookups per request', () 
   assert.equal(wsReadCount, 5);
 });
 
+test('TimezoneService memoizes Intl.DateTimeFormat instances and resets on clearCache', () => {
+  const TimezoneService = loadService('Africa/Cairo', 'Sunday');
+  TimezoneService.beginRequest();
+
+  assert.deepEqual(TimezoneService._formatterCache, {});
+
+  const d = new Date('2026-09-27T12:00:00.000Z');
+  const key1 = TimezoneService.formatDateKey('W1', d);
+  assert.equal(key1, '2026-09-27');
+  assert.ok(TimezoneService._formatterCache['dateKey_Africa/Cairo']);
+  const cachedFormatter = TimezoneService._formatterCache['dateKey_Africa/Cairo'];
+
+  // Second formatting uses identical formatter instance
+  const key2 = TimezoneService.formatDateKey('W1', d);
+  assert.equal(key2, '2026-09-27');
+  assert.strictEqual(TimezoneService._formatterCache['dateKey_Africa/Cairo'], cachedFormatter);
+
+  // Clearing cache resets formatters
+  TimezoneService._clearCache();
+  assert.deepEqual(TimezoneService._formatterCache, {});
+});
+
+

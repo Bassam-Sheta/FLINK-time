@@ -1458,6 +1458,15 @@
           }
         });
       }
+      if (!state._pageHideBound && typeof window !== 'undefined' && window.addEventListener) {
+        state._pageHideBound = true;
+        window.addEventListener('pagehide', () => {
+          if (state.timerInterval) {
+            clearInterval(state.timerInterval);
+            state.timerInterval = null;
+          }
+        });
+      }
     }
 
     function applyTimerCooldown() {
