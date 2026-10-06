@@ -35,6 +35,7 @@ function runSingleLookup(totalRows, tabName, columnName, value, rowObject) {
           return {
             matchEntireCell() { return this; },
             matchCase() { return this; },
+            useRegularExpression(flag) { assert.equal(flag, false); return this; },
             findNext() {
               counters.findNext++;
               return { getRow() { return targetRow; } };
@@ -122,6 +123,7 @@ function runAccessLookup(totalRows) {
           return {
             matchEntireCell() { return this; },
             matchCase() { return this; },
+            useRegularExpression(flag) { assert.equal(flag, false); return this; },
             findAll() {
               counters.findAll++;
               return targetRows.map(r => ({ getRow() { return r; } }));

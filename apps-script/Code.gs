@@ -3100,7 +3100,8 @@ var SessionService = (typeof global !== 'undefined' && global.SessionService) ||
   _sessionCacheMemory: {},
 
   _sessionCacheKey(tokenHash) {
-    return 'S:' + String(tokenHash || '');
+    // Do not trust five-minute entries populated by an older deployment.
+    return 'S:v2:' + String(tokenHash || '');
   },
 
   _getCachedSession(tokenHash) {
@@ -3112,18 +3113,29 @@ var SessionService = (typeof global !== 'undefined' && global.SessionService) ||
       raw = this._sessionCacheMemory[key] || '';
     }
     if (!raw) return null;
-    try { return JSON.parse(raw); } catch (e) {
+    try {
+      const cached = JSON.parse(raw);
+      if (!cached || !Number.isFinite(cached.expiresAtMs) || cached.expiresAtMs <= Date.now() ||
+          cached.expiresAtMs > Date.now() + 60000 || !cached.session) {
+        this._deleteCachedSession(tokenHash);
+        return null;
+      }
+      return cached.session;
+    } catch (e) {
       this._deleteCachedSession(tokenHash);
       return null;
     }
   },
 
-  _putCachedSession(tokenHash, session) {
+  _putCachedSession(tokenHash, session, observedAtMs = Date.now()) {
     if (!tokenHash || !session) return;
+    const expiresAtMs = observedAtMs + 60000;
+    if (!Number.isFinite(expiresAtMs) || expiresAtMs <= Date.now()) return;
     const key = this._sessionCacheKey(tokenHash);
-    const raw = JSON.stringify(session);
+    const raw = JSON.stringify({ session, expiresAtMs });
     if (typeof CacheService !== 'undefined' && CacheService.getScriptCache) {
-      try { CacheService.getScriptCache().put(key, raw, 300); } catch (e) {}
+      // Bound stale single-session revocation if cache removal fails.
+      try { CacheService.getScriptCache().put(key, raw, 60); } catch (e) {}
     } else {
       this._sessionCacheMemory[key] = raw;
     }
@@ -3226,7 +3238,7 @@ var SessionService = (typeof global !== 'undefined' && global.SessionService) ||
     };
 
     MasterRepository.createSession(sessionRecord);
-    this._putCachedSession(tokenHash, sessionRecord);
+    this._putCachedSession(tokenHash, sessionRecord, now.getTime());
 
     return {
       sessionId,
@@ -3244,15 +3256,17 @@ var SessionService = (typeof global !== 'undefined' && global.SessionService) ||
     }
 
     const tokenHash = SecurityService.hashToken(rawToken.trim());
+    const observedAtMs = Date.now();
     let session = this._getCachedSession(tokenHash);
     if (!session) {
       session = MasterRepository.findSessionByTokenHashFast
         ? MasterRepository.findSessionByTokenHashFast(tokenHash)
         : MasterRepository.findSessionByTokenHash(tokenHash);
-      if (session) this._putCachedSession(tokenHash, session);
+      if (session) this._putCachedSession(tokenHash, session, observedAtMs);
     }
 
-    if (!session) {
+    if (!session || session.Revoked === true || session.Revoked === 'TRUE' || session.Revoked === 1) {
+      this._deleteCachedSession(tokenHash);
       throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'Invalid or expired session.', 401);
     }
 
@@ -3279,15 +3293,24 @@ var SessionService = (typeof global !== 'undefined' && global.SessionService) ||
     } catch (err) {}
     const idleTimeoutMs = idleTimeoutMinutes * 60 * 1000;
     const absoluteTimeoutMs = absoluteTimeoutHours * 3600 * 1000;
-    const storedAbsoluteExpiresAt = new Date(session.AbsoluteExpiresAt || '').getTime();
+    const hasAbsoluteExpiry = session.AbsoluteExpiresAt !== '' && session.AbsoluteExpiresAt != null;
+    const storedAbsoluteExpiresAt = hasAbsoluteExpiry ? new Date(session.AbsoluteExpiresAt).getTime() : NaN;
+    if (hasAbsoluteExpiry && !Number.isFinite(storedAbsoluteExpiresAt)) {
+      this._deleteCachedSession(tokenHash);
+      MasterRepository.updateSession(session.SessionID, {
+        Revoked: true,
+        RevokedAt: new Date().toISOString()
+      });
+      throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'Session record is invalid. Please sign in again.', 401);
+    }
     const absoluteExpiresAt = isNaN(storedAbsoluteExpiresAt)
       ? createdAt + absoluteTimeoutMs
       : storedAbsoluteExpiresAt;
 
     if (
-      now > expiresAt ||
-      (now - lastSeenAt) > idleTimeoutMs ||
-      now > absoluteExpiresAt
+      now >= expiresAt ||
+      (now - lastSeenAt) >= idleTimeoutMs ||
+      now >= absoluteExpiresAt
     ) {
       MasterRepository.updateSession(session.SessionID, {
         Revoked: true,
@@ -3326,8 +3349,14 @@ var SessionService = (typeof global !== 'undefined' && global.SessionService) ||
       throw new AppError(ERROR_CODES.ACCOUNT_PASSIVE, 'Account is inactive or suspended.', 403);
     }
 
-    const currentEpoch = Number(user.SessionEpoch) > 0 ? Number(user.SessionEpoch) : 1;
-    const sessionEpoch = Number(session.AccountEpoch) > 0 ? Number(session.AccountEpoch) : 1;
+    const currentEpoch = user.SessionEpoch === '' || user.SessionEpoch == null ? 1 : Number(user.SessionEpoch);
+    const sessionEpoch = session.AccountEpoch === '' || session.AccountEpoch == null ? 1 : Number(session.AccountEpoch);
+    if (!Number.isInteger(currentEpoch) || currentEpoch < 1 ||
+        !Number.isInteger(sessionEpoch) || sessionEpoch < 1 ||
+        typeof user.SessionEpoch === 'boolean' || typeof session.AccountEpoch === 'boolean') {
+      this._deleteCachedSession(tokenHash);
+      throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'Session security state is invalid. Please sign in again.', 401);
+    }
     if (sessionEpoch !== currentEpoch) {
       this._deleteCachedSession(tokenHash);
       throw new AppError(
@@ -3399,9 +3428,19 @@ var SessionService = (typeof global !== 'undefined' && global.SessionService) ||
         ExpiresAt: new Date(newExpiresMs).toISOString(),
         AbsoluteExpiresAt: new Date(absoluteExpiresAt).toISOString()
       };
-      MasterRepository.updateSession(session.SessionID, touch);
-      session = { ...session, ...touch };
-      this._putCachedSession(tokenHash, session);
+      try {
+        session = MasterRepository.updateSession(session.SessionID, touch, {
+          requireActive: true,
+          expectedTokenHash: tokenHash,
+          expectedUserId: session.UserID,
+          expectedEpoch: sessionEpoch
+        });
+        if (!session) throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'Session is no longer active.', 401);
+      } catch (err) {
+        this._deleteCachedSession(tokenHash);
+        throw err;
+      }
+      this._putCachedSession(tokenHash, session, now);
     }
 
     return {
@@ -5125,7 +5164,7 @@ var MasterRepository = (typeof global !== 'undefined' && global.MasterRepository
   },
 
   _userCacheKey(userId) {
-    return 'U:' + String(userId || '');
+    return 'U:v2:' + String(userId || '');
   },
 
   invalidateUserCache(userId) {
@@ -5145,15 +5184,25 @@ var MasterRepository = (typeof global !== 'undefined' && global.MasterRepository
       raw = this._userCacheMemory[key] || '';
     }
     if (!raw) return null;
-    try { return JSON.parse(raw); } catch (e) {
+    try {
+      const cached = JSON.parse(raw);
+      if (!cached || !Number.isFinite(cached.expiresAtMs) || cached.expiresAtMs <= Date.now() ||
+          cached.expiresAtMs > Date.now() + 60000 || !cached.bundle) {
+        this.invalidateUserCache(userId);
+        return null;
+      }
+      return cached.bundle;
+    } catch (e) {
       this.invalidateUserCache(userId);
       return null;
     }
   },
 
-  _putCachedUserBundle(userId, bundle) {
+  _putCachedUserBundle(userId, bundle, observedAtMs = Date.now()) {
+    const expiresAtMs = observedAtMs + 60000;
+    if (!Number.isFinite(expiresAtMs) || expiresAtMs <= Date.now()) return;
     const key = this._userCacheKey(userId);
-    const raw = JSON.stringify(bundle);
+    const raw = JSON.stringify({ bundle, expiresAtMs });
     if (typeof CacheService !== 'undefined' && CacheService.getScriptCache) {
       try { CacheService.getScriptCache().put(key, raw, 60); } catch (e) {}
     } else {
@@ -5255,16 +5304,26 @@ var MasterRepository = (typeof global !== 'undefined' && global.MasterRepository
     const lastRow = sheet.getLastRow();
     if (lastRow < 2) return null;
 
-    const cell = sheet
+    const finder = sheet
       .getRange(2, columnIndex + 1, lastRow - 1, 1)
       .createTextFinder(String(value))
       .matchEntireCell(true)
       .matchCase(options.matchCase !== false)
-      .findNext();
+      .useRegularExpression(false);
+    const cell = finder.findNext();
     if (!cell) return null;
 
     const rowIndex = cell.getRow();
+    const next = finder.findNext();
+    if (next && next.getRow() !== rowIndex) {
+      throw new AppError(ERROR_CODES.CONFLICT, 'Duplicate key in master storage. Contact the administrator.', 409);
+    }
     const values = sheet.getRange(rowIndex, 1, 1, schemaHeaders.length).getValues()[0];
+    const actualKey = String(values[columnIndex]);
+    const expectedKey = String(value);
+    if (options.matchCase === false ? actualKey.toLowerCase() !== expectedKey.toLowerCase() : actualKey !== expectedKey) {
+      throw new AppError(ERROR_CODES.SERVER_BUSY, 'Master storage changed during lookup. Please retry.', 503);
+    }
     const row = { _rowIndex: rowIndex };
     for (let i = 0; i < schemaHeaders.length; i++) row[schemaHeaders[i]] = values[i];
     return row;
@@ -5295,6 +5354,7 @@ var MasterRepository = (typeof global !== 'undefined' && global.MasterRepository
       .createTextFinder(String(value))
       .matchEntireCell(true)
       .matchCase(options.matchCase !== false)
+      .useRegularExpression(false)
       .findAll();
 
     return cells.map(cell => {
@@ -5310,10 +5370,11 @@ var MasterRepository = (typeof global !== 'undefined' && global.MasterRepository
     const cached = this._getCachedUserBundle(userId);
     if (cached) return cached;
 
+    const observedAtMs = Date.now();
     const account = this.findAccountById(userId);
     const accesses = account ? this.getWorkspaceAccessForUser(userId) : [];
     const bundle = { account, accesses };
-    this._putCachedUserBundle(userId, bundle);
+    this._putCachedUserBundle(userId, bundle, observedAtMs);
     return bundle;
   },
 
@@ -5652,7 +5713,13 @@ var MasterRepository = (typeof global !== 'undefined' && global.MasterRepository
       this.invalidateUserCache(userId);
       return nextEpoch;
     } finally {
-      if (acquiredHere) lock.releaseLock();
+      if (acquiredHere) {
+        try {
+          if (typeof SpreadsheetApp !== 'undefined' && SpreadsheetApp.flush) SpreadsheetApp.flush();
+        } finally {
+          lock.releaseLock();
+        }
+      }
     }
   },
 
@@ -5671,18 +5738,60 @@ var MasterRepository = (typeof global !== 'undefined' && global.MasterRepository
     return this.findSessionByTokenHashFast(tokenHash);
   },
 
-  updateSession(sessionId, updates) {
-    const s = this.findRowByKey(CONSTANTS.MASTER_TABS.SESSIONS, 'SessionID', sessionId);
-    if (s) {
-      this.updateRow(CONSTANTS.MASTER_TABS.SESSIONS, s._rowIndex, updates);
-      if (
-        s.TokenHash &&
-        typeof SessionService !== 'undefined' &&
-        SessionService._deleteCachedSession
-      ) {
-        SessionService._deleteCachedSession(s.TokenHash);
+  _withSessionMutationLock(fn) {
+    // LockService is always present in Apps Script; missing service is supported
+    // only by the existing local adapters. Never use a document lock in a web app.
+    if (typeof LockService === 'undefined' || !LockService.getScriptLock) return fn();
+    const lock = LockService.getScriptLock();
+    if (typeof lock.hasLock === 'function' && lock.hasLock()) return fn();
+    if (!lock.tryLock(1000)) {
+      throw new AppError(ERROR_CODES.SERVER_BUSY, 'Session storage is busy. Please retry.', 503);
+    }
+    try {
+      return fn();
+    } finally {
+      try {
+        if (typeof SpreadsheetApp !== 'undefined' && SpreadsheetApp.flush) SpreadsheetApp.flush();
+      } finally {
+        lock.releaseLock();
       }
     }
+  },
+
+  updateSession(sessionId, updates, options = {}) {
+    return this._withSessionMutationLock(() => {
+      // Resolve after acquiring the lock, never write through a cached row index.
+      const s = this.findRowByKey(CONSTANTS.MASTER_TABS.SESSIONS, 'SessionID', sessionId);
+      if (!s) {
+        if (options.requireActive) throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'Session is no longer active.', 401);
+        return null;
+      }
+      if (options.requireActive) {
+        const revoked = s.Revoked === true || s.Revoked === 'TRUE' || s.Revoked === 1;
+        const epoch = s.AccountEpoch === '' || s.AccountEpoch == null ? 1 : Number(s.AccountEpoch);
+        const expires = new Date(s.ExpiresAt).getTime();
+        const hasAbsoluteExpiry = s.AbsoluteExpiresAt !== '' && s.AbsoluteExpiresAt != null;
+        const absolute = new Date(hasAbsoluteExpiry ? s.AbsoluteExpiresAt : updates.AbsoluteExpiresAt).getTime();
+        if (revoked || s.TokenHash !== options.expectedTokenHash || s.UserID !== options.expectedUserId ||
+            !Number.isInteger(epoch) || epoch < 1 || typeof s.AccountEpoch === 'boolean' ||
+            epoch !== options.expectedEpoch || !Number.isFinite(expires) || !Number.isFinite(absolute) ||
+            expires <= Date.now() || absolute <= Date.now()) {
+          throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'Session is no longer active.', 401);
+        }
+        // A delayed request cannot move durable activity backward or extend a
+        // shorter absolute expiry committed by another request.
+        if (new Date(s.LastSeenAt).getTime() > new Date(updates.LastSeenAt).getTime()) return s;
+        updates = { ...updates,
+          ExpiresAt: new Date(Math.min(new Date(updates.ExpiresAt).getTime(), absolute)).toISOString(),
+          AbsoluteExpiresAt: new Date(absolute).toISOString()
+        };
+      }
+      this.updateRow(CONSTANTS.MASTER_TABS.SESSIONS, s._rowIndex, updates);
+      if (s.TokenHash && typeof SessionService !== 'undefined' && SessionService._deleteCachedSession) {
+        SessionService._deleteCachedSession(s.TokenHash);
+      }
+      return { ...s, ...updates };
+    });
   },
 
   revokeAllUserSessions(userId) {
@@ -13325,79 +13434,83 @@ var JobService = (typeof global !== 'undefined' && global.JobService) || {
     let purgedStepUpsCount = 0;
 
     try {
-      const { rows: sessions } = MasterRepository.getTableData(CONSTANTS.MASTER_TABS.SESSIONS);
-      const { rows: accounts } = MasterRepository.getTableData(CONSTANTS.MASTER_TABS.ACCOUNTS);
-      const accountEpochs = {};
-      accounts.forEach(account => {
-        accountEpochs[account.UserID] =
-          Number(account.SessionEpoch) > 0 ? Number(account.SessionEpoch) : 1;
-      });
       const now = Date.now();
-      const nowIso = new Date().toISOString();
-      const retentionMs =
-        (CONSTANTS.LIMITS.SESSION_RETENTION_DAYS || 30) * 24 * 3600 * 1000;
-      const retentionCutoff = now - retentionMs;
+      // Snapshot + purge must share the lock with session writers: otherwise
+      // deleting rows can redirect a touch/revocation to somebody else's row.
+      MasterRepository._withSessionMutationLock(() => {
+        const { rows: sessions } = MasterRepository.getTableData(CONSTANTS.MASTER_TABS.SESSIONS);
+        const { rows: accounts } = MasterRepository.getTableData(CONSTANTS.MASTER_TABS.ACCOUNTS);
+        const accountEpochs = {};
+        accounts.forEach(account => {
+          accountEpochs[account.UserID] =
+            Number(account.SessionEpoch) > 0 ? Number(account.SessionEpoch) : 1;
+        });
+        const nowIso = new Date(now).toISOString();
+        const retentionMs =
+          (CONSTANTS.LIMITS.SESSION_RETENTION_DAYS || 30) * 24 * 3600 * 1000;
+        const retentionCutoff = now - retentionMs;
 
-      for (const s of sessions) {
-        const expiresMs = new Date(s.ExpiresAt).getTime();
-        const revoked =
-          s.Revoked === true || s.Revoked === 'TRUE' || s.Revoked === 1;
-
-        const sessionEpoch = Number(s.AccountEpoch) > 0 ? Number(s.AccountEpoch) : 1;
-        const currentEpoch = accountEpochs[s.UserID];
-        const epochRevoked = currentEpoch === undefined || sessionEpoch !== currentEpoch;
-
-        if (!revoked && (epochRevoked || (!isNaN(expiresMs) && expiresMs <= now))) {
-          MasterRepository.updateRow(CONSTANTS.MASTER_TABS.SESSIONS, s._rowIndex, {
-            Revoked: true,
-            RevokedAt: nowIso,
-            RevokeReason: epochRevoked ? 'ACCOUNT_EPOCH_REVOKED' : 'EXPIRED_IDLE_TIMEOUT'
-          });
-          expiredSessionsCount++;
-        }
-      }
-
-      // Purge only old, already-invalid session rows; security/audit events remain
-      // in their dedicated logs.
-      const refreshedSessions =
-        MasterRepository.getTableData(CONSTANTS.MASTER_TABS.SESSIONS).rows || [];
-      const purgeRows = refreshedSessions
-        .filter(s => {
+        for (const s of sessions) {
+          const expiresMs = new Date(s.ExpiresAt).getTime();
           const revoked =
             s.Revoked === true || s.Revoked === 'TRUE' || s.Revoked === 1;
-          const revokedAt = new Date(s.RevokedAt || '').getTime();
-          const expiresAt = new Date(s.ExpiresAt || '').getTime();
-          const oldEnough =
-            (!isNaN(revokedAt) && revokedAt < retentionCutoff) ||
-            (!isNaN(expiresAt) && expiresAt < retentionCutoff);
-          return revoked && oldEnough;
-        })
-        .sort((a, b) => b._rowIndex - a._rowIndex);
 
-      // Delete contiguous row groups from highest to lowest so row shifts
-      // never invalidate a later group. This keeps service calls bounded by
-      // fragmentation rather than by the number of retained sessions.
-      for (let i = 0; i < purgeRows.length;) {
-        let high = purgeRows[i]._rowIndex;
-        let low = high;
-        let count = 1;
-        let j = i + 1;
-        while (
-          j < purgeRows.length &&
-          purgeRows[j]._rowIndex === low - 1
-        ) {
-          low = purgeRows[j]._rowIndex;
-          count++;
-          j++;
+          const sessionEpoch = Number(s.AccountEpoch) > 0 ? Number(s.AccountEpoch) : 1;
+          const currentEpoch = accountEpochs[s.UserID];
+          const epochRevoked = currentEpoch === undefined || sessionEpoch !== currentEpoch;
+
+          if (!revoked && (epochRevoked || (!isNaN(expiresMs) && expiresMs <= now))) {
+            MasterRepository.updateRow(CONSTANTS.MASTER_TABS.SESSIONS, s._rowIndex, {
+              Revoked: true,
+              RevokedAt: nowIso,
+              RevokeReason: epochRevoked ? 'ACCOUNT_EPOCH_REVOKED' : 'EXPIRED_IDLE_TIMEOUT'
+            });
+            expiredSessionsCount++;
+          }
         }
-        MasterRepository.deleteRows(
-          CONSTANTS.MASTER_TABS.SESSIONS,
-          low,
-          count
-        );
-        purgedSessionsCount += count;
-        i = j;
-      }
+
+        // Purge only old, already-invalid session rows; security/audit events remain
+        // in their dedicated logs.
+        const refreshedSessions =
+          MasterRepository.getTableData(CONSTANTS.MASTER_TABS.SESSIONS).rows || [];
+        const purgeRows = refreshedSessions
+          .filter(s => {
+            const revoked =
+              s.Revoked === true || s.Revoked === 'TRUE' || s.Revoked === 1;
+            const revokedAt = new Date(s.RevokedAt || '').getTime();
+            const expiresAt = new Date(s.ExpiresAt || '').getTime();
+            const oldEnough =
+              (!isNaN(revokedAt) && revokedAt < retentionCutoff) ||
+              (!isNaN(expiresAt) && expiresAt < retentionCutoff);
+            return revoked && oldEnough;
+          })
+          .sort((a, b) => b._rowIndex - a._rowIndex);
+
+        // Delete contiguous row groups from highest to lowest so row shifts
+        // never invalidate a later group. Calls depend on fragmentation rather
+        // than the number of retained sessions.
+        for (let i = 0; i < purgeRows.length;) {
+          let high = purgeRows[i]._rowIndex;
+          let low = high;
+          let count = 1;
+          let j = i + 1;
+          while (
+            j < purgeRows.length &&
+            purgeRows[j]._rowIndex === low - 1
+          ) {
+            low = purgeRows[j]._rowIndex;
+            count++;
+            j++;
+          }
+          MasterRepository.deleteRows(
+            CONSTANTS.MASTER_TABS.SESSIONS,
+            low,
+            count
+          );
+          purgedSessionsCount += count;
+          i = j;
+        }
+      });
 
       // MFA challenges are one-per-user, but failed/abandoned challenges should
       // not occupy Script Properties forever.

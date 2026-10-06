@@ -110,10 +110,41 @@ The active source remains source-first. Compiled executables, temporary packagin
 
 Authenticated request paths no longer require whole-table scans for session token, account ID/username, credentials, or workspace-ID lookups. These hot-path reads use bounded TextFinder column searches followed by a single-row read.
 
-Session validation uses a 5-minute ScriptCache entry keyed by the session token hash. Cache is an accelerator only: cache misses fall back to the durable Sessions sheet. Any durable session update/revocation invalidates the cached token, and mass revocation evicts all affected cached token hashes.
+Session validation uses a 60-second `S:v2:<tokenHash>` ScriptCache entry. The
+versioned namespace ignores older five-minute entries during rollout. Cache is
+an accelerator only: misses, eviction and backend failure fall back to durable
+Sheets. Durable session updates invalidate the cached token; failed eviction is
+bounded by the one-minute TTL, not an immediate-revocation guarantee.
+Session and user-bundle caches include an application-checked deadline measured
+from the start of the durable read. Delayed writes cannot renew stale snapshots;
+the local fallback enforces that deadline too. Older user bundles are ignored by
+the `U:v2:<userId>` namespace. This bounds cache reuse, not already-running requests.
+
+Session touches and revocations use a ScriptLock, resolve the current row inside
+the lock and return the durable updated record rather than recaching a stale
+snapshot. A touch rechecks revocation, identity, epoch and expiry before writing.
+Housekeeping takes that same lock around its session snapshot and batch deletes
+so row shifts cannot redirect a session writer. The lock is released before
+other cleanup and job logging; acquisition waits at most one second. Flush
+failures propagate while still releasing the lock. The maintenance phase still
+scans session/account tables; its lock duration must be measured on Google and
+chunked if necessary before wider rollout.
+
+Exact master-key lookups use literal, whole-cell TextFinder matching and inspect
+at most two matches to reject duplicate keys. Explicit malformed expiry/epoch
+values fail closed; only absent legacy epoch values default to one.
+The key is rechecked against the transferred row so a concurrent purge cannot
+cause a key lookup to return somebody else's record; detected shifts fail with
+a retryable storage-busy error.
 
 WP1 now also uses account/session epochs for constant-cost revoke-all: a session records the account epoch at creation, and security-sensitive account lifecycle operations invalidate existing sessions by rotating the account epoch instead of scanning the Sessions tab. Housekeeping later marks those stale rows revoked and purges them after seven days in contiguous batches.
 
 Master/workspace schema repair also safely trims unused allocated rows/columns. It never automatically deletes populated columns beyond the known schema.
 
-Remaining WP1 validation work is call-budget instrumentation and real-deployment timing. Bounded TimeEntries range reads belong to the year/data-book routing work that follows this foundation.
+WP1 now has all-method Spreadsheet boundary instrumentation, including metadata
+and finder methods. At both 10 and 50,000 mocked rows, session validation takes
+41 boundary method calls cold, zero warm, and 63 with an activity touch (one
+batched write). These are regression proxies, not Google's quota consumption or
+the originally proposed six-call acceptance target. Real-deployment timing,
+complete timer/weekly-list budgets and bounded TimeEntries range reads remain;
+the growing entry scans require the later data-book/query work.

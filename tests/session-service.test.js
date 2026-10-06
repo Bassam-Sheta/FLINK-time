@@ -70,7 +70,10 @@ function fixture(lastSeenAgeMinutes, options = {}) {
         SessionEpoch: options.accountEpoch || 1
       };
     },
-    updateSession(_id, updates) { writes.push({ ...updates }); },
+    updateSession(_id, updates) {
+      writes.push({ ...updates });
+      return { ...session, ...updates };
+    },
     createSession() {}
   };
 
