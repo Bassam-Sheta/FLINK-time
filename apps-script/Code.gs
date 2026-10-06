@@ -4925,6 +4925,9 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
     const authContext = SessionService.validateSession(sessionToken);
     Validation.validatePassword(newPassword);
 
+    // Compute CPU-intensive PBKDF2 hash OUTSIDE the lock to eliminate heavy CPU iterations under the lock
+    const newHash = SecurityService.hashPassword(newPassword);
+
     const lock = LockService.getScriptLock();
     lock.waitLock(10000);
     try {
@@ -4956,7 +4959,6 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
         );
       }
 
-      const newHash = SecurityService.hashPassword(newPassword);
       MasterRepository.updateCredentials(authContext.userId, {
         PasswordHash: newHash,
         PasswordVersion: (parseInt(cred.PasswordVersion, 10) || 1) + 1,
@@ -5012,6 +5014,9 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
     AuthorizationService.assertRole(superAdminContext, [CONSTANTS.ROLES.SUPER_ADMIN]);
     Validation.validatePassword(temporaryPassword);
 
+    // Compute CPU-intensive PBKDF2 hash OUTSIDE the lock to eliminate heavy CPU iterations under the lock
+    const newHash = SecurityService.hashPassword(temporaryPassword);
+
     const lock = LockService.getScriptLock();
     lock.waitLock(10000);
     try {
@@ -5039,7 +5044,6 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
           400
         );
       }
-      const newHash = SecurityService.hashPassword(temporaryPassword);
       const resetIssuedAt = new Date();
       const resetExpiresAt = new Date(
         resetIssuedAt.getTime() +
@@ -8082,6 +8086,29 @@ var TimeEntryService = (typeof global !== 'undefined' && global.TimeEntryService
     AuthorizationService.assertWorkspaceAccess(authContext, workspaceId);
     Validation.assertRequired(payload, ['startUtc', 'endUtc']);
 
+    const tracking = TrackingPolicyService.validateTrackingContext(
+      authContext,
+      workspaceId,
+      payload,
+      { manual: true, enforceRequired: true }
+    );
+    const startUtc = this._canonicalUtcTimestamp(payload.startUtc, 'startUtc');
+    const endUtc = this._canonicalUtcTimestamp(payload.endUtc, 'endUtc');
+    const durationSeconds = Validation.validateDateRange(startUtc, endUtc);
+    if (durationSeconds <= 0) {
+      throw new AppError(
+        ERROR_CODES.VALIDATION_ERROR,
+        'Manual time entry duration must be greater than zero.',
+        400
+      );
+    }
+    if (authContext.role === CONSTANTS.ROLES.USER) {
+      TrackingPolicyService.assertEntryEditableByAge(workspaceId, {
+        StartUTC: startUtc,
+        EndUTC: endUtc
+      });
+    }
+
     let scriptLock = null;
     if (typeof LockService !== 'undefined' && LockService.getScriptLock) {
       scriptLock = LockService.getScriptLock();
@@ -8091,28 +8118,6 @@ var TimeEntryService = (typeof global !== 'undefined' && global.TimeEntryService
     }
 
     try {
-      const tracking = TrackingPolicyService.validateTrackingContext(
-        authContext,
-        workspaceId,
-        payload,
-        { manual: true, enforceRequired: true }
-      );
-      const startUtc = this._canonicalUtcTimestamp(payload.startUtc, 'startUtc');
-      const endUtc = this._canonicalUtcTimestamp(payload.endUtc, 'endUtc');
-      const durationSeconds = Validation.validateDateRange(startUtc, endUtc);
-      if (durationSeconds <= 0) {
-        throw new AppError(
-          ERROR_CODES.VALIDATION_ERROR,
-          'Manual time entry duration must be greater than zero.',
-          400
-        );
-      }
-      if (authContext.role === CONSTANTS.ROLES.USER) {
-        TrackingPolicyService.assertEntryEditableByAge(workspaceId, {
-          StartUTC: startUtc,
-          EndUTC: endUtc
-        });
-      }
       const now = new Date().toISOString();
 
       const hourlyRateSnapshot = tracking.project ? (parseFloat(tracking.project.HourlyRate) || 0) : 0;
@@ -8203,6 +8208,38 @@ var TimeEntryService = (typeof global !== 'undefined' && global.TimeEntryService
       );
     }
 
+    // Every client mutation must name the version it read. Optional version
+    // checks allow silent lost updates, so fail closed when the version is absent.
+    const expVer = updates.expectedVersion !== undefined
+      ? updates.expectedVersion
+      : expectedVersionParam;
+    if (expVer === null || expVer === undefined || expVer === '') {
+      throw new AppError(
+        ERROR_CODES.VALIDATION_ERROR,
+        'expectedVersion is required when updating a time entry.',
+        400
+      );
+    }
+
+    if (updates.startUtc !== undefined) {
+      this._canonicalUtcTimestamp(updates.startUtc, 'startUtc');
+    }
+    if (updates.endUtc !== undefined) {
+      this._canonicalUtcTimestamp(updates.endUtc, 'endUtc');
+    }
+    if (updates.startUtc !== undefined && updates.endUtc !== undefined) {
+      const earlyStart = this._canonicalUtcTimestamp(updates.startUtc, 'startUtc');
+      const earlyEnd = this._canonicalUtcTimestamp(updates.endUtc, 'endUtc');
+      const earlyDuration = Validation.validateDateRange(earlyStart, earlyEnd);
+      if (earlyDuration <= 0) {
+        throw new AppError(
+          ERROR_CODES.VALIDATION_ERROR,
+          'Time entry duration must be greater than zero.',
+          400
+        );
+      }
+    }
+
     let scriptLock = null;
     if (typeof LockService !== 'undefined' && LockService.getScriptLock) {
       try {
@@ -8230,18 +8267,6 @@ var TimeEntryService = (typeof global !== 'undefined' && global.TimeEntryService
         throw new AppError(ERROR_CODES.ENTRY_LOCKED, 'This time entry is locked, pending approval, or part of an approved timesheet.', 403);
       }
 
-      // Every client mutation must name the version it read. Optional version
-      // checks allow silent lost updates, so fail closed when the version is absent.
-      const expVer = updates.expectedVersion !== undefined
-        ? updates.expectedVersion
-        : expectedVersionParam;
-      if (expVer === null || expVer === undefined || expVer === '') {
-        throw new AppError(
-          ERROR_CODES.VALIDATION_ERROR,
-          'expectedVersion is required when updating a time entry.',
-          400
-        );
-      }
       Validation.assertRecordVersion(entry, expVer);
 
       const mergedTrackingPayload = {
@@ -8518,6 +8543,20 @@ var TimeEntryService = (typeof global !== 'undefined' && global.TimeEntryService
         400
       );
     }
+    for (const id of entryIds) {
+      if (
+        !Object.prototype.hasOwnProperty.call(expectedVersions, id) ||
+        expectedVersions[id] === null ||
+        expectedVersions[id] === undefined ||
+        expectedVersions[id] === ''
+      ) {
+        throw new AppError(
+          ERROR_CODES.VALIDATION_ERROR,
+          `Missing expected version for time entry ${id}.`,
+          400
+        );
+      }
+    }
 
     const normalizedAction = String(actionType || '').toUpperCase();
     const allowedActions = ['DELETE', 'LOCK', 'UNLOCK', 'CHANGE_PROJECT'];
@@ -8528,6 +8567,10 @@ var TimeEntryService = (typeof global !== 'undefined' && global.TimeEntryService
           ? 'Bulk approval is not allowed. Approve the submitted timesheet instead.'
           : `Unsupported bulk action: ${normalizedAction}`
       );
+    }
+
+    if (normalizedAction === 'CHANGE_PROJECT' && !params.projectId) {
+      throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'projectId is required for CHANGE_PROJECT.');
     }
 
     if (
@@ -9719,6 +9762,36 @@ var TimesheetService = (typeof global !== 'undefined' && global.TimesheetService
     AuthorizationService.assertWorkspaceAccess(authContext, workspaceId);
     Validation.assertRequired(payload, ['periodStart', 'periodEnd']);
 
+    const userId = authContext.userId;
+    const requestedStart = new Date(payload.periodStart);
+    const requestedEnd = new Date(payload.periodEnd);
+    if (
+      isNaN(requestedStart.getTime()) ||
+      isNaN(requestedEnd.getTime()) ||
+      requestedEnd.getTime() < requestedStart.getTime()
+    ) {
+      throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'A valid timesheet periodStart and periodEnd are required.');
+    }
+
+    // Canonicalize the period on the server. Clients may submit only one exact
+    // configured workspace week; arbitrary/overlapping partial ranges are rejected.
+    const expectedWeek = TimezoneService.getWeekBounds(workspaceId, requestedStart);
+    const startDate = expectedWeek.startUtc;
+    const endDate = expectedWeek.endUtc;
+    if (
+      requestedStart.getTime() !== startDate.getTime() ||
+      requestedEnd.getTime() !== endDate.getTime()
+    ) {
+      throw new AppError(
+        ERROR_CODES.VALIDATION_ERROR,
+        `Timesheet period must match the configured workspace week (${expectedWeek.startLocalDate} to ${expectedWeek.endLocalDate}, ${expectedWeek.timezone}).`,
+        400
+      );
+    }
+
+    const startIso = startDate.toISOString();
+    const endIso = endDate.toISOString();
+
     let scriptLock = null;
     if (typeof LockService !== 'undefined' && LockService.getScriptLock) {
       scriptLock = LockService.getScriptLock();
@@ -9729,36 +9802,6 @@ var TimesheetService = (typeof global !== 'undefined' && global.TimesheetService
     }
 
     try {
-      const userId = authContext.userId;
-      const requestedStart = new Date(payload.periodStart);
-      const requestedEnd = new Date(payload.periodEnd);
-      if (
-        isNaN(requestedStart.getTime()) ||
-        isNaN(requestedEnd.getTime()) ||
-        requestedEnd.getTime() < requestedStart.getTime()
-      ) {
-        throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'A valid timesheet periodStart and periodEnd are required.');
-      }
-
-      // Canonicalize the period on the server. Clients may submit only one exact
-      // configured workspace week; arbitrary/overlapping partial ranges are rejected.
-      const expectedWeek = TimezoneService.getWeekBounds(workspaceId, requestedStart);
-      const startDate = expectedWeek.startUtc;
-      const endDate = expectedWeek.endUtc;
-      if (
-        requestedStart.getTime() !== startDate.getTime() ||
-        requestedEnd.getTime() !== endDate.getTime()
-      ) {
-        throw new AppError(
-          ERROR_CODES.VALIDATION_ERROR,
-          `Timesheet period must match the configured workspace week (${expectedWeek.startLocalDate} to ${expectedWeek.endLocalDate}, ${expectedWeek.timezone}).`,
-          400
-        );
-      }
-
-      const startIso = startDate.toISOString();
-      const endIso = endDate.toISOString();
-
       const entries = SheetRepository.listTimeEntries(workspaceId, {
         userId,
         startDate: startIso,
@@ -10082,6 +10125,9 @@ var ApprovalService = (typeof global !== 'undefined' && global.ApprovalService) 
   approveTimesheet(authContext, workspaceId, timesheetId, comment = '') {
     AuthorizationService.assertWorkspaceAccess(authContext, workspaceId);
     AuthorizationService.assertRole(authContext, [CONSTANTS.ROLES.SUPER_ADMIN, CONSTANTS.ROLES.ADMIN]);
+    if (!timesheetId || !String(timesheetId).trim()) {
+      throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'timesheetId is required.');
+    }
 
     let scriptLock = null;
     if (typeof LockService !== 'undefined' && LockService.getScriptLock) {
@@ -10219,6 +10265,9 @@ var ApprovalService = (typeof global !== 'undefined' && global.ApprovalService) 
   rejectTimesheet(authContext, workspaceId, timesheetId, reasonComment) {
     AuthorizationService.assertWorkspaceAccess(authContext, workspaceId);
     AuthorizationService.assertRole(authContext, [CONSTANTS.ROLES.SUPER_ADMIN, CONSTANTS.ROLES.ADMIN]);
+    if (!timesheetId || !String(timesheetId).trim()) {
+      throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'timesheetId is required.');
+    }
 
     if (!reasonComment || !reasonComment.trim()) {
       throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'A comment explaining the rejection is required.');
@@ -10364,6 +10413,9 @@ var ApprovalService = (typeof global !== 'undefined' && global.ApprovalService) 
   reopenTimesheet(superAdminContext, workspaceId, timesheetId, reason) {
     AuthorizationService.assertRole(superAdminContext, [CONSTANTS.ROLES.SUPER_ADMIN]);
     AuthorizationService.assertWorkspaceAccess(superAdminContext, workspaceId);
+    if (!timesheetId || !String(timesheetId).trim()) {
+      throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'timesheetId is required.');
+    }
     if (!reason || !String(reason).trim()) {
       throw new AppError(
         ERROR_CODES.VALIDATION_ERROR,
