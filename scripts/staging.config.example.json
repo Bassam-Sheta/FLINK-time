@@ -1,0 +1,7 @@
+{
+  "environment": "STAGING",
+  "scriptId": "REPLACE_WITH_EMPTY_STAGING_SCRIPT_ID",
+  "productionScriptId": "REPLACE_WITH_PRODUCTION_SCRIPT_ID",
+  "projectId": "flink-staging-project",
+  "account": "flink-staging"
+}

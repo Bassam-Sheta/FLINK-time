@@ -28,6 +28,17 @@ The production application intentionally has only:
 
 No other `.gs` file is required for deployment. npm, Node.js, Playwright, GitHub Actions, and repository tests are development-only.
 
+### Developer runtime verification (WP0)
+
+Clasp 3.4.1 is pinned in the developer lockfile. `npm run staging` prepares and
+verifies an isolated, owner-approved diagnostic bundle; it rejects the declared
+production script ID and requires explicit confirmation before upload/execution.
+Its extra private diagnostics and owner-only API-executable manifest are staging
+only, never part of the five-file production contract. See `STAGING_TESTS.md` for
+authorization, scope, quota sources and the distinction between mocked tests,
+runtime-primitives measurements and live application acceptance. Production
+deployment, MFA and storage behavior have not changed in this package.
+
 ## Role surfaces
 
 ### USER portal

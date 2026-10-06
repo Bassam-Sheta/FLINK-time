@@ -27,7 +27,10 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Run regression tests
+      - name: Install locked developer dependencies without lifecycle scripts
+        run: npm ci --ignore-scripts
+
+      - name: Run regression tests with locked dependencies
         run: npm test
 
   human-browser-acceptance:
@@ -43,7 +46,7 @@ jobs:
           node-version: '20'
 
       - name: Install browser test dependency
-        run: npm install --no-audit --no-fund
+        run: npm ci --ignore-scripts --no-fund
 
       - name: Dependency advisory gate
         run: npm audit --audit-level=high
@@ -51,11 +54,8 @@ jobs:
       - name: Install Chromium
         run: npx playwright install --with-deps chromium
 
-      - name: Run normal employee browser flow
-        run: npm run test:human
-
-      - name: Capture real portal screenshots
-        run: npm run test:visual
+      - name: Run all mocked portal browser tests and screenshots
+        run: npm run test:browser
 
       - name: Upload visual walkthrough
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
