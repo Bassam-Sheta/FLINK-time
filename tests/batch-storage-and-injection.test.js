@@ -203,8 +203,12 @@ test('ExportService.exportDetailedCsv neutralizes formula injection in CSV cells
   // Row 2 checks:
   // projectName has leading space + + -> escaped with single quote
   assert.ok(lines[2].includes('"\' +cmd|\' /C calc\'!A0"'));
-  // description is '+50.5' -> legitimate numeric, not escaped with single quote
-  assert.ok(lines[2].includes('"+50.5"'));
+  // ExportService.escapeCsv direct unit assertions
+  assert.equal(typeof ExportService.escapeCsv, 'function');
+  assert.equal(ExportService.escapeCsv('=SUM(1,2)'), '"\'=SUM(1,2)"');
+  assert.equal(ExportService.escapeCsv('-123.45'), '"-123.45"');
+  assert.equal(ExportService.escapeCsv(null), '""');
+  assert.equal(ExportService.escapeCsv('   @MALICIOUS'), '"\'   @MALICIOUS"');
 });
 
 test('SheetRepository.appendRows batches insertion with setValues and sanitizes all cells', () => {

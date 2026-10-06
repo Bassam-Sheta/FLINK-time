@@ -11982,9 +11982,12 @@ var UserService = (typeof global !== 'undefined' && global.UserService) || {
       a.Active === true || a.Active === 'TRUE' || a.Active === 1
     );
 
-    const assignedIdsFor = userId => activeAccessRows
-      .filter(a => a.UserID === userId)
-      .map(a => a.WorkspaceID);
+    const assignedMap = {};
+    for (const a of activeAccessRows) {
+      if (!assignedMap[a.UserID]) assignedMap[a.UserID] = [];
+      assignedMap[a.UserID].push(a.WorkspaceID);
+    }
+    const assignedIdsFor = userId => assignedMap[userId] || [];
 
     if (authContext.role === CONSTANTS.ROLES.SUPER_ADMIN) {
       let visibleRows = rows;
@@ -15370,6 +15373,19 @@ var NotificationService = (typeof global !== 'undefined' && global.NotificationS
 
 var ExportService = (typeof global !== 'undefined' && global.ExportService) || {
   /**
+   * Neutralizes formula injection and escapes CSV cell values
+   */
+  escapeCsv(val) {
+    if (val === null || val === undefined) return '""';
+    let str = String(val);
+    // Neutralize spreadsheet formula injection in CSV exports
+    if (!/^\s*[-+]?\d+(\.\d+)?\s*$/.test(str) && /^\s*[=+\-@\t\r\n]/.test(str)) {
+      str = "'" + str;
+    }
+    return '"' + str.replace(/"/g, '""') + '"';
+  },
+
+  /**
    * Generates sanitized CSV string from detailed report entries
    */
   exportDetailedCsv(authContext, workspaceId, params = {}) {
@@ -15380,17 +15396,17 @@ var ExportService = (typeof global !== 'undefined' && global.ExportService) || {
       'Billable', 'Approval Status', 'Source', 'Manual'
     ];
 
-    const escapeCsv = val => {
+    const escapeCsv = this.escapeCsv ? this.escapeCsv.bind(this) : val => {
       if (val === null || val === undefined) return '""';
       let str = String(val);
-      // Neutralize spreadsheet formula injection in CSV exports
       if (!/^\s*[-+]?\d+(\.\d+)?\s*$/.test(str) && /^\s*[=+\-@\t\r\n]/.test(str)) {
         str = "'" + str;
       }
       return '"' + str.replace(/"/g, '""') + '"';
     };
+    const escape = escapeCsv;
 
-    const csvLines = [headers.map(escapeCsv).join(',')];
+    const csvLines = [headers.map(escape).join(',')];
 
     for (const e of report.entries) {
       csvLines.push([
