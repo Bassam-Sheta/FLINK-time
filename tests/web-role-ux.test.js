@@ -113,3 +113,15 @@ test('portal role gates are explicit while server-side RBAC remains in Code.gs',
   assert.match(code, /const ACTION_PERMISSIONS =/);
   assert.match(code, /AuthorizationService/);
 });
+
+test('all portals provide standalone breakout link, WCAG AA contrast, session expiry handling, and 1-click task continuation', () => {
+  for (const portal of [user, admin, superAdmin]) {
+    assert.match(portal, /<base target="_blank">/);
+    assert.match(portal, /--text-muted:\s*#94A3B8/);
+    assert.match(portal, /openStandaloneApp/);
+    assert.match(portal, /function continueRecentTask/);
+    assert.match(portal, /SESSION_EXPIRED/);
+    assert.match(portal, /Your session has expired\. Please sign in again\./);
+  }
+});
+

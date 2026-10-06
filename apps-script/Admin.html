@@ -4,6 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>FLINK Time — Manager</title>
+  <base target="_blank">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
@@ -17,15 +18,15 @@
       --border-focus: #3B82F6;
       --text-primary: #F9FAFB;
       --text-secondary: #9CA3AF;
-      --text-muted: #6B7280;
+      --text-muted: #94A3B8;
       --primary: #2563EB;
       --primary-hover: #1D4ED8;
       --primary-glow: rgba(37, 99, 235, 0.25);
       --success: #10B981;
       --warning: #F59E0B;
       --danger: #EF4444;
-      --font-main: 'Plus Jakarta Sans', -apple-system, sans-serif;
-      --font-mono: 'JetBrains Mono', monospace;
+      --font-main: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
     }
 
     * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -467,6 +468,7 @@
     </div>
     <nav class="nav-links" id="navLinks"></nav>
     <div class="user-pill">
+      <button class="nav-btn" onclick="openStandaloneApp()" title="Open Standalone in New Tab" aria-label="Open standalone tab">&#8599; Standalone</button>
       <button class="help-btn" onclick="toggleHelpDrawer()">[ ? HELP ]</button>
       <span class="role-tag" id="userRoleBadge">USER</span>
       <span id="userDisplayName" style="font-weight: 600; font-size: 0.875rem;">User</span>
@@ -653,6 +655,7 @@
                 <th>End (UTC)</th>
                 <th>Duration</th>
                 <th>Status</th>
+                <th>Action</th>
               </tr>
             </thead>
             <tbody id="userRecentEntriesBody"></tbody>
@@ -1066,7 +1069,6 @@
       return privilegedStepUpToken;
     }
 
-    // workspaceOverride may be '' intentionally for manager all-workspace reads.
     async function apiCall(action, payload = {}, workspaceOverride = undefined) {
       let requestPayload = payload || {};
       if (
@@ -1078,7 +1080,27 @@
           stepUpToken: await ensurePrivilegedStepUp()
         });
       }
-      return rawApiCall(action, requestPayload, workspaceOverride);
+      try {
+        return await rawApiCall(action, requestPayload, workspaceOverride);
+      } catch (err) {
+        const errCode = (err && (err.code || (err.message && err.message.includes('SESSION_EXPIRED') ? 'SESSION_EXPIRED' : ''))) || '';
+        if (
+          errCode === 'SESSION_EXPIRED' ||
+          errCode === 'AUTH_REQUIRED' ||
+          errCode === 'UNAUTHORIZED'
+        ) {
+          state.token = null;
+          state.user = null;
+          safeStorage.removeItem('flink_session_token');
+          showLogin();
+          const alertBox = document.getElementById('loginAlert');
+          if (alertBox) {
+            alertBox.textContent = 'Your session has expired. Please sign in again.';
+            alertBox.classList.remove('hidden');
+          }
+        }
+        throw err;
+      }
     }
 
     // App Initialization
@@ -1372,6 +1394,12 @@
           const btn = document.getElementById('timerToggleBtn');
           btn.innerText = 'STOP';
           btn.className = 'btn btn-danger';
+          const clock = document.getElementById('timerClockDisplay');
+          if (timer.isOvertime && clock) {
+            clock.style.color = '#F59E0B';
+          } else if (clock) {
+            clock.style.color = '';
+          }
         }
       } catch (e) {}
     }
@@ -1551,11 +1579,55 @@
           badge.textContent = status;
           statusCell.appendChild(badge);
           tr.appendChild(statusCell);
+
+          const actionCell = document.createElement('td');
+          const continueBtn = document.createElement('button');
+          continueBtn.className = 'btn btn-secondary btn-sm';
+          continueBtn.innerHTML = '&#9654; Continue';
+          continueBtn.title = 'Start timer with these project and task details';
+          continueBtn.style.padding = '0.2rem 0.5rem';
+          continueBtn.style.fontSize = '0.75rem';
+          continueBtn.onclick = () => continueRecentTask(entry);
+          actionCell.appendChild(continueBtn);
+          tr.appendChild(actionCell);
+
           tbody.appendChild(tr);
         });
       } catch (e) {
         console.error('Failed to load today entries', e);
       }
+    }
+
+    async function continueRecentTask(entry) {
+      if (!entry) return;
+      const projSelect = document.getElementById('timerProjectSelect');
+      const taskSelect = document.getElementById('timerTaskSelect');
+      const descInput = document.getElementById('timerDescriptionInput');
+      const modeSelect = document.getElementById('timerWorkModeSelect');
+
+      if (state.activeTimer) {
+        const confirmSwitch = confirm('A timer is currently running. Stop it and switch to this task?');
+        if (!confirmSwitch) return;
+        await toggleTimer();
+      }
+
+      if (projSelect && entry.projectId) {
+        projSelect.value = entry.projectId;
+        if (typeof onTimerProjectChange === 'function') {
+          await onTimerProjectChange();
+        }
+      }
+      if (taskSelect && entry.taskId) {
+        taskSelect.value = entry.taskId;
+      }
+      if (descInput) {
+        descInput.value = entry.description || '';
+      }
+      if (modeSelect && entry.workMode) {
+        modeSelect.value = entry.workMode;
+      }
+
+      await toggleTimer();
     }
 
     function openManualEntryModal() {
@@ -4237,6 +4309,14 @@
     }
 
     /* ------------------- MODALS & DRAWERS ------------------- */
+    function openStandaloneApp() {
+      try {
+        window.open(window.location.href, '_blank');
+      } catch (e) {
+        console.warn('Could not open standalone window:', e);
+      }
+    }
+
     function toggleHelpDrawer() {
       const drawer = document.getElementById('helpDrawer');
       drawer.classList.toggle('open');
