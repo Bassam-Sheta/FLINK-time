@@ -10337,6 +10337,28 @@ var ReportService = (typeof global !== 'undefined' && global.ReportService) || {
 
     const filters = { ...((params && params.filters) || {}) };
 
+    if (filters.startDate !== undefined && filters.startDate !== null && filters.startDate !== '') {
+      const startMs = new Date(filters.startDate).getTime();
+      if (!Number.isFinite(startMs)) {
+        throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'Invalid startDate filter format.', 400);
+      }
+    }
+
+    if (filters.endDate !== undefined && filters.endDate !== null && filters.endDate !== '') {
+      const endMs = new Date(filters.endDate).getTime();
+      if (!Number.isFinite(endMs)) {
+        throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'Invalid endDate filter format.', 400);
+      }
+    }
+
+    if (
+      filters.startDate &&
+      filters.endDate &&
+      new Date(filters.startDate).getTime() > new Date(filters.endDate).getTime()
+    ) {
+      throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'startDate cannot be after endDate.', 400);
+    }
+
     if (authContext.role === CONSTANTS.ROLES.USER) {
       // USER scope is always server-forced to self.
       filters.userId = authContext.userId;
@@ -11390,6 +11412,9 @@ var DashboardService = (typeof global !== 'undefined' && global.DashboardService
     const filters = {};
     if (authContext && authContext.role === CONSTANTS.ROLES.USER) {
       filters.userId = authContext.userId;
+    }
+    if (week && week.startUtc && typeof week.startUtc.toISOString === 'function') {
+      filters.startDate = week.startUtc.toISOString();
     }
     const entries = SheetRepository.listTimeEntries(workspaceId, filters);
 

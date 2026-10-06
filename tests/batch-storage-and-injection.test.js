@@ -796,4 +796,97 @@ test('WorkspaceService.listWorkspaces filters out revoked/inactive access record
   assert.equal(list[0].WorkspaceID, 'W1');
 });
 
+test('ReportService._prepareReportFilters rejects invalid date formats and inverted ranges', () => {
+  cleanGlobals();
+  const backend = require(codePath);
+  const { ReportService, AuthorizationService, AppError } = backend;
+
+  AuthorizationService.assertWorkspaceAccess = () => true;
+
+  const authContext = { userId: 'U1', role: 'SUPER_ADMIN' };
+
+  // Invalid startDate format
+  assert.throws(
+    () => ReportService._prepareReportFilters(authContext, 'W1', {
+      filters: { startDate: 'not-a-valid-date' }
+    }),
+    err => err instanceof AppError &&
+      err.code === 'VALIDATION_ERROR' &&
+      err.statusCode === 400 &&
+      err.message.includes('Invalid startDate filter format')
+  );
+
+  // Invalid endDate format
+  assert.throws(
+    () => ReportService._prepareReportFilters(authContext, 'W1', {
+      filters: { endDate: 'invalid-end-date' }
+    }),
+    err => err instanceof AppError &&
+      err.code === 'VALIDATION_ERROR' &&
+      err.statusCode === 400 &&
+      err.message.includes('Invalid endDate filter format')
+  );
+
+  // Inverted range (startDate after endDate)
+  assert.throws(
+    () => ReportService._prepareReportFilters(authContext, 'W1', {
+      filters: {
+        startDate: '2026-10-15T00:00:00.000Z',
+        endDate: '2026-10-01T00:00:00.000Z'
+      }
+    }),
+    err => err instanceof AppError &&
+      err.code === 'VALIDATION_ERROR' &&
+      err.statusCode === 400 &&
+      err.message.includes('startDate cannot be after endDate')
+  );
+
+  // Valid date range passes
+  const valid = ReportService._prepareReportFilters(authContext, 'W1', {
+    filters: {
+      startDate: '2026-10-01T00:00:00.000Z',
+      endDate: '2026-10-15T00:00:00.000Z'
+    }
+  });
+  assert.equal(valid.startDate, '2026-10-01T00:00:00.000Z');
+  assert.equal(valid.endDate, '2026-10-15T00:00:00.000Z');
+});
+
+test('DashboardService._workspaceCurrentTotals bounds listTimeEntries query with week.startUtc', () => {
+  cleanGlobals();
+  let capturedFilters = null;
+
+  const backend = require(codePath);
+  const { DashboardService, TimezoneService, SheetRepository } = backend;
+
+  const mockStartUtc = new Date('2026-09-26T22:00:00.000Z');
+
+  TimezoneService.formatDateKey = () => '2026-09-29';
+  TimezoneService.getWeekBounds = () => ({
+    startLocalDate: '2026-09-27',
+    endLocalDate: '2026-10-03',
+    startUtc: mockStartUtc
+  });
+
+  SheetRepository.listTimeEntries = (_wsId, filters) => {
+    capturedFilters = filters;
+    return [
+      {
+        EntryID: 'E1',
+        UserID: 'U1',
+        StartUTC: '2026-09-29T10:00:00.000Z',
+        DurationSeconds: 3600
+      }
+    ];
+  };
+
+  const authContext = { userId: 'U1', role: 'SUPER_ADMIN' };
+  const totals = DashboardService._workspaceCurrentTotals(authContext, 'W1');
+
+  assert.ok(capturedFilters);
+  assert.equal(capturedFilters.startDate, '2026-09-26T22:00:00.000Z');
+  assert.equal(totals.todaySeconds, 3600);
+  assert.equal(totals.weekSeconds, 3600);
+});
+
 
