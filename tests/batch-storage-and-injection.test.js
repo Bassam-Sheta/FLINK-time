@@ -539,3 +539,92 @@ test('SheetRepository.deleteRows validates row boundaries and fails closed', () 
   );
 });
 
+test('Validation.sanitizeCellValue clamps strings to Google Sheets 50,000 character cell ceiling', () => {
+  cleanGlobals();
+  const backend = require(codePath);
+  const { Validation } = backend;
+
+  const oversized = 'A'.repeat(60000);
+  const sanitized = Validation.sanitizeCellValue(oversized);
+  assert.equal(sanitized.length, 50000);
+
+  // Still checks formula prefix on clamped string
+  const formulaOversized = '=CMD' + 'B'.repeat(59996);
+  const formulaSanitized = Validation.sanitizeCellValue(formulaOversized);
+  assert.equal(formulaSanitized.startsWith("''=CMD"), false);
+  assert.equal(formulaSanitized.startsWith("'=CMD"), true);
+  assert.equal(formulaSanitized.length, 50001); // 1 single quote + 50000 characters
+});
+
+test('doPost rejects request payloads larger than MAX_POST_BODY_BYTES with 413', () => {
+  cleanGlobals();
+  const backend = require(codePath);
+  const { doPost } = backend;
+
+  const oversizedPost = {
+    postData: {
+      contents: '{"action":"test","payload":"' + 'X'.repeat(1050000) + '"}'
+    }
+  };
+
+  const response = doPost(oversizedPost);
+  const parsed = response && typeof response.getContent === 'function'
+    ? JSON.parse(response.getContent())
+    : response;
+  assert.ok(parsed);
+  assert.equal(parsed.ok, false);
+  assert.equal(parsed.error.code, 'VALIDATION_ERROR');
+  assert.equal(parsed.error.statusCode, 413);
+});
+
+test('TrackingPolicyService.validateTrackingContext rejects descriptions exceeding MAX_DESCRIPTION_LENGTH', () => {
+  cleanGlobals();
+  const backend = require(codePath);
+  const { TrackingPolicyService, AuthorizationService, MasterRepository, AppError, CONSTANTS } = backend;
+
+  AuthorizationService.assertWorkspaceAccess = () => true;
+  MasterRepository.getGlobalSettingStrict = (_key, fallback) => fallback;
+
+  const authContext = { userId: 'U1', role: CONSTANTS.ROLES.USER };
+  const longDesc = 'D'.repeat(2001);
+
+  assert.throws(
+    () => TrackingPolicyService.validateTrackingContext(authContext, 'W1', {
+      description: longDesc
+    }),
+    err => err instanceof AppError &&
+      err.code === 'VALIDATION_ERROR' &&
+      err.statusCode === 400 &&
+      err.message.includes('cannot exceed 2000 characters')
+  );
+});
+
+test('JobService.getCapacityMetrics accounts for allocated grid cells (getMaxRows * getMaxColumns)', () => {
+  cleanGlobals();
+  const backend = require(codePath);
+  const { JobService, MasterRepository } = backend;
+
+  const mockSheet = {
+    getName() { return 'TimeEntries'; },
+    getLastRow() { return 100; },
+    getLastColumn() { return 12; }, // 1,200 filled data cells
+    getMaxRows() { return 1000; },
+    getMaxColumns() { return 26; }  // 26,000 allocated cells
+  };
+
+  MasterRepository.getMasterSpreadsheet = () => ({
+    getSheets() {
+      return [mockSheet];
+    }
+  });
+
+  const metrics = JobService.getCapacityMetrics();
+  assert.equal(metrics.totalCells, 26000);
+  assert.equal(metrics.tabBreakdown[0].rows, 100);
+  assert.equal(metrics.tabBreakdown[0].columns, 12);
+  assert.equal(metrics.tabBreakdown[0].allocatedRows, 1000);
+  assert.equal(metrics.tabBreakdown[0].allocatedColumns, 26);
+  assert.equal(metrics.tabBreakdown[0].cells, 26000);
+});
+
+

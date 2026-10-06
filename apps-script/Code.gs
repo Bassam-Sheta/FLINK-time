@@ -215,7 +215,9 @@ var CONSTANTS = {
     MAX_SINGLE_ENTRY_HOURS: 24,
     DASHBOARD_LIVE_WINDOW_SECONDS: 60,
     SESSION_RETENTION_DAYS: 7,
-    AUDIT_CHECKPOINT_RETENTION_DAYS: 90
+    AUDIT_CHECKPOINT_RETENTION_DAYS: 90,
+    MAX_POST_BODY_BYTES: 1048576,
+    MAX_DESCRIPTION_LENGTH: 2000
   },
 
   SECURITY: {
@@ -506,7 +508,10 @@ var Validation = {
   sanitizeCellValue(val) {
     if (val === null || val === undefined) return '';
     if (typeof val === 'number' || typeof val === 'boolean') return val;
-    const str = String(val);
+    let str = String(val);
+    if (str.length > 50000) {
+      str = str.substring(0, 50000);
+    }
     if (/^\s*[-+]?\d+(\.\d+)?\s*$/.test(str)) {
       return str;
     }
@@ -992,6 +997,17 @@ function doPost(e) {
 
   try {
     if (e && e.postData && e.postData.contents) {
+      const maxBytes = (typeof CONSTANTS !== 'undefined' && CONSTANTS.LIMITS && CONSTANTS.LIMITS.MAX_POST_BODY_BYTES) || 1048576;
+      if (typeof e.postData.contents === 'string' && e.postData.contents.length > maxBytes) {
+        return buildJsonResponse_({
+          ok: false,
+          error: {
+            code: ERROR_CODES.VALIDATION_ERROR,
+            message: `Request payload exceeds maximum allowed size (${Math.round(maxBytes / 1024)}KB).`,
+            statusCode: 413
+          }
+        });
+      }
       const parsed = JSON.parse(e.postData.contents);
       action = parsed.action || '';
       payload = parsed;
@@ -1002,7 +1018,7 @@ function doPost(e) {
   } catch (err) {
     return buildJsonResponse_({
       ok: false,
-      error: { code: ERROR_CODES.VALIDATION_ERROR, message: 'Malformed JSON payload: ' + err.message }
+      error: { code: ERROR_CODES.VALIDATION_ERROR, message: 'Malformed JSON payload: ' + err.message, statusCode: 400 }
     });
   }
 
@@ -5033,6 +5049,14 @@ var TrackingPolicyService = (typeof global !== 'undefined' && global.TrackingPol
     const description = payload.description
       ? Validation.sanitizeCellValue(String(payload.description).trim())
       : '';
+    const maxDescLen = (typeof CONSTANTS !== 'undefined' && CONSTANTS.LIMITS && CONSTANTS.LIMITS.MAX_DESCRIPTION_LENGTH) || 2000;
+    if (description.length > maxDescLen) {
+      throw new AppError(
+        ERROR_CODES.VALIDATION_ERROR,
+        `Description cannot exceed ${maxDescLen} characters.`,
+        400
+      );
+    }
     const tagIds = this.normalizeTagIds(
       payload.tagIds !== undefined ? payload.tagIds : payload.tags
     );
@@ -14340,17 +14364,24 @@ var JobService = (typeof global !== 'undefined' && global.JobService) || {
     if (targetSs && targetSs.getSheets) {
       const sheets = targetSs.getSheets();
       for (const sheet of sheets) {
-        const rows = sheet.getLastRow();
-        const cols = sheet.getLastColumn();
-        const cells = rows * cols;
+        const rows = typeof sheet.getLastRow === 'function' ? sheet.getLastRow() : 0;
+        const cols = typeof sheet.getLastColumn === 'function' ? sheet.getLastColumn() : 0;
+        const maxRows = typeof sheet.getMaxRows === 'function' ? sheet.getMaxRows() : rows;
+        const maxCols = typeof sheet.getMaxColumns === 'function' ? sheet.getMaxColumns() : cols;
+        const dataCells = rows * cols;
+        const allocatedCells = maxRows * maxCols;
+        const cells = Math.max(dataCells, allocatedCells);
+
         totalCells += cells;
         totalRows += rows;
         totalColumns = Math.max(totalColumns, cols);
 
         tabBreakdown.push({
-          tabName: sheet.getName(),
+          tabName: typeof sheet.getName === 'function' ? sheet.getName() : 'Unknown',
           rows,
           columns: cols,
+          allocatedRows: maxRows,
+          allocatedColumns: maxCols,
           cells
         });
       }
