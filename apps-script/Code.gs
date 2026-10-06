@@ -192,7 +192,9 @@ var CONSTANTS = {
     SETTINGS_CHANGED: 'SETTINGS_CHANGED',
     EXPORT_CREATED: 'EXPORT_CREATED',
     BACKUP_CREATED: 'BACKUP_CREATED',
-    RESTORE_EXECUTED: 'RESTORE_EXECUTED'
+    BACKUP_PURGED: 'BACKUP_PURGED',
+    RESTORE_EXECUTED: 'RESTORE_EXECUTED',
+    AUDIT_CHECKPOINT_ARCHIVED: 'AUDIT_CHECKPOINT_ARCHIVED'
   },
 
   LIMITS: {
@@ -216,6 +218,9 @@ var CONSTANTS = {
     DASHBOARD_LIVE_WINDOW_SECONDS: 60,
     SESSION_RETENTION_DAYS: 7,
     AUDIT_CHECKPOINT_RETENTION_DAYS: 90,
+    BACKUP_RETENTION_DAYS: 30,
+    MAX_BACKUPS_PER_SCOPE: 30,
+    MIN_BACKUPS_RETAINED: 3,
     MAX_POST_BODY_BYTES: 1048576,
     MAX_DESCRIPTION_LENGTH: 2000
   },
@@ -1147,16 +1152,20 @@ const ACTION_PERMISSIONS = {
   'backups.list': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN], isWrite: false },
   'backups.restoreValidate': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN], isWrite: false },
   'backups.restoreApply': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN], isWrite: true },
+  'backups.prune': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN], isWrite: true },
   'rollups.rebuild': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN, CONSTANTS.ROLES.ADMIN], requiresWorkspace: true, isWrite: true },
 
   // Jobs & Capacity
   'jobs.dispatchHousekeeping': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN], isWrite: true },
   'jobs.dispatchRollups': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN], isWrite: true },
+  'jobs.dispatchBackups': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN], isWrite: true },
   'jobs.capacity': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN, CONSTANTS.ROLES.ADMIN], isWrite: false },
 
   // Integrity & Audit
   'integrity.audit': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN], isWrite: true },
-  'audit.verifyChain': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN], isWrite: false }
+  'audit.verifyChain': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN], isWrite: false },
+  'audit.listCheckpoints': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN], isWrite: false },
+  'audit.exportCheckpointsCsv': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN], isWrite: false }
 };
 
 const PRIVILEGED_STEP_UP_ACTIONS = new Set([
@@ -1181,8 +1190,10 @@ const PRIVILEGED_STEP_UP_ACTIONS = new Set([
   'sessions.revoke',
   'backups.create',
   'backups.restoreApply',
+  'backups.prune',
   'jobs.dispatchHousekeeping',
   'jobs.dispatchRollups',
+  'jobs.dispatchBackups',
   'integrity.audit'
 ]);
 
@@ -1437,6 +1448,12 @@ function dispatchAction_(action, data) {
 
     case 'audit.verifyChain':
       return AuditService.verifyAuditChain(payload.workspaceId || wsId || null);
+
+    case 'audit.listCheckpoints':
+      return AuditService.getAuditCheckpoints(payload.workspaceId || wsId || null);
+
+    case 'audit.exportCheckpointsCsv':
+      return AuditService.exportAuditCheckpointsCsv(authContext, payload.workspaceId || wsId || null);
 
     /* ---------------- WORKSPACES ---------------- */
     case 'workspaces.list':
@@ -1735,6 +1752,9 @@ function dispatchAction_(action, data) {
         payload.adminPassword
       );
 
+    case 'backups.prune':
+      return BackupService.pruneOldBackups(authContext, payload);
+
     case 'rollups.rebuild':
       return RollupService.rebuildRollups(wsId);
 
@@ -1746,6 +1766,10 @@ function dispatchAction_(action, data) {
     case 'jobs.dispatchRollups':
       AuthorizationService.assertRole(authContext, [CONSTANTS.ROLES.SUPER_ADMIN]);
       return JobService.dispatchRollups();
+
+    case 'jobs.dispatchBackups':
+      AuthorizationService.assertRole(authContext, [CONSTANTS.ROLES.SUPER_ADMIN]);
+      return JobService.dispatchBackups();
 
     case 'jobs.capacity': {
       AuthorizationService.assertRole(authContext, [CONSTANTS.ROLES.SUPER_ADMIN, CONSTANTS.ROLES.ADMIN]);
@@ -14092,7 +14116,8 @@ var JobService = (typeof global !== 'undefined' && global.JobService) || {
   _scheduledTriggerSpecs: [
     { handler: 'scheduledHousekeeping_', hour: 1, purpose: 'Expired session cleanup' },
     { handler: 'scheduledRollups_', hour: 2, purpose: 'Rollup reconciliation' },
-    { handler: 'scheduledAuditCheckpoints_', hour: 3, purpose: 'Audit checkpoint anchoring' }
+    { handler: 'scheduledAuditCheckpoints_', hour: 3, purpose: 'Audit checkpoint anchoring' },
+    { handler: 'scheduledBackups_', hour: 4, purpose: 'Nightly backup snapshot and retention cleanup' }
   ],
 
   getScheduledTriggerStatus() {
@@ -14362,14 +14387,30 @@ var JobService = (typeof global !== 'undefined' && global.JobService) || {
             const checkpointCutoffMs =
               now - checkpointRetentionDays * 24 * 3600 * 1000;
             let expired = false;
+            let cp = null;
             try {
-              const cp = JSON.parse(raw);
+              cp = JSON.parse(raw);
               const cpDate = new Date(cp.date || cp.checkpointAt || '').getTime();
               expired = !isNaN(cpDate) && cpDate < checkpointCutoffMs;
             } catch (e) {
               expired = true;
             }
             if (expired) {
+              if (cp) {
+                try {
+                  MasterRepository.logGlobalAudit({
+                    ActorUserID: 'SYSTEM',
+                    ActorRole: 'SYSTEM',
+                    WorkspaceID: (cp.scope && cp.scope !== 'MASTER') ? cp.scope : '',
+                    EntityType: 'AUDIT_CHECKPOINT',
+                    EntityID: key,
+                    Action: CONSTANTS.AUDIT_EVENTS.AUDIT_CHECKPOINT_ARCHIVED || 'AUDIT_CHECKPOINT_ARCHIVED',
+                    BeforeJSON: cp,
+                    AfterJSON: null,
+                    Reason: 'Expired checkpoint archived to permanent audit log by housekeeping'
+                  });
+                } catch (arcErr) {}
+              }
               props.deleteProperty(key);
               purgedCheckpointsCount++;
             }
@@ -14388,6 +14429,17 @@ var JobService = (typeof global !== 'undefined' && global.JobService) || {
         console.warn('Runaway timer auto-stop notice: ' + autoStopErr.message);
       }
 
+      // Prune old backups per retention policy
+      let purgedBackupsCount = 0;
+      try {
+        if (typeof BackupService !== 'undefined' && BackupService.pruneOldBackups) {
+          const pruneRes = BackupService.pruneOldBackups(null);
+          purgedBackupsCount = (pruneRes && pruneRes.purgedCount) || 0;
+        }
+      } catch (backupPruneErr) {
+        console.warn('Backup retention auto-prune notice: ' + backupPruneErr.message);
+      }
+
       this.logJobRun({
         RunID: runId,
         JobID: 'JOB_HOUSEKEEPING',
@@ -14399,10 +14451,10 @@ var JobService = (typeof global !== 'undefined' && global.JobService) || {
         ItemsProcessed:
           expiredSessionsCount + purgedSessionsCount + purgedMfaChallengesCount +
           purgedMfaEnrollmentsCount + purgedStepUpsCount + purgedCheckpointsCount +
-          autoStoppedTimersCount,
+          autoStoppedTimersCount + purgedBackupsCount,
         Status: CONSTANTS.JOB_STATUS.COMPLETED,
         LogDetails:
-          `Housekeeping revoked ${expiredSessionsCount} expired sessions, purged ${purgedSessionsCount} retained session rows, removed ${purgedMfaChallengesCount} stale MFA challenges, ${purgedMfaEnrollmentsCount} stale MFA enrollments, ${purgedStepUpsCount} expired step-up grants, ${purgedCheckpointsCount} stale audit checkpoints, and auto-stopped ${autoStoppedTimersCount} runaway timers.`
+          `Housekeeping revoked ${expiredSessionsCount} expired sessions, purged ${purgedSessionsCount} retained session rows, removed ${purgedMfaChallengesCount} stale MFA challenges, ${purgedMfaEnrollmentsCount} stale MFA enrollments, ${purgedStepUpsCount} expired step-up grants, ${purgedCheckpointsCount} stale audit checkpoints, auto-stopped ${autoStoppedTimersCount} runaway timers, and pruned ${purgedBackupsCount} old backups.`
       });
 
       return {
@@ -14413,7 +14465,8 @@ var JobService = (typeof global !== 'undefined' && global.JobService) || {
         purgedMfaEnrollmentsCount,
         purgedStepUpsCount,
         purgedCheckpointsCount,
-        autoStoppedTimersCount
+        autoStoppedTimersCount,
+        purgedBackupsCount
       };
     } catch (e) {
       this.logJobRun({
@@ -14517,6 +14570,74 @@ var JobService = (typeof global !== 'undefined' && global.JobService) || {
       );
     }
     return { ok: true, scopesProcessed: results.length, details: results };
+  },
+
+  /**
+   * Automated Nightly Backup & Retention Dispatcher
+   * Captures snapshots of Master and active workspaces, and enforces retention limits.
+   */
+  dispatchBackups() {
+    this._beginJobExecution();
+    const runId = Validation.generateId('RUN');
+    const startMs = Date.now();
+    const results = [];
+
+    const systemContext = {
+      userId: 'SYSTEM',
+      role: CONSTANTS.ROLES.SUPER_ADMIN,
+      user: { Username: 'SYSTEM' }
+    };
+
+    // 1. Back up Master Control Sheet
+    try {
+      const masterRes = BackupService.createBackup(systemContext, null);
+      results.push({ scope: 'MASTER', ok: true, backupId: masterRes.backupId });
+    } catch (err) {
+      results.push({ scope: 'MASTER', ok: false, error: err.message });
+    }
+
+    // 2. Back up all Active Workspaces
+    for (const ws of MasterRepository.listWorkspaces()) {
+      if (ws.Status === CONSTANTS.WORKSPACE_STATUS.ACTIVE) {
+        try {
+          const wsRes = BackupService.createBackup(systemContext, ws.WorkspaceID);
+          results.push({ scope: ws.WorkspaceID, ok: true, backupId: wsRes.backupId });
+        } catch (err) {
+          results.push({ scope: ws.WorkspaceID, ok: false, error: err.message });
+        }
+      }
+    }
+
+    // 3. Prune old backups per retention policy
+    let pruneResult = { ok: true, purgedCount: 0 };
+    try {
+      if (typeof BackupService !== 'undefined' && BackupService.pruneOldBackups) {
+        pruneResult = BackupService.pruneOldBackups(systemContext);
+      }
+    } catch (err) {
+      console.warn('Nightly backup retention pruning notice: ' + err.message);
+    }
+
+    const allOk = results.every(r => r.ok);
+    this.logJobRun({
+      RunID: runId,
+      JobID: 'JOB_BACKUP_DISPATCHER',
+      JobType: 'BACKUP_SYNC',
+      WorkspaceID: 'ALL',
+      StartedAt: new Date(startMs).toISOString(),
+      EndedAt: new Date().toISOString(),
+      DurationMs: Date.now() - startMs,
+      ItemsProcessed: results.length,
+      Status: allOk ? CONSTANTS.JOB_STATUS.COMPLETED : CONSTANTS.JOB_STATUS.FAILED,
+      LogDetails: `Nightly backup processed ${results.filter(r => r.ok).length}/${results.length} scopes. Pruned ${pruneResult.purgedCount || 0} old backups.`
+    });
+
+    return {
+      ok: allOk,
+      scopesProcessed: results.length,
+      purgedCount: pruneResult.purgedCount || 0,
+      details: results
+    };
   },
 
   /**
@@ -14777,6 +14898,10 @@ function scheduledRollups_() {
 
 function scheduledAuditCheckpoints_() {
   return JobService.dispatchAuditCheckpoints();
+}
+
+function scheduledBackups_() {
+  return JobService.dispatchBackups();
 }
 
 /* ===== BackupAndAuditServices.gs ===== */
@@ -15141,6 +15266,121 @@ var BackupService = (typeof global !== 'undefined' && global.BackupService) || {
   },
 
   /**
+   * Prunes historical backups exceeding age retention or count thresholds.
+   * Safety rule: never deletes the most recent minRetained (3) backups.
+   */
+  pruneOldBackups(superAdminContext = null, options = {}) {
+    if (superAdminContext && superAdminContext.userId !== 'SYSTEM') {
+      AuthorizationService.assertRole(superAdminContext, [CONSTANTS.ROLES.SUPER_ADMIN]);
+    }
+
+    let scriptLock = null;
+    if (typeof LockService !== 'undefined' && LockService.getScriptLock) {
+      scriptLock = LockService.getScriptLock();
+      if (!scriptLock.tryLock(30000)) {
+        throw new AppError(ERROR_CODES.SERVER_BUSY, 'Could not acquire backup lock for pruning. Please retry.', 409);
+      }
+    }
+
+    try {
+      const retentionDays = Number(options && options.retentionDays) > 0
+        ? Number(options.retentionDays)
+        : ((CONSTANTS.LIMITS && CONSTANTS.LIMITS.BACKUP_RETENTION_DAYS) || 30);
+      const maxRetained = Number(options && options.maxRetained) > 0
+        ? Number(options.maxRetained)
+        : ((CONSTANTS.LIMITS && CONSTANTS.LIMITS.MAX_BACKUPS_PER_SCOPE) || 30);
+      const minRetained = Number(options && options.minRetained) > 0
+        ? Number(options.minRetained)
+        : ((CONSTANTS.LIMITS && CONSTANTS.LIMITS.MIN_BACKUPS_RETAINED) || 3);
+      const targetWorkspaceId = (options && options.workspaceId) || null;
+
+      const now = Date.now();
+      const retentionCutoffMs = now - (retentionDays * 24 * 3600 * 1000);
+
+      const { rows } = MasterRepository.getTableData(CONSTANTS.MASTER_TABS.BACKUP_REGISTRY);
+
+      const groups = {};
+      rows.forEach(row => {
+        const isAvailable = row.Status === 'AVAILABLE';
+        if (!isAvailable) return;
+        const scopeKey = row.Scope === 'WORKSPACE' ? String(row.WorkspaceID) : 'MASTER';
+        if (targetWorkspaceId && scopeKey !== String(targetWorkspaceId)) return;
+
+        if (!groups[scopeKey]) groups[scopeKey] = [];
+        groups[scopeKey].push(row);
+      });
+
+      let purgedCount = 0;
+      const prunedBackupIds = [];
+
+      for (const [scopeKey, backupRows] of Object.entries(groups)) {
+        backupRows.sort((a, b) => new Date(b.CreatedAt).getTime() - new Date(a.CreatedAt).getTime());
+
+        if (backupRows.length <= minRetained) continue;
+
+        for (let i = minRetained; i < backupRows.length; i++) {
+          const candidate = backupRows[i];
+          const createdAtMs = new Date(candidate.CreatedAt).getTime();
+          const exceedsAge = !isNaN(createdAtMs) && createdAtMs < retentionCutoffMs;
+          const exceedsCount = i >= maxRetained;
+
+          if (exceedsAge || exceedsCount) {
+            if (typeof DriveApp !== 'undefined' && DriveApp.getFileById && candidate.BackupFileID) {
+              try {
+                const file = DriveApp.getFileById(candidate.BackupFileID);
+                if (!file.isTrashed || !file.isTrashed()) {
+                  file.setTrashed(true);
+                }
+              } catch (driveErr) {
+                console.warn(`Drive file trash notice for backup ${candidate.BackupID}: ${driveErr.message}`);
+              }
+            }
+
+            MasterRepository.updateRow(CONSTANTS.MASTER_TABS.BACKUP_REGISTRY, candidate._rowIndex, {
+              Status: 'PURGED',
+              Verified: false
+            });
+
+            try {
+              MasterRepository.logGlobalAudit({
+                ActorUserID: superAdminContext ? superAdminContext.userId : 'SYSTEM',
+                ActorRole: superAdminContext ? superAdminContext.role : 'SYSTEM',
+                WorkspaceID: candidate.Scope === 'WORKSPACE' ? candidate.WorkspaceID : '',
+                EntityType: 'BACKUP',
+                EntityID: candidate.BackupID,
+                Action: (CONSTANTS.AUDIT_EVENTS && CONSTANTS.AUDIT_EVENTS.BACKUP_PURGED) || 'BACKUP_PURGED',
+                BeforeJSON: { Status: 'AVAILABLE', BackupFileID: candidate.BackupFileID },
+                AfterJSON: { Status: 'PURGED' },
+                Reason: `Pruned per retention policy (age > ${retentionDays}d or count > ${maxRetained})`
+              });
+            } catch (auditErr) {}
+
+            purgedCount++;
+            prunedBackupIds.push(candidate.BackupID);
+          }
+        }
+      }
+
+      return {
+        ok: true,
+        purgedCount,
+        prunedBackupIds,
+        retentionDays,
+        maxRetained,
+        minRetained
+      };
+    } finally {
+      if (scriptLock) {
+        try { scriptLock.releaseLock(); } catch (e) {}
+      }
+    }
+  },
+
+  cleanOldBackups_(superAdminContext = null, options = {}) {
+    return this.pruneOldBackups(superAdminContext, options);
+  },
+
+  /**
    * Reopens and fully verifies a registered backup. Arbitrary Drive file IDs are rejected.
    */
   validateBackup(superAdminContext, workspaceId, backupId) {
@@ -15502,6 +15742,25 @@ var AuditService = (typeof global !== 'undefined' && global.AuditService) || {
         if (scopeCheckpoints.length > maxRetained) {
           const toDelete = scopeCheckpoints.slice(0, scopeCheckpoints.length - maxRetained);
           for (const oldKey of toDelete) {
+            try {
+              const rawCp = allProps[oldKey];
+              if (rawCp) {
+                const cpObj = JSON.parse(rawCp);
+                MasterRepository.logGlobalAudit({
+                  ActorUserID: 'SYSTEM',
+                  ActorRole: 'SYSTEM',
+                  WorkspaceID: scope === 'MASTER' ? '' : scope,
+                  EntityType: 'AUDIT_CHECKPOINT',
+                  EntityID: oldKey,
+                  Action: (CONSTANTS.AUDIT_EVENTS && CONSTANTS.AUDIT_EVENTS.AUDIT_CHECKPOINT_ARCHIVED) || 'AUDIT_CHECKPOINT_ARCHIVED',
+                  BeforeJSON: cpObj,
+                  AfterJSON: null,
+                  Reason: 'Checkpoint archived to permanent audit log upon Script Properties quota rollover'
+                });
+              }
+            } catch (archiveErr) {
+              console.warn('Audit checkpoint archive notice: ' + archiveErr.message);
+            }
             props.deleteProperty(oldKey);
           }
         }
@@ -15763,6 +16022,77 @@ var AuditService = (typeof global !== 'undefined' && global.AuditService) || {
       message: rows.length > 0
         ? `Audit chain verified successfully across all ${rows.length} records.`
         : 'Audit log is empty and no durable checkpoint contradicts Genesis state.'
+    };
+  },
+
+  /**
+   * Retrieves active audit checkpoints from Script Properties for a scope.
+   */
+  getAuditCheckpoints(workspaceId = null) {
+    const scope = workspaceId || 'MASTER';
+    if (typeof PropertiesService === 'undefined' || !PropertiesService.getScriptProperties) {
+      return [];
+    }
+    const props = PropertiesService.getScriptProperties();
+    const prefix = ((CONSTANTS.SECURITY && CONSTANTS.SECURITY.CHECKPOINT_PROPERTY_PREFIX) || 'FLINK_AUDIT_CHECKPOINT_') + scope + '_';
+    const all = typeof props.getProperties === 'function' ? props.getProperties() : {};
+    return Object.entries(all)
+      .filter(([k]) => k.startsWith(prefix))
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([k, v]) => {
+        try {
+          return { key: k, ...JSON.parse(v) };
+        } catch (e) {
+          return { key: k, raw: v };
+        }
+      });
+  },
+
+  /**
+   * Exports audit checkpoints as a sanitized CSV string.
+   */
+  exportAuditCheckpointsCsv(authContext, workspaceId = null) {
+    if (authContext) {
+      AuthorizationService.assertRole(authContext, [CONSTANTS.ROLES.SUPER_ADMIN]);
+    }
+    const checkpoints = this.getAuditCheckpoints(workspaceId);
+    const headers = [
+      'Checkpoint Key', 'Scope', 'Date', 'Record Count',
+      'Last Record Hash', 'Root Hash', 'Snapshot Hash', 'Checkpoint Timestamp'
+    ];
+
+    const escape = (typeof ExportService !== 'undefined' && ExportService.escapeCsv)
+      ? ExportService.escapeCsv.bind(ExportService)
+      : val => {
+        if (val === null || val === undefined) return '""';
+        let str = String(val);
+        if (!/^\s*[-+]?\d+(\.\d+)?\s*$/.test(str) && /^\s*[=+\-@\t\r\n]/.test(str)) {
+          str = "'" + str;
+        }
+        return '"' + str.replace(/"/g, '""') + '"';
+      };
+
+    const lines = [headers.map(escape).join(',')];
+    for (const cp of checkpoints) {
+      lines.push([
+        cp.key || '',
+        cp.scope || '',
+        cp.date || '',
+        cp.count !== undefined ? cp.count : '',
+        cp.lastHash || '',
+        cp.rootHash || '',
+        cp.snapshotHash || '',
+        cp.checkpointAt || ''
+      ].map(escape).join(','));
+    }
+
+    const scopeLabel = workspaceId || 'MASTER';
+    const filename = `FLINK_AUDIT_CHECKPOINTS_${scopeLabel}_${new Date().toISOString().split('T')[0]}.csv`;
+    return {
+      filename,
+      mimeType: 'text/csv',
+      csv: lines.join('\r\n'),
+      count: checkpoints.length
     };
   }
 };
