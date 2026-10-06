@@ -1400,6 +1400,23 @@
           } else if (clock) {
             clock.style.color = '';
           }
+        } else {
+          state.activeTimer = null;
+          if (state.timerInterval) clearInterval(state.timerInterval);
+          state.timerInterval = null;
+          state._updateLocalClock = null;
+          const clock = document.getElementById('timerClockDisplay');
+          if (clock) {
+            clock.classList.remove('running');
+            clock.style.color = '';
+            clock.innerText = '00:00:00';
+          }
+          try { document.title = 'FLINK Time'; } catch (e) {}
+          const btn = document.getElementById('timerToggleBtn');
+          if (btn) {
+            btn.innerText = 'START';
+            btn.className = 'btn btn-success';
+          }
         }
       } catch (e) {}
     }
@@ -1419,8 +1436,17 @@
         try { document.title = `[${timeStr}] FLINK Time`; } catch (e) {}
       };
 
+      state._updateLocalClock = update;
       update();
       state.timerInterval = setInterval(update, 1000);
+      if (!state._visibilityListenerBound && typeof document !== 'undefined' && document.addEventListener) {
+        state._visibilityListenerBound = true;
+        document.addEventListener('visibilitychange', () => {
+          if (document.visibilityState === 'visible' && state.timerInterval && typeof state._updateLocalClock === 'function') {
+            state._updateLocalClock();
+          }
+        });
+      }
     }
 
     function applyTimerCooldown() {
@@ -1470,6 +1496,8 @@
           state.pendingTimerStopOperationId = '';
           state.activeTimer = null;
           clearInterval(state.timerInterval);
+          state.timerInterval = null;
+          state._updateLocalClock = null;
           document.getElementById('timerClockDisplay').classList.remove('running');
           document.getElementById('timerClockDisplay').innerText = '00:00:00';
           try { document.title = 'FLINK Time'; } catch (e) {}

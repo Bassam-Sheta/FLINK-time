@@ -6372,6 +6372,23 @@ var SheetRepository = (typeof global !== 'undefined' && global.SheetRepository) 
     this._invalidateTable(workspaceId, tabName);
   },
 
+  /**
+   * Deletes a contiguous block of rows from a workspace tab
+   */
+  deleteRows(workspaceId, tabName, startRow, howMany) {
+    const count = Number(howMany || 0);
+    if (!Number.isInteger(startRow) || startRow < 2 || !Number.isInteger(count) || count < 1) {
+      throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'Invalid batch row deletion request.', 400);
+    }
+    const ss = WorkspaceRouter.resolveSpreadsheet(workspaceId);
+    const sheet = ss.getSheetByName(tabName);
+    if (!sheet) {
+      throw new AppError(ERROR_CODES.NOT_FOUND, `Tab '${tabName}' not found in workspace '${workspaceId}'.`, 404);
+    }
+    sheet.deleteRows(startRow, count);
+    this._invalidateTable(workspaceId, tabName);
+  },
+
   /* ------------------- MEMBERS ------------------- */
 
   listMembers(workspaceId) {
@@ -11173,7 +11190,11 @@ var RollupService = (typeof global !== 'undefined' && global.RollupService) || {
         );
       }
       if (sheet.getLastRow() > 1) {
-        sheet.deleteRows(2, sheet.getLastRow() - 1);
+        if (SheetRepository.deleteRows) {
+          SheetRepository.deleteRows(workspaceId, tab, 2, sheet.getLastRow() - 1);
+        } else {
+          sheet.deleteRows(2, sheet.getLastRow() - 1);
+        }
       }
       if (SheetRepository.clearTableCache) {
         SheetRepository.clearTableCache(workspaceId, tab);
@@ -11232,13 +11253,18 @@ var DashboardService = (typeof global !== 'undefined' && global.DashboardService
   _workspaceCurrentTotals(authContext, workspaceId, now = new Date()) {
     const today = TimezoneService.formatDateKey(workspaceId, now);
     const week = TimezoneService.getWeekBounds(workspaceId, now);
-    const entries = SheetRepository.listTimeEntries(workspaceId, {});
+    const filters = {};
+    if (authContext && authContext.role === CONSTANTS.ROLES.USER) {
+      filters.userId = authContext.userId;
+    }
+    const entries = SheetRepository.listTimeEntries(workspaceId, filters);
 
     let todaySeconds = 0;
     let weekSeconds = 0;
 
     for (const entry of entries) {
       if (
+        authContext &&
         authContext.role === CONSTANTS.ROLES.USER &&
         entry.UserID !== authContext.userId
       ) {
@@ -11375,11 +11401,15 @@ var DashboardService = (typeof global !== 'undefined' && global.DashboardService
           weekEnd: totals.weekEnd
         });
 
+        const tsFilters = { status: CONSTANTS.TIMESHEET_STATUS.SUBMITTED };
+        if (authContext && authContext.role === CONSTANTS.ROLES.USER) {
+          tsFilters.userId = authContext.userId;
+        }
         const timesheets = SheetRepository.listTimesheets(
           ws.WorkspaceID,
-          { status: CONSTANTS.TIMESHEET_STATUS.SUBMITTED }
+          tsFilters
         );
-        pendingApprovalsCount += authContext.role === CONSTANTS.ROLES.USER
+        pendingApprovalsCount += (authContext && authContext.role === CONSTANTS.ROLES.USER)
           ? timesheets.filter(ts => ts.UserID === authContext.userId).length
           : timesheets.length;
       } catch (err) {

@@ -52,12 +52,17 @@ function fixture(options = {}) {
       };
     }
   };
+  const recorded = {
+    listTimeEntriesFilters: [],
+    listTimesheetsFilters: []
+  };
   global.MasterRepository = {
     listRequests() { return []; },
     getTableData() { return { rows:[] }; }
   };
   global.SheetRepository = {
-    listTimeEntries() {
+    listTimeEntries(ws, filters = {}) {
+      recorded.listTimeEntriesFilters.push(filters);
       if (options.entriesError) throw new Error('entry read failed');
       return (options.entries || []).map(e => ({ ...e }));
     },
@@ -77,13 +82,16 @@ function fixture(options = {}) {
     listProjects() {
       return [{ ProjectID:'P1', ProjectName:'Project One' }];
     },
-    listTimesheets() {
+    listTimesheets(ws, filters = {}) {
+      recorded.listTimesheetsFilters.push(filters);
       return (options.timesheets || []).map(t => ({ ...t }));
     }
   };
 
   delete require.cache[require.resolve(servicePath)];
-  return require(servicePath).DashboardService;
+  const svc = require(servicePath).DashboardService;
+  svc._testRecorded = recorded;
+  return svc;
 }
 
 const entries = [
@@ -172,4 +180,26 @@ test('dashboard workspace read failure fails closed instead of silently understa
     err => err instanceof AppError &&
       err.code === 'SERVER_BUSY'
   );
+});
+
+test('USER dashboard queries SheetRepository with userId filters for isolation and performance', () => {
+  const dashboard = fixture({ entries });
+  dashboard.getDashboardOverview(
+    { userId:'U1', role:'USER' },
+    'W1'
+  );
+
+  assert.equal(dashboard._testRecorded.listTimeEntriesFilters.length, 1);
+  assert.equal(dashboard._testRecorded.listTimeEntriesFilters[0].userId, 'U1');
+  assert.equal(dashboard._testRecorded.listTimesheetsFilters.length, 1);
+  assert.equal(dashboard._testRecorded.listTimesheetsFilters[0].userId, 'U1');
+
+  // ADMIN should not filter repository entries by userId
+  dashboard.getDashboardOverview(
+    { userId:'A1', role:'ADMIN' },
+    'W1'
+  );
+
+  assert.equal(dashboard._testRecorded.listTimeEntriesFilters[1].userId, undefined);
+  assert.equal(dashboard._testRecorded.listTimesheetsFilters[1].userId, undefined);
 });

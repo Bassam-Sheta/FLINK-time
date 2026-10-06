@@ -441,3 +441,97 @@ test('MasterRepository.updateRow reuses _headerCache across multiple updates in 
   assert.equal(headerReads, 2);
 });
 
+test('SheetRepository.deleteRows executes batch row deletion and invalidates table cache', () => {
+  cleanGlobals();
+
+  let deletedStart = 0;
+  let deletedCount = 0;
+  let getTableDataCalls = 0;
+
+  const mockSheet = {
+    deleteRows(start, count) {
+      deletedStart = start;
+      deletedCount = count;
+    },
+    getDataRange() {
+      getTableDataCalls++;
+      return {
+        getValues() {
+          return [
+            ['RollupID', 'WorkspaceID', 'PeriodKey', 'TotalSeconds'],
+            ['R1', 'W1', '2026-09-29', 3600],
+            ['R2', 'W1', '2026-09-30', 7200]
+          ];
+        }
+      };
+    }
+  };
+
+  global.WorkspaceRouter = {
+    resolveSpreadsheet(wsId) {
+      return {
+        getSheetByName(tab) {
+          if (tab === 'DailyRollups') return mockSheet;
+          return null;
+        }
+      };
+    }
+  };
+
+  const backend = require(codePath);
+  const { SheetRepository } = backend;
+
+  SheetRepository.beginRequest();
+
+  // Populate cache
+  const first = SheetRepository.getTableData('W1', 'DailyRollups');
+  assert.equal(first.rows.length, 2);
+  assert.equal(getTableDataCalls, 1);
+
+  // Cached read
+  const cached = SheetRepository.getTableData('W1', 'DailyRollups');
+  assert.equal(getTableDataCalls, 1);
+
+  // Batch delete rows
+  SheetRepository.deleteRows('W1', 'DailyRollups', 2, 5);
+  assert.equal(deletedStart, 2);
+  assert.equal(deletedCount, 5);
+
+  // Cache is invalidated, next read queries sheet again
+  SheetRepository.getTableData('W1', 'DailyRollups');
+  assert.equal(getTableDataCalls, 2);
+});
+
+test('SheetRepository.deleteRows validates row boundaries and fails closed', () => {
+  cleanGlobals();
+  global.WorkspaceRouter = {
+    resolveSpreadsheet() {
+      return { getSheetByName() { return {}; } };
+    }
+  };
+  const backend = require(codePath);
+  const { SheetRepository } = backend;
+
+  // Cannot delete header row (startRow < 2)
+  assert.throws(
+    () => SheetRepository.deleteRows('W1', 'DailyRollups', 1, 1),
+    err => err instanceof AppError && err.code === 'VALIDATION_ERROR'
+  );
+
+  // Cannot delete 0 or negative count
+  assert.throws(
+    () => SheetRepository.deleteRows('W1', 'DailyRollups', 2, 0),
+    err => err instanceof AppError && err.code === 'VALIDATION_ERROR'
+  );
+  assert.throws(
+    () => SheetRepository.deleteRows('W1', 'DailyRollups', 2, -1),
+    err => err instanceof AppError && err.code === 'VALIDATION_ERROR'
+  );
+
+  // Non-integer inputs
+  assert.throws(
+    () => SheetRepository.deleteRows('W1', 'DailyRollups', 'invalid', 1),
+    err => err instanceof AppError && err.code === 'VALIDATION_ERROR'
+  );
+});
+
