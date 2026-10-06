@@ -507,7 +507,10 @@ var Validation = {
     if (val === null || val === undefined) return '';
     if (typeof val === 'number' || typeof val === 'boolean') return val;
     const str = String(val);
-    if (/^[=+\-@\t\r\n]/.test(str)) {
+    if (/^\s*[-+]?\d+(\.\d+)?\s*$/.test(str)) {
+      return str;
+    }
+    if (/^\s*[=+\-@\t\r\n]/.test(str)) {
       return "'" + str;
     }
     return str;
@@ -1208,6 +1211,9 @@ function executeApiRequest_(action, requestData, httpMethod = 'POST') {
   }
   if (typeof WorkspaceRouter !== 'undefined' && WorkspaceRouter.clearCache) {
     WorkspaceRouter.clearCache();
+  }
+  if (typeof TimezoneService !== 'undefined' && TimezoneService.beginRequest) {
+    TimezoneService.beginRequest();
   }
 
   const perm = getActionPermission_(action);
@@ -5150,6 +5156,9 @@ var MasterRepository = (typeof global !== 'undefined' && global.MasterRepository
 
   beginRequest() {
     this._requestCache = {};
+    if (typeof TimezoneService !== 'undefined' && TimezoneService._clearCache) {
+      TimezoneService._clearCache();
+    }
   },
 
   _userCacheKey(userId) {
@@ -5370,6 +5379,41 @@ var MasterRepository = (typeof global !== 'undefined' && global.MasterRepository
     return entity;
   },
 
+  /**
+   * Appends multiple entity rows in a single batch to a master tab
+   */
+  appendRows(tabName, entities) {
+    if (!entities || !entities.length) return [];
+    const ss = this.getMasterSpreadsheet();
+    const sheet = ss.getSheetByName(tabName);
+    if (!sheet) {
+      throw new AppError(ERROR_CODES.NOT_FOUND, `Master tab '${tabName}' does not exist.`);
+    }
+
+    const schemaHeaders = MASTER_SCHEMA[tabName];
+    if (!schemaHeaders) {
+      throw new AppError(ERROR_CODES.INTERNAL_ERROR, `Schema missing for master tab '${tabName}'.`);
+    }
+
+    const rowsData = entities.map(entity => {
+      return schemaHeaders.map(col => {
+        const val = entity[col] !== undefined ? entity[col] : '';
+        return Validation.sanitizeCellValue(val);
+      });
+    });
+
+    if (sheet.getRange) {
+      const startRow = sheet.getLastRow() + 1;
+      sheet.getRange(startRow, 1, rowsData.length, schemaHeaders.length).setValues(rowsData);
+    } else {
+      for (const row of rowsData) {
+        sheet.appendRow(row);
+      }
+    }
+    this._invalidateTable(tabName);
+    return entities;
+  },
+
   deleteRow(tabName, rowIndex) {
     const ss = this.getMasterSpreadsheet();
     const sheet = ss.getSheetByName(tabName);
@@ -5574,6 +5618,10 @@ var MasterRepository = (typeof global !== 'undefined' && global.MasterRepository
 
     if (this._requestCache) {
       delete this._requestCache['WS:' + workspaceId];
+    }
+
+    if (typeof TimezoneService !== 'undefined' && TimezoneService._clearCache) {
+      TimezoneService._clearCache(workspaceId);
     }
 
     // Workspace status and physical-pointer changes must invalidate the router's
@@ -6201,6 +6249,41 @@ var SheetRepository = (typeof global !== 'undefined' && global.SheetRepository) 
     sheet.appendRow(rowData);
     this._invalidateTable(workspaceId, tabName);
     return entity;
+  },
+
+  /**
+   * Appends multiple entity rows in a single batch to a workspace tab
+   */
+  appendRows(workspaceId, tabName, entities) {
+    if (!entities || !entities.length) return [];
+    const ss = WorkspaceRouter.resolveSpreadsheet(workspaceId);
+    const sheet = ss.getSheetByName(tabName);
+    if (!sheet) {
+      throw new AppError(ERROR_CODES.NOT_FOUND, `Tab '${tabName}' not found in workspace '${workspaceId}'.`, 404);
+    }
+
+    const schemaHeaders = WORKSPACE_SCHEMA[tabName];
+    if (!schemaHeaders) {
+      throw new AppError(ERROR_CODES.INTERNAL_ERROR, `Schema missing for workspace tab '${tabName}'.`);
+    }
+
+    const rowsData = entities.map(entity => {
+      return schemaHeaders.map(col => {
+        const val = entity[col] !== undefined ? entity[col] : '';
+        return Validation.sanitizeCellValue(val);
+      });
+    });
+
+    if (sheet.getRange) {
+      const startRow = sheet.getLastRow() + 1;
+      sheet.getRange(startRow, 1, rowsData.length, schemaHeaders.length).setValues(rowsData);
+    } else {
+      for (const row of rowsData) {
+        sheet.appendRow(row);
+      }
+    }
+    this._invalidateTable(workspaceId, tabName);
+    return entities;
   },
 
   /**
@@ -6994,6 +7077,25 @@ var WorkspaceService = (typeof global !== 'undefined' && global.WorkspaceService
  */
 
 var TimezoneService = (typeof global !== 'undefined' && global.TimezoneService) || {
+  _timezoneCache: {},
+  _weekStartCache: {},
+
+  _clearCache(workspaceId) {
+    if (!this._timezoneCache) this._timezoneCache = {};
+    if (!this._weekStartCache) this._weekStartCache = {};
+    if (workspaceId) {
+      delete this._timezoneCache[String(workspaceId)];
+      delete this._weekStartCache[String(workspaceId)];
+    } else {
+      this._timezoneCache = {};
+      this._weekStartCache = {};
+    }
+  },
+
+  beginRequest() {
+    this._clearCache();
+  },
+
   _assertValidTimezone(timezone) {
     const value = String(timezone || '').trim();
     if (!value) {
@@ -7028,25 +7130,39 @@ var TimezoneService = (typeof global !== 'undefined' && global.TimezoneService) 
   },
 
   getWorkspaceTimezone(workspaceId) {
-    const ws = MasterRepository.getWorkspace(workspaceId);
+    if (!this._timezoneCache) this._timezoneCache = {};
+    const cacheKey = String(workspaceId || '__GLOBAL__');
+    if (this._timezoneCache[cacheKey]) {
+      return this._timezoneCache[cacheKey];
+    }
+    const ws = workspaceId && typeof MasterRepository !== 'undefined' && MasterRepository.getWorkspace
+      ? MasterRepository.getWorkspace(workspaceId)
+      : null;
     const configured = (ws && ws.Timezone) ||
-      MasterRepository.getGlobalSetting('DEFAULT_TIMEZONE', 'UTC') ||
+      (typeof MasterRepository !== 'undefined' && MasterRepository.getGlobalSetting ? MasterRepository.getGlobalSetting('DEFAULT_TIMEZONE', 'UTC') : 'UTC') ||
       'UTC';
-    return this._assertValidTimezone(configured);
+    const validated = this._assertValidTimezone(configured);
+    this._timezoneCache[cacheKey] = validated;
+    return validated;
   },
 
   getWeekStartName(workspaceId) {
+    if (!this._weekStartCache) this._weekStartCache = {};
+    const cacheKey = String(workspaceId || '__GLOBAL__');
+    if (this._weekStartCache[cacheKey]) {
+      return this._weekStartCache[cacheKey];
+    }
     const dayNames = [
       'Sunday', 'Monday', 'Tuesday', 'Wednesday',
       'Thursday', 'Friday', 'Saturday'
     ];
     let configured = '';
     // 1. Explicit workspace-specific override in MasterRepository (e.g. WS_W1_WEEK_STARTS)
-    if (typeof MasterRepository !== 'undefined' && MasterRepository.getGlobalSetting) {
+    if (workspaceId && typeof MasterRepository !== 'undefined' && MasterRepository.getGlobalSetting) {
       configured = MasterRepository.getGlobalSetting(`WS_${workspaceId}_WEEK_STARTS`, '');
     }
     // 2. Explicit workspace setting via Flags if stored
-    if (!configured && typeof Flags !== 'undefined' && Flags._loadWorkspace) {
+    if (!configured && workspaceId && typeof Flags !== 'undefined' && Flags._loadWorkspace) {
       try {
         const wsMap = Flags._loadWorkspace(workspaceId);
         if (wsMap && wsMap.WEEK_STARTS) {
@@ -7074,6 +7190,7 @@ var TimezoneService = (typeof global !== 'undefined' && global.TimezoneService) 
         400
       );
     }
+    this._weekStartCache[cacheKey] = canonical;
     return canonical;
   },
 
@@ -11024,8 +11141,14 @@ var RollupService = (typeof global !== 'undefined' && global.RollupService) || {
       if (SheetRepository.clearTableCache) {
         SheetRepository.clearTableCache(workspaceId, tab);
       }
-      for (const row of rows) {
-        SheetRepository.appendRow(workspaceId, tab, row);
+      if (rows.length > 0) {
+        if (SheetRepository.appendRows) {
+          SheetRepository.appendRows(workspaceId, tab, rows);
+        } else {
+          for (const row of rows) {
+            SheetRepository.appendRow(workspaceId, tab, row);
+          }
+        }
       }
     }
 
@@ -13639,11 +13762,17 @@ var JobService = (typeof global !== 'undefined' && global.JobService) || {
     if (typeof MasterRepository !== 'undefined' && MasterRepository.beginRequest) {
       MasterRepository.beginRequest();
     }
+    if (typeof Flags !== 'undefined' && Flags.beginRequest) {
+      Flags.beginRequest();
+    }
     if (typeof SheetRepository !== 'undefined' && SheetRepository.beginRequest) {
       SheetRepository.beginRequest();
     }
     if (typeof WorkspaceRouter !== 'undefined' && WorkspaceRouter.clearCache) {
       WorkspaceRouter.clearCache();
+    }
+    if (typeof TimezoneService !== 'undefined' && TimezoneService.beginRequest) {
+      TimezoneService.beginRequest();
     }
   },
 
@@ -15188,7 +15317,7 @@ var ExportService = (typeof global !== 'undefined' && global.ExportService) || {
       if (val === null || val === undefined) return '""';
       let str = String(val);
       // Neutralize spreadsheet formula injection in CSV exports
-      if (/^[=+\-@\t\r\n]/.test(str)) {
+      if (!/^\s*[-+]?\d+(\.\d+)?\s*$/.test(str) && /^\s*[=+\-@\t\r\n]/.test(str)) {
         str = "'" + str;
       }
       return '"' + str.replace(/"/g, '""') + '"';

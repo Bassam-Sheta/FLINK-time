@@ -83,6 +83,12 @@ function fixture(initialEntries = []) {
       tables[tab].push({ ...row });
       return row;
     },
+    appendRows(_ws,tab,rows) {
+      for (const row of rows) {
+        tables[tab].push({ ...row });
+      }
+      return rows;
+    },
     updateRow(_ws,tab,rowIndex,updates) {
       Object.assign(tables[tab][rowIndex-2], updates);
     },

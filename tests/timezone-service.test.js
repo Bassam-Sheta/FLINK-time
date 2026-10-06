@@ -35,6 +35,7 @@ function loadService(timezone, weekStarts = 'Sunday', workspaceWeekStarts = '') 
     }
   };
   delete global.Utilities;
+  delete global.TimezoneService;
   delete require.cache[require.resolve(servicePath)];
   return require(servicePath).TimezoneService;
 }
@@ -132,3 +133,56 @@ test('workspace week start configured via Flags is honored', () => {
   assert.equal(bounds.dayLabels[0], 'Saturday');
   delete global.Flags;
 });
+
+test('TimezoneService memoizes timezone and week start lookups per request', () => {
+  let wsReadCount = 0;
+  let settingReadCount = 0;
+  global.MasterRepository = {
+    getWorkspace(id) {
+      wsReadCount++;
+      return { WorkspaceID: id, Timezone: 'Africa/Cairo' };
+    },
+    getGlobalSetting(key, fallback) {
+      settingReadCount++;
+      return fallback;
+    }
+  };
+  delete global.TimezoneService;
+  delete require.cache[require.resolve(servicePath)];
+  const TimezoneService = require(servicePath).TimezoneService;
+  TimezoneService.beginRequest();
+  wsReadCount = 0;
+  settingReadCount = 0;
+
+  // First calls populate cache
+  const tz1 = TimezoneService.getWorkspaceTimezone('W1');
+  const ws1 = TimezoneService.getWeekStartName('W1');
+  assert.equal(tz1, 'Africa/Cairo');
+  assert.equal(ws1, 'Sunday');
+  assert.equal(wsReadCount, 2);
+  assert.equal(settingReadCount, 2);
+
+  // Subsequent calls use memoized values without re-fetching MasterRepository
+  const tz2 = TimezoneService.getWorkspaceTimezone('W1');
+  const ws2 = TimezoneService.getWeekStartName('W1');
+  assert.equal(tz2, 'Africa/Cairo');
+  assert.equal(ws2, 'Sunday');
+  assert.equal(wsReadCount, 2);
+  assert.equal(settingReadCount, 2);
+
+  // beginRequest clears the cache
+  TimezoneService.beginRequest();
+  const tz3 = TimezoneService.getWorkspaceTimezone('W1');
+  assert.equal(tz3, 'Africa/Cairo');
+  assert.equal(wsReadCount, 3);
+
+  // Targeted cache invalidation clears specific workspace only
+  TimezoneService.getWorkspaceTimezone('W2');
+  assert.equal(wsReadCount, 4);
+  TimezoneService._clearCache('W1');
+  TimezoneService.getWorkspaceTimezone('W2'); // Still cached
+  assert.equal(wsReadCount, 4);
+  TimezoneService.getWorkspaceTimezone('W1'); // Re-read
+  assert.equal(wsReadCount, 5);
+});
+
