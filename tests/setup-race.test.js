@@ -163,3 +163,47 @@ test('owner mismatch fails before schema or account mutation', () => {
   assert.equal(fx.getBootstrapCalls(), 0);
   assert.equal(fx.getCreateAccountCalls(), 0);
 });
+
+test('root creation rejects invalid username length or characters', () => {
+  const fx = fixture();
+
+  assert.throws(
+    () => fx.SetupService.processStep(1, { ...payload, username: 'ab' }, null),
+    err => err instanceof AppError && err.code === 'VALIDATION_ERROR' && /Username must be between 3 and 50/.test(err.message)
+  );
+
+  assert.throws(
+    () => fx.SetupService.processStep(1, { ...payload, username: 'invalid user!' }, null),
+    err => err instanceof AppError && err.code === 'VALIDATION_ERROR'
+  );
+  assert.equal(fx.getCreateAccountCalls(), 0);
+});
+
+test('root creation rejects invalid full name bounds', () => {
+  const fx = fixture();
+
+  assert.throws(
+    () => fx.SetupService.processStep(1, { ...payload, fullName: '   ' }, null),
+    err => err instanceof AppError && err.code === 'VALIDATION_ERROR' && /Full name must be between 1 and 100/.test(err.message)
+  );
+
+  assert.throws(
+    () => fx.SetupService.processStep(1, { ...payload, fullName: 'x'.repeat(105) }, null),
+    err => err instanceof AppError && err.code === 'VALIDATION_ERROR' && /Full name must be between 1 and 100/.test(err.message)
+  );
+  assert.equal(fx.getCreateAccountCalls(), 0);
+});
+
+test('root creation rejects duplicate email if account already exists', () => {
+  const fx = fixture();
+  global.MasterRepository.findAccountByEmail = email => {
+    if (email === 'root@example.com') return { UserID: 'USR-OLD', Email: 'root@example.com' };
+    return null;
+  };
+
+  assert.throws(
+    () => fx.SetupService.processStep(1, payload, null),
+    err => err instanceof AppError && err.code === 'CONFLICT' && /account with this email already exists/.test(err.message)
+  );
+  assert.equal(fx.getCreateAccountCalls(), 0);
+});

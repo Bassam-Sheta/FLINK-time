@@ -335,3 +335,15 @@ test('self-approval is forbidden and throws PERMISSION_DENIED', () => {
   );
   assert.equal(fx.calls.length, 0);
 });
+
+test('self-rejection is forbidden and throws PERMISSION_DENIED', () => {
+  const fx = fixture();
+  const selfAdmin = { userId: 'USR-1', role: 'ADMIN' };
+  assert.throws(
+    () => fx.service.rejectTimesheet(selfAdmin, 'W1', 'TMS-1', 'self reject'),
+    err => err instanceof AppError &&
+      err.code === 'PERMISSION_DENIED' &&
+      /Self-review is forbidden/.test(err.message)
+  );
+  assert.equal(fx.calls.length, 0);
+});

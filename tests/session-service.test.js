@@ -57,8 +57,16 @@ function fixture(lastSeenAgeMinutes, options = {}) {
     generateSessionToken() { return 'TOKEN'; }
   };
   global.Validation = { generateId() { return 'S1'; } };
+  let findSessionCalls = 0;
   global.MasterRepository = {
-    findSessionByTokenHash() { return session; },
+    findSessionByTokenHash() {
+      findSessionCalls += 1;
+      return options.sessionMissing ? null : session;
+    },
+    findSessionByTokenHashFast() {
+      findSessionCalls += 1;
+      return options.sessionMissing ? null : session;
+    },
     findAccountById() {
       if (options.accountMissing) return null;
       return {
@@ -78,7 +86,8 @@ function fixture(lastSeenAgeMinutes, options = {}) {
   return {
     SessionService: require(servicePath).SessionService,
     writes,
-    session
+    session,
+    getFindSessionCalls: () => findSessionCalls
   };
 }
 
@@ -150,4 +159,60 @@ test('account epoch bump invalidates a warm legacy session immediately', () => {
     () => fx.SessionService.validateSession('TOKEN'),
     err => err instanceof AppError && err.code === 'AUTH_REQUIRED'
   );
+});
+
+test('negative session lookup caching prevents repeated sheet queries for invalid tokens', () => {
+  const fx = fixture(1, { sessionMissing: true });
+
+  // First check queries repository and fails
+  assert.throws(
+    () => fx.SessionService.validateSession('INVALID_TOKEN'),
+    err => err instanceof AppError && err.code === 'AUTH_REQUIRED'
+  );
+  assert.equal(fx.getFindSessionCalls(), 1);
+
+  // Second check with same invalid token hits negative cache without repository query
+  assert.throws(
+    () => fx.SessionService.validateSession('INVALID_TOKEN'),
+    err => err instanceof AppError && err.code === 'AUTH_REQUIRED'
+  );
+  assert.equal(fx.getFindSessionCalls(), 1);
+});
+
+test('revokeSession puts token in negative cache and prevents subsequent sheet queries', () => {
+  const fx = fixture(1);
+
+  // Revoke session
+  fx.SessionService.revokeSession('TOKEN');
+  assert.equal(fx.writes.length, 1);
+  assert.equal(fx.writes[0].Revoked, true);
+  const callsAfterRevoke = fx.getFindSessionCalls();
+  assert.equal(callsAfterRevoke, 1); // 1 call from revokeSession to mark row in storage
+
+  // Validating revoked token hits negative cache directly without additional query
+  assert.throws(
+    () => fx.SessionService.validateSession('TOKEN'),
+    err => err instanceof AppError && err.code === 'AUTH_REQUIRED'
+  );
+  assert.equal(fx.getFindSessionCalls(), callsAfterRevoke);
+});
+
+test('beginRequest clears in-memory negative session cache', () => {
+  const fx = fixture(1, { sessionMissing: true });
+
+  assert.throws(
+    () => fx.SessionService.validateSession('INVALID_TOKEN'),
+    err => err instanceof AppError && err.code === 'AUTH_REQUIRED'
+  );
+  assert.equal(fx.getFindSessionCalls(), 1);
+
+  // beginRequest resets cache
+  fx.SessionService.beginRequest();
+
+  // Following request queries repository again
+  assert.throws(
+    () => fx.SessionService.validateSession('INVALID_TOKEN'),
+    err => err instanceof AppError && err.code === 'AUTH_REQUIRED'
+  );
+  assert.equal(fx.getFindSessionCalls(), 2);
 });

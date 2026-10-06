@@ -377,3 +377,86 @@ test('creating user with duplicate email throws CONFLICT', () => {
       /already registered/.test(err.message)
   );
 });
+
+test('PBKDF2 hash computation occurs before LockService lock acquisition (S6)', () => {
+  const eventLog = [];
+
+  global.AppError = AppError;
+  global.ERROR_CODES = {
+    PERMISSION_DENIED: 'PERMISSION_DENIED',
+    CONFLICT: 'CONFLICT',
+    WORKSPACE_NOT_FOUND: 'WORKSPACE_NOT_FOUND',
+    WORKSPACE_DENIED: 'WORKSPACE_DENIED'
+  };
+  global.CONSTANTS = {
+    ROLES: { SUPER_ADMIN: 'SUPER_ADMIN', ADMIN: 'ADMIN', USER: 'USER' },
+    ACCOUNT_STATUS: { ACTIVE: 'ACTIVE' },
+    WORKSPACE_STATUS: { ACTIVE: 'ACTIVE' },
+    WORKSPACE_TABS: { MEMBERS: 'Members' },
+    AUDIT_EVENTS: { USER_CREATED: 'USER_CREATED' }
+  };
+  global.AuthorizationService = { assertRole() {} };
+  global.Validation = {
+    assertRequired() {},
+    validateUsername(v) { return String(v).toLowerCase(); },
+    validateRole(v) { return v; },
+    validatePassword(v) { return v; },
+    sanitizeCellValue(v) { return v; },
+    validateEmail(v) { return String(v).toLowerCase(); },
+    generateId(prefix) { return prefix === 'USR' ? 'USR-NEW' : prefix + '-1'; }
+  };
+  global.SecurityService = {
+    generateRandomHex() { return 'abcdef1234567890'; },
+    hashPassword() {
+      eventLog.push('hashPassword');
+      return 'HASH';
+    }
+  };
+  global.LockService = {
+    getScriptLock() {
+      return {
+        waitLock() {
+          eventLog.push('waitLock');
+        },
+        releaseLock() {
+          eventLog.push('releaseLock');
+        }
+      };
+    }
+  };
+  global.SpreadsheetApp = { flush() {} };
+  global.MasterRepository = {
+    findAccountByUsername() { return null; },
+    findAccountByEmail() { return null; },
+    getWorkspace() { return { WorkspaceID: 'W1', Status: 'ACTIVE' }; },
+    createAccount() { eventLog.push('createAccount'); },
+    assignWorkspaceAccess() { eventLog.push('assignWorkspaceAccess'); },
+    logGlobalAudit() { eventLog.push('logGlobalAudit'); }
+  };
+  global.SheetRepository = {
+    addMember() { eventLog.push('addMember'); },
+    getMember() { return null; }
+  };
+
+  delete require.cache[require.resolve(servicePath)];
+  const { UserService } = require(servicePath);
+
+  UserService.createUser(
+    { userId: 'SA1', role: 'SUPER_ADMIN' },
+    {
+      username: 'perfuser',
+      displayName: 'Perf User',
+      email: 'perfuser@flinksolutions.com',
+      role: 'USER',
+      primaryWorkspaceId: 'W1',
+      temporaryPassword: 'Password123!'
+    }
+  );
+
+  // Crucial invariant: hashPassword must precede waitLock to keep PBKDF2 out of critical section
+  assert.equal(eventLog[0], 'hashPassword');
+  assert.equal(eventLog[1], 'waitLock');
+  assert.ok(eventLog.indexOf('hashPassword') < eventLog.indexOf('waitLock'));
+  assert.ok(eventLog.indexOf('createAccount') > eventLog.indexOf('waitLock'));
+  assert.equal(eventLog.at(-1), 'releaseLock');
+});

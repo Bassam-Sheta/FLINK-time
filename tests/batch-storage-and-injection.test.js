@@ -975,5 +975,86 @@ test('SheetRepository.listTimeEntries pre-computes date bounds and filters accur
   assert.deepEqual(bounded.map(e => e.EntryID), ['E1']);
 });
 
+test('JobService.getScriptPropertiesQuotaMetrics calculates byte usage and thresholds accurately', () => {
+  cleanGlobals();
+  const backend = require(codePath);
+  const { JobService } = backend;
+
+  const mockProps = {
+    PROP_1: 'Hello', // 6 + 5 = 11 bytes
+    PROP_2: 'World'  // 6 + 5 = 11 bytes (total 22 bytes)
+  };
+
+  global.PropertiesService = {
+    getScriptProperties() {
+      return {
+        getProperties() {
+          return mockProps;
+        }
+      };
+    }
+  };
+
+  const metrics = JobService.getScriptPropertiesQuotaMetrics();
+  assert.equal(metrics.totalBytes, 22);
+  assert.equal(metrics.keyCount, 2);
+  assert.equal(metrics.maxLimitBytes, 512000);
+  assert.equal(metrics.alertStatus, 'HEALTHY');
+
+  // Master capacity overview attaches scriptProperties
+  const mockSheet = {
+    getName() { return 'Accounts'; },
+    getLastRow() { return 10; },
+    getLastColumn() { return 5; },
+    getMaxRows() { return 100; },
+    getMaxColumns() { return 10; }
+  };
+  backend.MasterRepository.getMasterSpreadsheet = () => ({
+    getSheets() { return [mockSheet]; }
+  });
+  const cap = JobService.getCapacityMetrics();
+  assert.ok(cap.scriptProperties);
+  assert.equal(cap.scriptProperties.totalBytes, 22);
+  assert.equal(cap.scriptProperties.alertStatus, 'HEALTHY');
+});
+
+test('JobService.getScriptPropertiesQuotaMetrics flags WARNING and CRITICAL thresholds', () => {
+  cleanGlobals();
+  const backend = require(codePath);
+  const { JobService } = backend;
+
+  // 80% usage: 409,600 bytes
+  const largeString80 = 'x'.repeat(409600);
+  global.PropertiesService = {
+    getScriptProperties() {
+      return {
+        getProperties() {
+          return { HEAVY_KEY: largeString80 };
+        }
+      };
+    }
+  };
+
+  const metrics80 = JobService.getScriptPropertiesQuotaMetrics();
+  assert.equal(metrics80.alertStatus, 'WARNING');
+  assert.ok(metrics80.utilizationPct >= 75);
+
+  // 90% usage: 460,800 bytes
+  const largeString90 = 'x'.repeat(460800);
+  global.PropertiesService = {
+    getScriptProperties() {
+      return {
+        getProperties() {
+          return { CRITICAL_KEY: largeString90 };
+        }
+      };
+    }
+  };
+
+  const metrics90 = JobService.getScriptPropertiesQuotaMetrics();
+  assert.equal(metrics90.alertStatus, 'CRITICAL');
+  assert.ok(metrics90.utilizationPct >= 85);
+});
+
 
 

@@ -1247,6 +1247,9 @@ function executeApiRequest_(action, requestData, httpMethod = 'POST') {
   if (typeof TimezoneService !== 'undefined' && TimezoneService.beginRequest) {
     TimezoneService.beginRequest();
   }
+  if (typeof SessionService !== 'undefined' && SessionService.beginRequest) {
+    SessionService.beginRequest();
+  }
 
   const perm = getActionPermission_(action);
 
@@ -3165,8 +3168,55 @@ var AuthorizationService = (typeof global !== 'undefined' && global.Authorizatio
 var SessionService = (typeof global !== 'undefined' && global.SessionService) || {
   _sessionCacheMemory: {},
 
+  beginRequest() {
+    this._sessionCacheMemory = {};
+  },
+
   _sessionCacheKey(tokenHash) {
     return 'S:' + String(tokenHash || '');
+  },
+
+  _negativeCacheKey(tokenHash) {
+    return 'NEG_S:' + String(tokenHash || '');
+  },
+
+  _isNegativeSession(tokenHash) {
+    if (!tokenHash) return false;
+    const key = this._negativeCacheKey(tokenHash);
+    const memExpiry = this._sessionCacheMemory[key];
+    if (memExpiry) {
+      if (Date.now() < memExpiry) return true;
+      delete this._sessionCacheMemory[key];
+    }
+    if (typeof CacheService !== 'undefined' && CacheService.getScriptCache) {
+      try {
+        const val = CacheService.getScriptCache().get(key);
+        if (val) return true;
+      } catch (e) {}
+    }
+    return false;
+  },
+
+  _putNegativeSession(tokenHash, ttlSeconds = 60) {
+    if (!tokenHash) return;
+    const key = this._negativeCacheKey(tokenHash);
+    this._sessionCacheMemory[key] = Date.now() + (ttlSeconds * 1000);
+    if (typeof CacheService !== 'undefined' && CacheService.getScriptCache) {
+      try {
+        CacheService.getScriptCache().put(key, '1', ttlSeconds);
+      } catch (e) {}
+    }
+  },
+
+  _deleteNegativeSession(tokenHash) {
+    if (!tokenHash) return;
+    const key = this._negativeCacheKey(tokenHash);
+    delete this._sessionCacheMemory[key];
+    if (typeof CacheService !== 'undefined' && CacheService.getScriptCache) {
+      try {
+        CacheService.getScriptCache().remove(key);
+      } catch (e) {}
+    }
   },
 
   _getCachedSession(tokenHash) {
@@ -3186,6 +3236,7 @@ var SessionService = (typeof global !== 'undefined' && global.SessionService) ||
 
   _putCachedSession(tokenHash, session) {
     if (!tokenHash || !session) return;
+    this._deleteNegativeSession(tokenHash);
     const key = this._sessionCacheKey(tokenHash);
     const raw = JSON.stringify(session);
     if (typeof CacheService !== 'undefined' && CacheService.getScriptCache) {
@@ -3201,6 +3252,21 @@ var SessionService = (typeof global !== 'undefined' && global.SessionService) ||
       try { CacheService.getScriptCache().remove(key); } catch (e) {}
     }
     delete this._sessionCacheMemory[key];
+  },
+
+  _revokeAndEvictSession(sessionId, tokenHash, reason = '') {
+    if (tokenHash) {
+      this._deleteCachedSession(tokenHash);
+      this._putNegativeSession(tokenHash);
+    }
+    if (sessionId) {
+      const updates = {
+        Revoked: true,
+        RevokedAt: new Date().toISOString()
+      };
+      if (reason) updates.RevokeReason = reason;
+      MasterRepository.updateSession(sessionId, updates);
+    }
   },
 
   /**
@@ -3310,12 +3376,20 @@ var SessionService = (typeof global !== 'undefined' && global.SessionService) ||
     }
 
     const tokenHash = SecurityService.hashToken(rawToken.trim());
+    if (this._isNegativeSession(tokenHash)) {
+      throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'Invalid or expired session.', 401);
+    }
+
     let session = this._getCachedSession(tokenHash);
     if (!session) {
       session = MasterRepository.findSessionByTokenHashFast
         ? MasterRepository.findSessionByTokenHashFast(tokenHash)
         : MasterRepository.findSessionByTokenHash(tokenHash);
-      if (session) this._putCachedSession(tokenHash, session);
+      if (session) {
+        this._putCachedSession(tokenHash, session);
+      } else {
+        this._putNegativeSession(tokenHash);
+      }
     }
 
     if (!session) {
@@ -3328,10 +3402,7 @@ var SessionService = (typeof global !== 'undefined' && global.SessionService) ||
     const createdAt = new Date(session.CreatedAt).getTime();
 
     if ([expiresAt, lastSeenAt, createdAt].some(v => !Number.isFinite(v))) {
-      MasterRepository.updateSession(session.SessionID, {
-        Revoked: true,
-        RevokedAt: new Date().toISOString()
-      });
+      this._revokeAndEvictSession(session.SessionID, tokenHash, 'INVALID_TIMESTAMPS');
       throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'Session record is invalid. Please sign in again.', 401);
     }
 
@@ -3355,10 +3426,7 @@ var SessionService = (typeof global !== 'undefined' && global.SessionService) ||
       (now - lastSeenAt) > idleTimeoutMs ||
       now > absoluteExpiresAt
     ) {
-      MasterRepository.updateSession(session.SessionID, {
-        Revoked: true,
-        RevokedAt: new Date().toISOString()
-      });
+      this._revokeAndEvictSession(session.SessionID, tokenHash, 'EXPIRED');
       throw new AppError(ERROR_CODES.SESSION_EXPIRED, 'Session has expired due to timeout. Please sign in again.', 401);
     }
 
@@ -3369,26 +3437,17 @@ var SessionService = (typeof global !== 'undefined' && global.SessionService) ||
       : { account: MasterRepository.findAccountById(session.UserID), accesses: [] };
     const user = userBundle.account;
     if (!user) {
-      MasterRepository.updateSession(session.SessionID, {
-        Revoked: true,
-        RevokedAt: new Date().toISOString()
-      });
+      this._revokeAndEvictSession(session.SessionID, tokenHash, 'ACCOUNT_DELETED');
       throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'User account no longer exists.', 401);
     }
 
     if (user.Status === CONSTANTS.ACCOUNT_STATUS.LOCKED) {
-      MasterRepository.updateSession(session.SessionID, {
-        Revoked: true,
-        RevokedAt: new Date().toISOString()
-      });
+      this._revokeAndEvictSession(session.SessionID, tokenHash, 'ACCOUNT_LOCKED');
       throw new AppError(ERROR_CODES.ACCOUNT_LOCKED, 'Account is temporarily locked. Sign in again after it is unlocked.', 403);
     }
 
     if (user.Status !== CONSTANTS.ACCOUNT_STATUS.ACTIVE) {
-      MasterRepository.updateSession(session.SessionID, {
-        Revoked: true,
-        RevokedAt: new Date().toISOString()
-      });
+      this._revokeAndEvictSession(session.SessionID, tokenHash, 'ACCOUNT_PASSIVE');
       throw new AppError(ERROR_CODES.ACCOUNT_PASSIVE, 'Account is inactive or suspended.', 403);
     }
 
@@ -3396,6 +3455,7 @@ var SessionService = (typeof global !== 'undefined' && global.SessionService) ||
     const sessionEpoch = Number(session.AccountEpoch) > 0 ? Number(session.AccountEpoch) : 1;
     if (sessionEpoch !== currentEpoch) {
       this._deleteCachedSession(tokenHash);
+      this._putNegativeSession(tokenHash);
       throw new AppError(
         ERROR_CODES.AUTH_REQUIRED,
         'Session has been revoked. Please sign in again.',
@@ -3408,11 +3468,7 @@ var SessionService = (typeof global !== 'undefined' && global.SessionService) ||
       normalizedClientType !== 'WEB' &&
       normalizedClientType !== 'SETUP_WIZARD'
     ) {
-      MasterRepository.updateSession(session.SessionID, {
-        Revoked: true,
-        RevokedAt: new Date().toISOString(),
-        RevokeReason: 'UNSUPPORTED_CLIENT_TYPE'
-      });
+      this._revokeAndEvictSession(session.SessionID, tokenHash, 'UNSUPPORTED_CLIENT_TYPE');
       throw new AppError(
         ERROR_CODES.AUTH_REQUIRED,
         'Session authentication channel is no longer supported. Please sign in again.',
@@ -3440,11 +3496,7 @@ var SessionService = (typeof global !== 'undefined' && global.SessionService) ||
           );
         }
       } catch (identityErr) {
-        MasterRepository.updateSession(session.SessionID, {
-          Revoked: true,
-          RevokedAt: new Date().toISOString(),
-          RevokeReason: 'GOOGLE_IDENTITY_MISMATCH'
-        });
+        this._revokeAndEvictSession(session.SessionID, tokenHash, 'GOOGLE_IDENTITY_MISMATCH');
         throw new AppError(
           ERROR_CODES.AUTH_REQUIRED,
           'Google Workspace identity changed. Please sign in again.',
@@ -3489,13 +3541,7 @@ var SessionService = (typeof global !== 'undefined' && global.SessionService) ||
     const session = MasterRepository.findSessionByTokenHashFast
       ? MasterRepository.findSessionByTokenHashFast(tokenHash)
       : MasterRepository.findSessionByTokenHash(tokenHash);
-    if (session) {
-      MasterRepository.updateSession(session.SessionID, {
-        Revoked: true,
-        RevokedAt: new Date().toISOString()
-      });
-    }
-    this._deleteCachedSession(tokenHash);
+    this._revokeAndEvictSession(session ? session.SessionID : null, tokenHash, 'LOGOUT');
   },
 
   /**
@@ -10166,6 +10212,15 @@ var ApprovalService = (typeof global !== 'undefined' && global.ApprovalService) 
     try {
       const timesheet = SheetRepository.getTimesheet(workspaceId, timesheetId);
       if (!timesheet) throw new AppError(ERROR_CODES.NOT_FOUND, `Timesheet ${timesheetId} not found.`);
+
+      if (timesheet.UserID === authContext.userId) {
+        throw new AppError(
+          ERROR_CODES.PERMISSION_DENIED,
+          'Self-review is forbidden. Timesheets must be reviewed by another administrator.',
+          403
+        );
+      }
+
       this._assertTransition(
         timesheet.Status,
         CONSTANTS.TIMESHEET_STATUS.REJECTED
@@ -11779,22 +11834,29 @@ var UserService = (typeof global !== 'undefined' && global.UserService) || {
       ['username', 'displayName', 'role', 'email']
     );
 
+    const username = Validation.validateUsername(userPayload.username);
+    const role = Validation.validateRole(userPayload.role);
+    if (role === CONSTANTS.ROLES.SUPER_ADMIN) {
+      throw new AppError(
+        ERROR_CODES.PERMISSION_DENIED,
+        'SUPER_ADMIN accounts cannot be created through generic user CRUD.',
+        403
+      );
+    }
+    const displayName = Validation.sanitizeCellValue(userPayload.displayName.trim());
+    const email = Validation.validateEmail(userPayload.email);
+    const primaryWorkspaceId = userPayload.primaryWorkspaceId || '';
+
+    const userId = Validation.generateId('USR');
+    const temporaryPassword = userPayload.temporaryPassword || userPayload.password || SecurityService.generateTemporaryPassword();
+    Validation.validatePassword(temporaryPassword);
+
+    // Compute CPU-intensive PBKDF2 hash OUTSIDE the lock (S6) to eliminate heavy CPU iterations under the lock
+    const passwordHash = SecurityService.hashPassword(temporaryPassword);
+
     const lock = LockService.getScriptLock();
     lock.waitLock(10000);
     try {
-      const username = Validation.validateUsername(userPayload.username);
-      const role = Validation.validateRole(userPayload.role);
-      if (role === CONSTANTS.ROLES.SUPER_ADMIN) {
-        throw new AppError(
-          ERROR_CODES.PERMISSION_DENIED,
-          'SUPER_ADMIN accounts cannot be created through generic user CRUD.',
-          403
-        );
-      }
-      const displayName = Validation.sanitizeCellValue(userPayload.displayName.trim());
-      const email = Validation.validateEmail(userPayload.email);
-      const primaryWorkspaceId = userPayload.primaryWorkspaceId || '';
-
       // Verify username uniqueness inside lock
       const existing = MasterRepository.findAccountByUsername(username);
       if (existing) {
@@ -11808,10 +11870,6 @@ var UserService = (typeof global !== 'undefined' && global.UserService) || {
           throw new AppError(ERROR_CODES.CONFLICT, `Email '${email}' is already registered to another account.`);
         }
       }
-
-      const userId = Validation.generateId('USR');
-      const temporaryPassword = userPayload.temporaryPassword || userPayload.password || SecurityService.generateTemporaryPassword();
-      Validation.validatePassword(temporaryPassword);
 
       if (primaryWorkspaceId) {
         const primaryWorkspace = MasterRepository.getWorkspace(primaryWorkspaceId);
@@ -11827,7 +11885,6 @@ var UserService = (typeof global !== 'undefined' && global.UserService) || {
         }
       }
 
-      const passwordHash = SecurityService.hashPassword(temporaryPassword);
       const nowDate = new Date();
       const now = nowDate.toISOString();
       const initialPasswordExpiresAt = new Date(
@@ -12812,7 +12869,27 @@ var SetupService = (typeof global !== 'undefined' && global.SetupService) || {
       throw new AppError(ERROR_CODES.CONFLICT, 'Super Admin account already exists. Please log in.');
     }
 
-    const cleanUsername = String(payload.username).trim().toLowerCase();
+    const cleanUsername = typeof Validation.validateUsername === 'function'
+      ? Validation.validateUsername(payload.username)
+      : String(payload.username || '').trim().toLowerCase();
+    if (cleanUsername.length < 3 || cleanUsername.length > 50 || !/^[a-z0-9_.\-]+$/.test(cleanUsername)) {
+      throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'Username must be between 3 and 50 characters and contain only letters, numbers, underscores, dashes, and periods.');
+    }
+
+    const cleanFullName = typeof Validation.sanitizeCellValue === 'function'
+      ? Validation.sanitizeCellValue(String(payload.fullName || '').trim())
+      : String(payload.fullName || '').trim();
+    if (!cleanFullName || cleanFullName.length > 100) {
+      throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'Full name must be between 1 and 100 characters.');
+    }
+
+    if (typeof MasterRepository.findAccountByEmail === 'function') {
+      const existingEmail = MasterRepository.findAccountByEmail(googleEmail);
+      if (existingEmail && existingEmail.Status !== CONSTANTS.ACCOUNT_STATUS.DELETED) {
+        throw new AppError(ERROR_CODES.CONFLICT, 'An account with this email already exists. Please log in.');
+      }
+    }
+
     const adminUserId = Validation.generateId('USR');
     const hash = SecurityService.hashPassword(payload.password);
     const now = new Date().toISOString();
@@ -12820,7 +12897,7 @@ var SetupService = (typeof global !== 'undefined' && global.SetupService) || {
     const accountRecord = {
       UserID: adminUserId,
       Username: cleanUsername,
-      DisplayName: String(payload.fullName).trim(),
+      DisplayName: cleanFullName,
       Role: CONSTANTS.ROLES.SUPER_ADMIN,
       Status: CONSTANTS.ACCOUNT_STATUS.ACTIVE,
       PrimaryWorkspaceID: '',
@@ -13952,11 +14029,29 @@ var IntegrityService = (typeof global !== 'undefined' && global.IntegrityService
       worstCapacityStatus = 'UNKNOWN';
     }
 
+    // 17. Script Properties storage quota
+    let scriptPropsQuotaStatus = 'HEALTHY';
+    try {
+      const propsMetrics = JobService.getScriptPropertiesQuotaMetrics();
+      scriptPropsQuotaStatus = propsMetrics.alertStatus;
+      addCheck(
+        'script_properties_quota',
+        'Script Properties Storage Quota',
+        propsMetrics.alertStatus !== 'CRITICAL',
+        propsMetrics.alertStatus !== 'CRITICAL'
+          ? `Script Properties status ${propsMetrics.alertStatus}; ${propsMetrics.totalBytes} bytes used (${propsMetrics.utilizationPct}% of 500 KB quota, ${propsMetrics.keyCount} keys)`
+          : `Critical Script Properties quota utilization: ${propsMetrics.totalBytes} bytes (${propsMetrics.utilizationPct}% of 500 KB quota)`
+      );
+    } catch (e) {
+      addCheck('script_properties_quota', 'Script Properties Storage Quota', false, e.message);
+      scriptPropsQuotaStatus = 'UNKNOWN';
+    }
+
     const passCount = checks.filter(c => c.passed).length;
     const failCount = checks.length - passCount;
     const overallStatus = failCount === 0
       ? 'HEALTHY'
-      : (checks.some(c => c.id === 'cell_capacity_limit' && !c.passed) ? 'CRITICAL' : 'WARNING');
+      : (checks.some(c => (c.id === 'cell_capacity_limit' || c.id === 'script_properties_quota') && !c.passed) ? 'CRITICAL' : 'WARNING');
 
     try {
       MasterRepository.appendRow(CONSTANTS.MASTER_TABS.SYSTEM_HEALTH_HISTORY, {
@@ -14102,6 +14197,9 @@ var JobService = (typeof global !== 'undefined' && global.JobService) || {
     }
     if (typeof TimezoneService !== 'undefined' && TimezoneService.beginRequest) {
       TimezoneService.beginRequest();
+    }
+    if (typeof SessionService !== 'undefined' && SessionService.beginRequest) {
+      SessionService.beginRequest();
     }
   },
 
@@ -14554,7 +14652,7 @@ var JobService = (typeof global !== 'undefined' && global.JobService) || {
       recommendation = 'ADVISORY: Capacity >= 60%. Monitor entry growth rate.';
     }
 
-    return {
+    const result = {
       spreadsheetName: name,
       workspaceId: workspaceId || 'MASTER',
       totalCells,
@@ -14565,6 +14663,54 @@ var JobService = (typeof global !== 'undefined' && global.JobService) || {
       totalRows,
       totalColumns,
       tabBreakdown,
+      checkedAtUTC: new Date().toISOString()
+    };
+
+    if (!workspaceId) {
+      result.scriptProperties = this.getScriptPropertiesQuotaMetrics();
+    }
+
+    return result;
+  },
+
+  /**
+   * Evaluates Script Properties storage against Google Apps Script's 500 KB limit.
+   */
+  getScriptPropertiesQuotaMetrics() {
+    let totalBytes = 0;
+    let keyCount = 0;
+    if (typeof PropertiesService !== 'undefined' && PropertiesService.getScriptProperties) {
+      try {
+        const props = PropertiesService.getScriptProperties();
+        const all = typeof props.getProperties === 'function' ? props.getProperties() : {};
+        for (const [k, v] of Object.entries(all || {})) {
+          const strVal = String(v || '');
+          totalBytes += (k.length + strVal.length);
+          keyCount++;
+        }
+      } catch (e) {}
+    }
+    const maxLimitBytes = 500 * 1024; // 512,000 bytes Google Apps Script property quota
+    const utilizationPct = parseFloat(((totalBytes / maxLimitBytes) * 100).toFixed(2));
+    let alertStatus = 'HEALTHY';
+    let recommendation = 'Script Properties capacity within normal operating thresholds.';
+    if (utilizationPct >= 85) {
+      alertStatus = 'CRITICAL';
+      recommendation = 'CRITICAL: Script Properties storage >= 85% of 500 KB quota. Prune historical checkpoints and expired entries immediately.';
+    } else if (utilizationPct >= 75) {
+      alertStatus = 'WARNING';
+      recommendation = 'WARNING: Script Properties storage >= 75% of 500 KB quota. Checkpoint or token accumulation requires inspection.';
+    } else if (utilizationPct >= 60) {
+      alertStatus = 'ADVISORY';
+      recommendation = 'ADVISORY: Script Properties storage >= 60% of 500 KB quota. Monitor property growth rate.';
+    }
+    return {
+      totalBytes,
+      maxLimitBytes,
+      utilizationPct,
+      alertStatus,
+      recommendation,
+      keyCount,
       checkedAtUTC: new Date().toISOString()
     };
   },
@@ -15983,7 +16129,10 @@ function prepareInstallationCore_() {
   }
 
   const ownerEmail = getBoundMasterSheetOwnerEmail_(spreadsheet);
-  const spreadsheetId = spreadsheet.getId();
+  const spreadsheetId = String(spreadsheet.getId() || '').trim();
+  if (!spreadsheetId || !/^[a-zA-Z0-9_-]{10,120}$/.test(spreadsheetId)) {
+    throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'Invalid Master Spreadsheet identifier.', 400);
+  }
   const props = PropertiesService.getScriptProperties();
   const configuredSpreadsheetId = String(
     props.getProperty('MASTER_SPREADSHEET_ID') || ''
