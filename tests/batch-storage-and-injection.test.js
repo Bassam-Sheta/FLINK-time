@@ -889,4 +889,91 @@ test('DashboardService._workspaceCurrentTotals bounds listTimeEntries query with
   assert.equal(totals.weekSeconds, 3600);
 });
 
+test('SheetRepository single-entity lookups resolve via findRowByKey and return null on empty ID', () => {
+  cleanGlobals();
+  const backend = require(codePath);
+  const { SheetRepository } = backend;
+
+  const mockTables = {
+    'W1::Members': [
+      { _rowIndex: 2, UserID: 'USR_1', DisplayName: 'Alice' }
+    ],
+    'W1::Clients': [
+      { _rowIndex: 2, ClientID: 'CLI_1', ClientName: 'Acme Corp' }
+    ],
+    'W1::Projects': [
+      { _rowIndex: 2, ProjectID: 'PRJ_1', ProjectName: 'Alpha' }
+    ],
+    'W1::Tasks': [
+      { _rowIndex: 2, TaskID: 'TSK_1', TaskName: 'Coding' }
+    ],
+    'W1::Tags': [
+      { _rowIndex: 2, TagID: 'TAG_1', TagName: 'Frontend' }
+    ],
+    'W1::ActiveTimers': [
+      { _rowIndex: 2, UserID: 'USR_1', StartedAtUTC: '2026-10-01T08:00:00.000Z' }
+    ]
+  };
+
+  SheetRepository.getTableData = (wsId, tabName) => {
+    const key = `${wsId}::${tabName}`;
+    return { rows: mockTables[key] || [] };
+  };
+
+  // Positive lookups
+  assert.equal(SheetRepository.getMember('W1', 'USR_1').DisplayName, 'Alice');
+  assert.equal(SheetRepository.getClient('W1', 'CLI_1').ClientName, 'Acme Corp');
+  assert.equal(SheetRepository.getProject('W1', 'PRJ_1').ProjectName, 'Alpha');
+  assert.equal(SheetRepository.getTask('W1', 'TSK_1').TaskName, 'Coding');
+  assert.equal(SheetRepository.getTag('W1', 'TAG_1').TagName, 'Frontend');
+  assert.equal(SheetRepository.getActiveTimer('W1', 'USR_1').StartedAtUTC, '2026-10-01T08:00:00.000Z');
+
+  // Null/missing ID returns null without crashing
+  assert.equal(SheetRepository.getMember('W1', ''), null);
+  assert.equal(SheetRepository.getClient('W1', null), null);
+  assert.equal(SheetRepository.getProject('W1', undefined), null);
+  assert.equal(SheetRepository.getTask('W1', ''), null);
+  assert.equal(SheetRepository.getTag('W1', ''), null);
+  assert.equal(SheetRepository.getActiveTimer('W1', ''), null);
+
+  // Non-existent ID returns null
+  assert.equal(SheetRepository.getMember('W1', 'NONEXISTENT'), null);
+  assert.equal(SheetRepository.getProject('W1', 'NONEXISTENT'), null);
+});
+
+test('SheetRepository.listTimeEntries pre-computes date bounds and filters accurately', () => {
+  cleanGlobals();
+  const backend = require(codePath);
+  const { SheetRepository } = backend;
+
+  const entries = [
+    { EntryID: 'E1', Status: 'OPEN', StartUTC: '2026-10-01T10:00:00.000Z', EndUTC: '2026-10-01T11:00:00.000Z' },
+    { EntryID: 'E2', Status: 'DELETED', StartUTC: '2026-10-02T10:00:00.000Z', EndUTC: '2026-10-02T11:00:00.000Z' },
+    { EntryID: 'E3', Status: 'OPEN', StartUTC: '2026-10-03T10:00:00.000Z', EndUTC: '2026-10-03T11:00:00.000Z' },
+    { EntryID: 'E4', Status: 'OPEN', StartUTC: '2026-10-05T10:00:00.000Z', EndUTC: '2026-10-05T11:00:00.000Z' }
+  ];
+
+  SheetRepository.getTableData = () => ({ rows: entries });
+
+  // Filter startDate only
+  const afterOct2 = SheetRepository.listTimeEntries('W1', {
+    startDate: '2026-10-02T00:00:00.000Z'
+  });
+  assert.deepEqual(afterOct2.map(e => e.EntryID), ['E3', 'E4']);
+
+  // Filter endDate only
+  const beforeOct4 = SheetRepository.listTimeEntries('W1', {
+    endDate: '2026-10-04T00:00:00.000Z'
+  });
+  assert.deepEqual(beforeOct4.map(e => e.EntryID), ['E1', 'E3']);
+
+  // Both startDate and endDate
+  const bounded = SheetRepository.listTimeEntries('W1', {
+    startDate: '2026-10-01T00:00:00.000Z',
+    endDate: '2026-10-02T00:00:00.000Z'
+  });
+  assert.deepEqual(bounded.map(e => e.EntryID), ['E1']);
+});
+
+
 

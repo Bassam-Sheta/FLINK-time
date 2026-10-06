@@ -6480,8 +6480,8 @@ var SheetRepository = (typeof global !== 'undefined' && global.SheetRepository) 
   },
 
   getMember(workspaceId, userId) {
-    const { rows } = this.getTableData(workspaceId, CONSTANTS.WORKSPACE_TABS.MEMBERS);
-    return rows.find(m => m.UserID === userId) || null;
+    if (!userId) return null;
+    return this.findRowByKey(workspaceId, CONSTANTS.WORKSPACE_TABS.MEMBERS, 'UserID', userId);
   },
 
   addMember(workspaceId, memberData) {
@@ -6489,8 +6489,7 @@ var SheetRepository = (typeof global !== 'undefined' && global.SheetRepository) 
   },
 
   updateMember(workspaceId, userId, updates) {
-    const { rows } = this.getTableData(workspaceId, CONSTANTS.WORKSPACE_TABS.MEMBERS);
-    const mem = rows.find(m => m.UserID === userId);
+    const mem = this.getMember(workspaceId, userId);
     if (mem) {
       this.updateRow(workspaceId, CONSTANTS.WORKSPACE_TABS.MEMBERS, mem._rowIndex, updates);
     }
@@ -6504,8 +6503,8 @@ var SheetRepository = (typeof global !== 'undefined' && global.SheetRepository) 
   },
 
   getClient(workspaceId, clientId) {
-    const { rows } = this.getTableData(workspaceId, CONSTANTS.WORKSPACE_TABS.CLIENTS);
-    return rows.find(client => client.ClientID === clientId) || null;
+    if (!clientId) return null;
+    return this.findRowByKey(workspaceId, CONSTANTS.WORKSPACE_TABS.CLIENTS, 'ClientID', clientId);
   },
 
   createClient(workspaceId, clientData) {
@@ -6518,8 +6517,8 @@ var SheetRepository = (typeof global !== 'undefined' && global.SheetRepository) 
   },
 
   getProject(workspaceId, projectId) {
-    const { rows } = this.getTableData(workspaceId, CONSTANTS.WORKSPACE_TABS.PROJECTS);
-    return rows.find(p => p.ProjectID === projectId) || null;
+    if (!projectId) return null;
+    return this.findRowByKey(workspaceId, CONSTANTS.WORKSPACE_TABS.PROJECTS, 'ProjectID', projectId);
   },
 
   createProject(workspaceId, projectData) {
@@ -6527,8 +6526,7 @@ var SheetRepository = (typeof global !== 'undefined' && global.SheetRepository) 
   },
 
   updateProject(workspaceId, projectId, updates) {
-    const { rows } = this.getTableData(workspaceId, CONSTANTS.WORKSPACE_TABS.PROJECTS);
-    const proj = rows.find(p => p.ProjectID === projectId);
+    const proj = this.getProject(workspaceId, projectId);
     if (!proj) throw new AppError(ERROR_CODES.NOT_FOUND, `Project ${projectId} not found.`);
     this.updateRow(workspaceId, CONSTANTS.WORKSPACE_TABS.PROJECTS, proj._rowIndex, updates);
     return { ...proj, ...updates };
@@ -6541,8 +6539,8 @@ var SheetRepository = (typeof global !== 'undefined' && global.SheetRepository) 
   },
 
   getTask(workspaceId, taskId) {
-    const { rows } = this.getTableData(workspaceId, CONSTANTS.WORKSPACE_TABS.TASKS);
-    return rows.find(t => t.TaskID === taskId) || null;
+    if (!taskId) return null;
+    return this.findRowByKey(workspaceId, CONSTANTS.WORKSPACE_TABS.TASKS, 'TaskID', taskId);
   },
 
   createTask(workspaceId, taskData) {
@@ -6555,8 +6553,8 @@ var SheetRepository = (typeof global !== 'undefined' && global.SheetRepository) 
   },
 
   getTag(workspaceId, tagId) {
-    const { rows } = this.getTableData(workspaceId, CONSTANTS.WORKSPACE_TABS.TAGS);
-    return rows.find(t => t.TagID === tagId) || null;
+    if (!tagId) return null;
+    return this.findRowByKey(workspaceId, CONSTANTS.WORKSPACE_TABS.TAGS, 'TagID', tagId);
   },
 
   listAllUserProjectAccess(workspaceId) {
@@ -6576,8 +6574,8 @@ var SheetRepository = (typeof global !== 'undefined' && global.SheetRepository) 
   /* ------------------- ACTIVE TIMERS ------------------- */
 
   getActiveTimer(workspaceId, userId) {
-    const { rows } = this.getTableData(workspaceId, CONSTANTS.WORKSPACE_TABS.ACTIVE_TIMERS);
-    return rows.find(t => t.UserID === userId) || null;
+    if (!userId) return null;
+    return this.findRowByKey(workspaceId, CONSTANTS.WORKSPACE_TABS.ACTIVE_TIMERS, 'UserID', userId);
   },
 
   listActiveTimers(workspaceId) {
@@ -6590,8 +6588,7 @@ var SheetRepository = (typeof global !== 'undefined' && global.SheetRepository) 
   },
 
   deleteActiveTimer(workspaceId, userId) {
-    const { rows } = this.getTableData(workspaceId, CONSTANTS.WORKSPACE_TABS.ACTIVE_TIMERS);
-    const timer = rows.find(t => t.UserID === userId);
+    const timer = this.getActiveTimer(workspaceId, userId);
     if (!timer) return false;
     this.deleteRow(workspaceId, CONSTANTS.WORKSPACE_TABS.ACTIVE_TIMERS, timer._rowIndex);
     return true;
