@@ -5152,13 +5152,32 @@ var TrackingPolicyService = (typeof global !== 'undefined' && global.TrackingPol
 var MasterRepository = (typeof global !== 'undefined' && global.MasterRepository) || {
   spreadsheetId: null,
   _requestCache: {},
+  _headerCache: {},
   _userCacheMemory: {},
 
   beginRequest() {
     this._requestCache = {};
+    this._headerCache = {};
     if (typeof TimezoneService !== 'undefined' && TimezoneService._clearCache) {
       TimezoneService._clearCache();
     }
+  },
+
+  _getHeaders(tabName, sheet) {
+    if (!this._headerCache) this._headerCache = {};
+    if (this._headerCache[tabName]) {
+      return this._headerCache[tabName];
+    }
+    if (sheet && sheet.getRange) {
+      const lastCol = typeof sheet.getLastColumn === 'function' ? sheet.getLastColumn() : (MASTER_SCHEMA[tabName] ? MASTER_SCHEMA[tabName].length : 15);
+      const headers = sheet
+        .getRange(1, 1, 1, Math.max(1, lastCol))
+        .getValues()[0]
+        .map(h => String(h).trim());
+      this._headerCache[tabName] = headers;
+      return headers;
+    }
+    return MASTER_SCHEMA[tabName] || [];
   },
 
   _userCacheKey(userId) {
@@ -5255,6 +5274,8 @@ var MasterRepository = (typeof global !== 'undefined' && global.MasterRepository
     }
 
     const headers = values[0].map(h => String(h).trim());
+    if (!this._headerCache) this._headerCache = {};
+    this._headerCache[tabName] = headers;
     const rows = [];
     for (let r = 1; r < values.length; r++) {
       const rowObj = { _rowIndex: r + 1 };
@@ -5444,10 +5465,7 @@ var MasterRepository = (typeof global !== 'undefined' && global.MasterRepository
   updateRow(tabName, rowIndex, updates) {
     const ss = this.getMasterSpreadsheet();
     const sheet = ss.getSheetByName(tabName);
-    const headers = sheet
-      .getRange(1, 1, 1, sheet.getLastColumn())
-      .getValues()[0]
-      .map(h => String(h).trim());
+    const headers = this._getHeaders(tabName, sheet);
 
     const changes = Object.entries(updates)
       .map(([colName, val]) => ({
@@ -6108,13 +6126,33 @@ var MasterRepository = (typeof global !== 'undefined' && global.MasterRepository
 
 var SheetRepository = (typeof global !== 'undefined' && global.SheetRepository) || {
   _requestCache: {},
+  _headerCache: {},
 
   beginRequest() {
     this._requestCache = {};
+    this._headerCache = {};
   },
 
   _cacheKey(workspaceId, tabName) {
     return String(workspaceId) + '::' + String(tabName);
+  },
+
+  _getHeaders(workspaceId, tabName, sheet) {
+    if (!this._headerCache) this._headerCache = {};
+    const key = this._cacheKey(workspaceId, tabName);
+    if (this._headerCache[key]) {
+      return this._headerCache[key];
+    }
+    if (sheet && sheet.getRange) {
+      const lastCol = typeof sheet.getLastColumn === 'function' ? sheet.getLastColumn() : (WORKSPACE_SCHEMA[tabName] ? WORKSPACE_SCHEMA[tabName].length : 15);
+      const headers = sheet
+        .getRange(1, 1, 1, Math.max(1, lastCol))
+        .getValues()[0]
+        .map(h => String(h).trim());
+      this._headerCache[key] = headers;
+      return headers;
+    }
+    return WORKSPACE_SCHEMA[tabName] || [];
   },
 
   _invalidateTable(workspaceId, tabName) {
@@ -6148,6 +6186,8 @@ var SheetRepository = (typeof global !== 'undefined' && global.SheetRepository) 
     }
 
     const headers = values[0].map(h => String(h).trim());
+    if (!this._headerCache) this._headerCache = {};
+    this._headerCache[cacheKey] = headers;
     const rows = [];
     for (let r = 1; r < values.length; r++) {
       const obj = { _rowIndex: r + 1 };
@@ -6292,10 +6332,7 @@ var SheetRepository = (typeof global !== 'undefined' && global.SheetRepository) 
   updateRow(workspaceId, tabName, rowIndex, updates) {
     const ss = WorkspaceRouter.resolveSpreadsheet(workspaceId);
     const sheet = ss.getSheetByName(tabName);
-    const headers = sheet
-      .getRange(1, 1, 1, sheet.getLastColumn())
-      .getValues()[0]
-      .map(h => String(h).trim());
+    const headers = this._getHeaders(workspaceId, tabName, sheet);
 
     const changes = Object.entries(updates)
       .map(([colName, val]) => ({

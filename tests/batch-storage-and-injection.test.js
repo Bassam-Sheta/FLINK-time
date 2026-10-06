@@ -340,3 +340,104 @@ test('MasterRepository.appendRows batches insertion with setValues and invalidat
   assert.equal(writtenValues[0][nameColIdx], "' @Alice");
   assert.equal(writtenValues[1][nameColIdx], 'Bob Smith');
 });
+
+test('SheetRepository.updateRow reuses _headerCache across multiple updates in a request', () => {
+  cleanGlobals();
+
+  let headerReads = 0;
+  const mockSheet = {
+    getLastRow() { return 10; },
+    getLastColumn() { return 10; },
+    getRange(row, col, numRows, numCols) {
+      if (row === 1 && numRows === 1) {
+        headerReads++;
+        return {
+          getValues() {
+            return [['EntryID', 'UserID', 'ProjectID', 'DurationSeconds', 'Description']];
+          }
+        };
+      }
+      return {
+        setValues() {}
+      };
+    }
+  };
+
+  global.WorkspaceRouter = {
+    resolveSpreadsheet() {
+      return {
+        getSheetByName() { return mockSheet; }
+      };
+    }
+  };
+
+  const backend = require(codePath);
+  const { SheetRepository } = backend;
+
+  SheetRepository.beginRequest();
+  assert.equal(headerReads, 0);
+
+  // First update reads and caches headers
+  SheetRepository.updateRow('W1', 'TimeEntries', 2, { Description: 'First' });
+  assert.equal(headerReads, 1);
+
+  // Second update reuses cached headers without re-querying row 1
+  SheetRepository.updateRow('W1', 'TimeEntries', 3, { Description: 'Second' });
+  assert.equal(headerReads, 1);
+
+  // Third update on same tab still uses cache
+  SheetRepository.updateRow('W1', 'TimeEntries', 4, { Description: 'Third' });
+  assert.equal(headerReads, 1);
+
+  // beginRequest resets cache
+  SheetRepository.beginRequest();
+  SheetRepository.updateRow('W1', 'TimeEntries', 5, { Description: 'Fourth' });
+  assert.equal(headerReads, 2);
+});
+
+test('MasterRepository.updateRow reuses _headerCache across multiple updates in a request', () => {
+  cleanGlobals();
+
+  let headerReads = 0;
+  const mockSheet = {
+    getLastRow() { return 10; },
+    getLastColumn() { return 10; },
+    getRange(row, col, numRows, numCols) {
+      if (row === 1 && numRows === 1) {
+        headerReads++;
+        return {
+          getValues() {
+            return [['UserID', 'Username', 'DisplayName', 'Email', 'Role', 'Status']];
+          }
+        };
+      }
+      return {
+        setValues() {}
+      };
+    }
+  };
+
+  const backend = require(codePath);
+  const { MasterRepository } = backend;
+
+  MasterRepository.getMasterSpreadsheet = () => ({
+    getSheetByName() { return mockSheet; }
+  });
+
+  MasterRepository.beginRequest();
+  assert.equal(headerReads, 0);
+
+  // First update reads and caches headers
+  MasterRepository.updateRow('Accounts', 2, { DisplayName: 'Alice Updated' });
+  assert.equal(headerReads, 1);
+
+  // Second update reuses cached headers
+  MasterRepository.updateRow('Accounts', 3, { DisplayName: 'Bob Updated' });
+  assert.equal(headerReads, 1);
+
+  // beginRequest resets cache
+  MasterRepository.beginRequest();
+  MasterRepository.updateRow('Accounts', 4, { DisplayName: 'Charlie Updated' });
+  assert.equal(headerReads, 2);
+});
+

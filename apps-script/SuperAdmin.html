@@ -1758,7 +1758,7 @@
         const status = data.status || 'OPEN';
         const statusBadge = document.getElementById('timesheetStatusBadge');
         statusBadge.innerText = status;
-        statusBadge.className = `badge badge-${status.toLowerCase()}`;
+        statusBadge.className = `badge badge-${safeClassToken(status, 'open')}`;
 
         const labels = Array.isArray(data.dayLabels) ? data.dayLabels : [];
         for (let i = 0; i < 7; i++) {
@@ -2599,16 +2599,17 @@
     function renderWizardStep(step) {
       wizardCurrentStep = step;
       const bar = document.getElementById('wizardStepsBar');
-      bar.innerHTML = '';
+      const stepItems = [];
       for (let s = 1; s <= 9; s++) {
         const activeClass = s === step ? 'active' : (s < step ? 'done' : '');
-        bar.innerHTML += `
+        stepItems.push(`
           <div class="wizard-step ${activeClass}">
             <div class="wizard-step-circle">${s < step ? '✓' : s}</div>
             <div>Step ${s}</div>
           </div>
-        `;
+        `);
       }
+      bar.innerHTML = stepItems.join('');
 
       const content = document.getElementById('wizardStepContent');
       if (step === 1) {
