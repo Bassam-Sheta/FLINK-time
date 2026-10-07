@@ -64,6 +64,7 @@ test('WEB session creation stores verified Google email in existing ClientLabel 
   };
   global.Validation = { generateId() { return 'S1'; } };
   global.MasterRepository = {
+    _withSessionMutationLock(fn) { return fn(); },
     findAccountById() {
       return {
         UserID:'U1', Email:'worker@example.com',
@@ -88,6 +89,7 @@ test('WEB session is revoked when active Google account no longer matches bound 
   const now = Date.now();
   const session = {
     SessionID:'S1',
+    AuthLevel:'MFA',
     UserID:'U1',
     TokenHash:'HASH',
     ClientType:'WEB',
@@ -158,6 +160,7 @@ test('legacy WEB session without bound ClientLabel fails closed', () => {
   const now = Date.now();
   const session = {
     SessionID:'S1',
+    AuthLevel:'MFA',
     UserID:'U1',
     ClientType:'WEB',
     ClientLabel:'',
@@ -242,6 +245,7 @@ test('legacy session with unsupported client type is revoked', () => {
   const now = Date.now();
   const session = {
     SessionID:'S-OLD',
+    AuthLevel:'MFA',
     UserID:'U1',
     ClientType:'DESKTOP',
     ClientLabel:'',

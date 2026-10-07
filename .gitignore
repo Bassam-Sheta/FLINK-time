@@ -17,3 +17,9 @@ Thumbs.db
 
 # Generated visual walkthrough
 artifacts/screenshots/
+
+# Local Google authorization and isolated live-test bundles
+.clasprc*.json
+.clasp*.json
+client_secret*.json
+.staging/

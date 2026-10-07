@@ -5,6 +5,8 @@
   "description": "Regression tests for the FLINK Time Google Apps Script backend.",
   "scripts": {
     "test": "node --test tests/*.test.js",
+    "staging": "node scripts/staging.js",
+    "test:browser": "playwright test",
     "test:human": "playwright test tests/browser/user-human.spec.js --project=chromium",
     "test:visual": "playwright test tests/browser/visual-walkthrough.spec.js --project=chromium"
   },
@@ -12,6 +14,7 @@
     "node": ">=20"
   },
   "devDependencies": {
+    "@google/clasp": "3.4.1",
     "@playwright/test": "1.63.0"
   }
 }
