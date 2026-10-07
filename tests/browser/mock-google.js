@@ -1,5 +1,6 @@
 (() => {
   const nowIso = () => new Date().toISOString();
+  const recoveryCodes = () => Array.from({ length: 8 }, (_, index) => 'AAAA-BBBB-CCCC-DDDD-EEEE-FFFF-0000-000' + (index + 1));
   const businessDate = '2026-09-29';
   const mockRole = String(window.__FLINK_MOCK_ROLE || 'USER').toUpperCase();
   const setupInitialized = window.__FLINK_MOCK_SETUP_INITIALIZED !== false;
@@ -138,7 +139,22 @@
         return { sessionToken: 'SESSION-1', expiresAt: nowIso(), user: user() };
 
       case 'auth.validateSession':
-        return { user: user(), role: mockRole, enrollmentRequired: body.sessionToken === 'ENROLLMENT-ONLY' };
+        return { user: user(), role: mockRole, enrollmentRequired: ['ENROLLMENT-ONLY', 'RECOVERY-ONLY'].includes(body.sessionToken) };
+
+      case 'auth.recoverMfa':
+        if (payload.password !== 'demo-pass' || payload.code !== recoveryCodes()[0]) throw new Error('Recovery verification failed.');
+        return { enrollmentRequired: true, sessionToken: 'RECOVERY-ONLY', user: user() };
+
+      case 'auth.regenerateRecoveryCodes':
+        if (payload.currentPassword !== 'demo-pass' || payload.totpCode !== '123456') throw new Error('Fresh verification failed.');
+        return { recoveryCodes: recoveryCodes() };
+
+      case 'auth.requestPasswordRecovery':
+        return { message: 'If recovery is available for your Google account, a code will be emailed to you.' };
+
+      case 'auth.completePasswordRecovery':
+        if (payload.code !== recoveryCodes()[0] || !payload.newPassword) throw new Error('Recovery verification failed.');
+        return { ok: true, signInRequired: true, message: 'Password changed. Sign in and complete MFA.' };
 
       case 'setup.completeStep':
         if (payload.step === 1) return { enrollmentRequired: true, sessionToken: 'ENROLLMENT-ONLY', user: user() };
@@ -150,7 +166,7 @@
 
       case 'auth.confirmMfa':
         if (payload.code !== '123456') throw new Error('Invalid authenticator verification.');
-        return { ok: true, sessionToken: 'MFA-VERIFIED', expiresAt: nowIso() };
+        return { ok: true, sessionToken: 'MFA-VERIFIED', expiresAt: nowIso(), recoveryCodes: recoveryCodes() };
 
       case 'auth.changePassword':
         if (payload.oldPassword !== 'demo-pass' || !payload.newPassword) {
