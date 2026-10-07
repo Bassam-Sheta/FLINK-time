@@ -22,6 +22,7 @@ function fixture(lastSeenAgeMinutes, options = {}) {
   const writes = [];
   const session = {
     SessionID: 'S1',
+    AuthLevel: 'MFA',
     UserID: 'U1',
     CreatedAt: new Date(now - 60 * 60 * 1000).toISOString(),
     LastSeenAt: new Date(now - lastSeenAgeMinutes * 60 * 1000).toISOString(),
@@ -78,7 +79,10 @@ function fixture(lastSeenAgeMinutes, options = {}) {
         SessionEpoch: options.accountEpoch || 1
       };
     },
-    updateSession(_id, updates) { writes.push({ ...updates }); },
+    updateSession(_id, updates) {
+      writes.push({ ...updates });
+      return { ...session, ...updates };
+    },
     createSession() {}
   };
 

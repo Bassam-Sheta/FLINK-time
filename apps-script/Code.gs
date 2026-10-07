@@ -16,6 +16,7 @@
 
 var ERROR_CODES = {
   AUTH_REQUIRED: 'AUTH_REQUIRED',
+  MFA_REQUIRED: 'MFA_REQUIRED',
   UNAUTHORIZED: 'UNAUTHORIZED',
   SESSION_EXPIRED: 'SESSION_EXPIRED',
   ACCOUNT_LOCKED: 'ACCOUNT_LOCKED',
@@ -332,7 +333,7 @@ var MASTER_SCHEMA = {
   ],
   Sessions: [
     'SessionID', 'UserID', 'TokenHash', 'ClientType', 'ClientLabel',
-    'CreatedAt', 'LastSeenAt', 'ExpiresAt', 'AbsoluteExpiresAt', 'Revoked', 'RevokedAt', 'RevokeReason', 'AccountEpoch'
+    'CreatedAt', 'LastSeenAt', 'ExpiresAt', 'AbsoluteExpiresAt', 'Revoked', 'RevokedAt', 'RevokeReason', 'AccountEpoch', 'AuthLevel'
   ],
   GlobalSettings: [
     'SettingKey', 'SettingValue', 'Description', 'UpdatedAt', 'UpdatedBy'
@@ -470,7 +471,7 @@ var SETTINGS_CATALOG = [
   { key:'IDLE_TIMEOUT_HOURS', group:'Compatibility', label:'Legacy Idle Timeout (Hours)', type:'number', default:8, min:1, max:24, options:[], scope:'GLOBAL', stepUp:false, help:'Compatibility setting retained for older installations.', visible:false },
 
   { key:'PASSWORD_RECOVERY_EMAIL', group:'Security', label:'Email Password Recovery', type:'bool', default:false, min:null, max:null, options:[], scope:'GLOBAL', stepUp:true, help:'Enables the email recovery workflow once WP6 is installed.' },
-  { key:'MFA_REQUIRED', group:'Security', label:'Require MFA', type:'bool', default:true, min:null, max:null, options:[], scope:'GLOBAL', stepUp:true, help:'Security policy flag for mandatory authenticator verification.' },
+  { key:'MFA_REQUIRED', group:'Security', label:'Require MFA (mandatory)', type:'bool', default:true, min:null, max:null, options:[], scope:'GLOBAL', stepUp:true, readOnly:true, help:'Authenticator verification is mandatory and cannot be disabled.' },
   { key:'SESSION_IDLE_MINUTES', group:'Security', label:'Session Idle Timeout (Minutes)', type:'number', default:480, min:5, max:1440, options:[], scope:'GLOBAL', stepUp:true, help:'Maximum inactivity before a session expires.' },
   { key:'SESSION_MAX_HOURS', group:'Security', label:'Maximum Session Length (Hours)', type:'number', default:24, min:1, max:168, options:[], scope:'GLOBAL', stepUp:true, help:'Absolute maximum session lifetime.' },
   { key:'PBKDF2_ITERATIONS', group:'Security', label:'Password Hash Iterations', type:'number', default:10000, min:10000, max:1000000, options:[], scope:'GLOBAL', stepUp:true, help:'PBKDF2 work factor. Use System Health calibration before increasing it.' },
@@ -632,6 +633,9 @@ var Validation = {
         clean[key] = (raw === true || raw === 1 || raw === 'true' || raw === 'TRUE' || raw === '1')
           ? 'true'
           : 'false';
+        if (key === 'MFA_REQUIRED' && clean[key] !== 'true') {
+          throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'MFA is mandatory and cannot be disabled.', 400);
+        }
         continue;
       }
 
@@ -1363,6 +1367,12 @@ function dispatchAction_(action, data) {
   // All other actions require authenticated session
   const authContext = SessionService.validateSession(token);
 
+  // Password-only sessions are capabilities for enrollment, never app access.
+  const enrollmentRequired = authContext.session && authContext.session.AuthLevel === 'MFA_ENROLLMENT';
+  if (enrollmentRequired && !['auth.validateSession', 'auth.enrollMfa', 'auth.confirmMfa', 'auth.logout', 'auth.changePassword'].includes(action)) {
+    throw new AppError(ERROR_CODES.MFA_REQUIRED, 'Set up your authenticator before using the application.', 403);
+  }
+
   // Forced password change is a server-side security state, not a UI hint.
   // Temporary/reset-password sessions may only validate, change password, or logout.
   const mustChangePassword = authContext.user &&
@@ -1371,6 +1381,8 @@ function dispatchAction_(action, data) {
     const allowedDuringForcedChange = new Set([
       'auth.validateSession',
       'auth.changePassword',
+      'auth.enrollMfa',
+      'auth.confirmMfa',
       'auth.logout'
     ]);
     if (!allowedDuringForcedChange.has(action)) {
@@ -1409,7 +1421,7 @@ function dispatchAction_(action, data) {
 
   switch (action) {
     case 'auth.validateSession':
-      return { user: authContext.user, role: authContext.role };
+      return { user: authContext.user, role: authContext.role, enrollmentRequired: !!enrollmentRequired };
 
     case 'auth.stepUp':
       return AuthService.stepUp(
@@ -1884,6 +1896,7 @@ var Flags = (typeof global !== 'undefined' && global.Flags) || {
     if (!entry) {
       throw new AppError(ERROR_CODES.VALIDATION_ERROR, `Unknown setting: ${key}`, 400);
     }
+    if (entry.key === 'MFA_REQUIRED') return true;
     const stored = entry.scope === 'WORKSPACE'
       ? this._loadWorkspace(workspaceId)
       : this._loadGlobal();
@@ -1942,6 +1955,7 @@ var SettingsService = {
           options: entry.options,
           scope: entry.scope,
           stepUp: entry.stepUp,
+          readOnly: entry.readOnly === true,
           help: entry.help,
           value: Flags.getValue(entry.key, entry.scope === 'WORKSPACE' ? id : '')
         }))
@@ -3197,7 +3211,8 @@ var SessionService = (typeof global !== 'undefined' && global.SessionService) ||
   },
 
   _sessionCacheKey(tokenHash) {
-    return 'S:' + String(tokenHash || '');
+    // Do not trust five-minute entries populated by an older deployment.
+    return 'S:v2:' + String(tokenHash || '');
   },
 
   _negativeCacheKey(tokenHash) {
@@ -3252,19 +3267,30 @@ var SessionService = (typeof global !== 'undefined' && global.SessionService) ||
       raw = this._sessionCacheMemory[key] || '';
     }
     if (!raw) return null;
-    try { return JSON.parse(raw); } catch (e) {
+    try {
+      const cached = JSON.parse(raw);
+      if (!cached || !Number.isFinite(cached.expiresAtMs) || cached.expiresAtMs <= Date.now() ||
+          cached.expiresAtMs > Date.now() + 60000 || !cached.session) {
+        this._deleteCachedSession(tokenHash);
+        return null;
+      }
+      return cached.session;
+    } catch (e) {
       this._deleteCachedSession(tokenHash);
       return null;
     }
   },
 
-  _putCachedSession(tokenHash, session) {
+  _putCachedSession(tokenHash, session, observedAtMs = Date.now()) {
     if (!tokenHash || !session) return;
+    const expiresAtMs = observedAtMs + 60000;
+    if (!Number.isFinite(expiresAtMs) || expiresAtMs <= Date.now()) return;
     this._deleteNegativeSession(tokenHash);
     const key = this._sessionCacheKey(tokenHash);
-    const raw = JSON.stringify(session);
+    const raw = JSON.stringify({ session, expiresAtMs });
     if (typeof CacheService !== 'undefined' && CacheService.getScriptCache) {
-      try { CacheService.getScriptCache().put(key, raw, 300); } catch (e) {}
+      // Bound stale single-session revocation if cache removal fails.
+      try { CacheService.getScriptCache().put(key, raw, 60); } catch (e) {}
     } else {
       this._sessionCacheMemory[key] = raw;
     }
@@ -3296,7 +3322,11 @@ var SessionService = (typeof global !== 'undefined' && global.SessionService) ||
   /**
    * Creates and registers a new authenticated session
    */
-  createSession(userId, clientType = 'WEB', clientLabel = '') {
+  createSession(userId, clientType = 'WEB', clientLabel = '', authLevel = 'MFA_ENROLLMENT') {
+    if (!['MFA', 'MFA_ENROLLMENT'].includes(authLevel)) {
+      throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'Invalid authentication assurance.', 401);
+    }
+    return MasterRepository._withSessionMutationLock(() => {
     const normalizedClientType = String(clientType || 'WEB').toUpperCase();
     let verifiedClientLabel = String(clientLabel || '').trim();
     let sessionAccount = null;
@@ -3316,12 +3346,9 @@ var SessionService = (typeof global !== 'undefined' && global.SessionService) ||
       normalizedClientType === 'WEB' ||
       normalizedClientType === 'SETUP_WIZARD'
     ) {
-      const accountBundle = MasterRepository.getUserAuthBundle
-        ? MasterRepository.getUserAuthBundle(userId)
-        : { account: MasterRepository.findAccountById(userId), accesses: [] };
-      const account = accountBundle.account;
+      const account = MasterRepository.findAccountById(userId);
       sessionAccount = account;
-      if (!account) {
+      if (!account || account.UserID !== userId || account.Status !== CONSTANTS.ACCOUNT_STATUS.ACTIVE) {
         throw new AppError(
           ERROR_CODES.AUTH_REQUIRED,
           'User account could not be resolved for session creation.',
@@ -3360,8 +3387,9 @@ var SessionService = (typeof global !== 'undefined' && global.SessionService) ||
     } catch (err) {}
     const idleTimeoutMs = idleTimeoutMinutes * 60 * 1000;
     const absoluteTimeoutMs = absoluteTimeoutHours * 3600 * 1000;
-    const expiresAt = new Date(now.getTime() + idleTimeoutMs);
-    const absoluteExpiresAt = new Date(now.getTime() + absoluteTimeoutMs);
+    const enrollmentMs = (CONSTANTS.LIMITS.MFA_ENROLLMENT_TTL_MINUTES || 10) * 60000;
+    const expiresAt = new Date(now.getTime() + (authLevel === 'MFA_ENROLLMENT' ? Math.min(idleTimeoutMs, enrollmentMs) : idleTimeoutMs));
+    const absoluteExpiresAt = new Date(now.getTime() + (authLevel === 'MFA_ENROLLMENT' ? enrollmentMs : absoluteTimeoutMs));
 
     const sessionRecord = {
       SessionID: sessionId,
@@ -3375,6 +3403,7 @@ var SessionService = (typeof global !== 'undefined' && global.SessionService) ||
       AbsoluteExpiresAt: absoluteExpiresAt.toISOString(),
       Revoked: false,
       RevokedAt: '',
+      AuthLevel: authLevel,
       AccountEpoch:
         sessionAccount && Number(sessionAccount.SessionEpoch) > 0
           ? Number(sessionAccount.SessionEpoch)
@@ -3382,13 +3411,14 @@ var SessionService = (typeof global !== 'undefined' && global.SessionService) ||
     };
 
     MasterRepository.createSession(sessionRecord);
-    this._putCachedSession(tokenHash, sessionRecord);
+    this._putCachedSession(tokenHash, sessionRecord, now.getTime());
 
     return {
       sessionId,
       sessionToken: rawToken,
       expiresAt: expiresAt.toISOString()
     };
+    });
   },
 
   /**
@@ -3403,21 +3433,27 @@ var SessionService = (typeof global !== 'undefined' && global.SessionService) ||
     if (this._isNegativeSession(tokenHash)) {
       throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'Invalid or expired session.', 401);
     }
-
+    const observedAtMs = Date.now();
     let session = this._getCachedSession(tokenHash);
     if (!session) {
       session = MasterRepository.findSessionByTokenHashFast
         ? MasterRepository.findSessionByTokenHashFast(tokenHash)
         : MasterRepository.findSessionByTokenHash(tokenHash);
       if (session) {
-        this._putCachedSession(tokenHash, session);
+        this._putCachedSession(tokenHash, session, observedAtMs);
       } else {
         this._putNegativeSession(tokenHash);
       }
     }
 
-    if (!session) {
+    if (!session || session.Revoked === true || session.Revoked === 'TRUE' || session.Revoked === 1) {
+      this._deleteCachedSession(tokenHash);
       throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'Invalid or expired session.', 401);
+    }
+
+    if (!['MFA', 'MFA_ENROLLMENT'].includes(session.AuthLevel)) {
+      this._deleteCachedSession(tokenHash);
+      throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'Sign in again to complete mandatory MFA.', 401);
     }
 
     const now = Date.now();
@@ -3440,15 +3476,24 @@ var SessionService = (typeof global !== 'undefined' && global.SessionService) ||
     } catch (err) {}
     const idleTimeoutMs = idleTimeoutMinutes * 60 * 1000;
     const absoluteTimeoutMs = absoluteTimeoutHours * 3600 * 1000;
-    const storedAbsoluteExpiresAt = new Date(session.AbsoluteExpiresAt || '').getTime();
+    const hasAbsoluteExpiry = session.AbsoluteExpiresAt !== '' && session.AbsoluteExpiresAt != null;
+    const storedAbsoluteExpiresAt = hasAbsoluteExpiry ? new Date(session.AbsoluteExpiresAt).getTime() : NaN;
+    if (hasAbsoluteExpiry && !Number.isFinite(storedAbsoluteExpiresAt)) {
+      this._deleteCachedSession(tokenHash);
+      MasterRepository.updateSession(session.SessionID, {
+        Revoked: true,
+        RevokedAt: new Date().toISOString()
+      });
+      throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'Session record is invalid. Please sign in again.', 401);
+    }
     const absoluteExpiresAt = isNaN(storedAbsoluteExpiresAt)
       ? createdAt + absoluteTimeoutMs
       : storedAbsoluteExpiresAt;
 
     if (
-      now > expiresAt ||
-      (now - lastSeenAt) > idleTimeoutMs ||
-      now > absoluteExpiresAt
+      now >= expiresAt ||
+      (now - lastSeenAt) >= idleTimeoutMs ||
+      now >= absoluteExpiresAt
     ) {
       this._revokeAndEvictSession(session.SessionID, tokenHash, 'EXPIRED');
       throw new AppError(ERROR_CODES.SESSION_EXPIRED, 'Session has expired due to timeout. Please sign in again.', 401);
@@ -3457,7 +3502,7 @@ var SessionService = (typeof global !== 'undefined' && global.SessionService) ||
     // Verify current account/access state. The U:<userId> cache is short-lived
     // and explicitly invalidated by account/access mutations.
     const userBundle = MasterRepository.getUserAuthBundle
-      ? MasterRepository.getUserAuthBundle(session.UserID)
+      ? MasterRepository.getUserAuthBundle(session.UserID, session.AccountEpoch === '' || session.AccountEpoch == null ? 1 : Number(session.AccountEpoch))
       : { account: MasterRepository.findAccountById(session.UserID), accesses: [] };
     const user = userBundle.account;
     if (!user) {
@@ -3475,8 +3520,14 @@ var SessionService = (typeof global !== 'undefined' && global.SessionService) ||
       throw new AppError(ERROR_CODES.ACCOUNT_PASSIVE, 'Account is inactive or suspended.', 403);
     }
 
-    const currentEpoch = Number(user.SessionEpoch) > 0 ? Number(user.SessionEpoch) : 1;
-    const sessionEpoch = Number(session.AccountEpoch) > 0 ? Number(session.AccountEpoch) : 1;
+    const currentEpoch = user.SessionEpoch === '' || user.SessionEpoch == null ? 1 : Number(user.SessionEpoch);
+    const sessionEpoch = session.AccountEpoch === '' || session.AccountEpoch == null ? 1 : Number(session.AccountEpoch);
+    if (!Number.isInteger(currentEpoch) || currentEpoch < 1 ||
+        !Number.isInteger(sessionEpoch) || sessionEpoch < 1 ||
+        typeof user.SessionEpoch === 'boolean' || typeof session.AccountEpoch === 'boolean') {
+      this._deleteCachedSession(tokenHash);
+      throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'Session security state is invalid. Please sign in again.', 401);
+    }
     if (sessionEpoch !== currentEpoch) {
       this._deleteCachedSession(tokenHash);
       this._putNegativeSession(tokenHash);
@@ -3541,9 +3592,19 @@ var SessionService = (typeof global !== 'undefined' && global.SessionService) ||
         ExpiresAt: new Date(newExpiresMs).toISOString(),
         AbsoluteExpiresAt: new Date(absoluteExpiresAt).toISOString()
       };
-      MasterRepository.updateSession(session.SessionID, touch);
-      session = { ...session, ...touch };
-      this._putCachedSession(tokenHash, session);
+      try {
+        session = MasterRepository.updateSession(session.SessionID, touch, {
+          requireActive: true,
+          expectedTokenHash: tokenHash,
+          expectedUserId: session.UserID,
+          expectedEpoch: sessionEpoch
+        });
+        if (!session) throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'Session is no longer active.', 401);
+      } catch (err) {
+        this._deleteCachedSession(tokenHash);
+        throw err;
+      }
+      this._putCachedSession(tokenHash, session, now);
     }
 
     return {
@@ -3592,11 +3653,13 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
     return 'FLINK_MFA_CHALLENGE_' + String(userId || '').replace(/[^A-Za-z0-9_-]/g, '');
   },
 
-  _storeMfaChallenge(userId, challengeToken, expiresAtMs, googleEmail = '') {
+  _storeMfaChallenge(userId, challengeToken, expiresAtMs, googleEmail = '', passwordVersion = null, accountEpoch = null) {
     const record = JSON.stringify({
       tokenHash: SecurityService.hashToken(challengeToken),
       expiresAtMs: Number(expiresAtMs),
-      googleEmail: IdentityService.normalizeEmail(googleEmail)
+      googleEmail: IdentityService.normalizeEmail(googleEmail),
+      passwordVersion,
+      accountEpoch
     });
 
     if (typeof PropertiesService !== 'undefined' && PropertiesService.getScriptProperties) {
@@ -4166,7 +4229,9 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
         account.UserID,
         mfaChallengeToken,
         timestamp + 5 * 60 * 1000,
-        googleEmail
+        googleEmail,
+        Number(cred.PasswordVersion || 1),
+        Number(account.SessionEpoch || 1)
       );
 
       MasterRepository.logSecurityEvent({
@@ -4188,28 +4253,7 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
       };
     }
 
-    MasterRepository.updateCredentials(account.UserID, {
-      FailedLoginCount: 0,
-      LastFailedAt: '',
-      LockUntil: ''
-    });
-
-    MasterRepository.updateAccount(account.UserID, {
-      LastLoginAt: new Date().toISOString()
-    });
-
-    MasterRepository.logSecurityEvent({
-      UserID: account.UserID,
-      Username: account.Username,
-      EventType: CONSTANTS.AUDIT_EVENTS.LOGIN_SUCCESS,
-      Success: true,
-      metadata: {
-        clientType: normalizedClientType,
-        mfa: false,
-        googleIdentity: googleEmail || ''
-      }
-    });
-
+    // Enrollment does not complete login or reset durable failure counters.
     const sessionData = SessionService.createSession(
       account.UserID,
       normalizedClientType,
@@ -4220,6 +4264,7 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
     const assignedWorkspaces = accesses.map(a => a.WorkspaceID);
 
     return {
+      enrollmentRequired: true,
       sessionToken: sessionData.sessionToken,
       expiresAt: sessionData.expiresAt,
       user: {
@@ -4305,7 +4350,10 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
 
     const account = MasterRepository.findAccountById(userId);
     const cred = MasterRepository.getCredentials(userId);
-    if (!account || !cred || !cred.TotpSecret) {
+    if (!account || !cred || !cred.TotpSecret ||
+        !(cred.MfaEnabled === true || cred.MfaEnabled === 'TRUE' || cred.MfaEnabled === 1) ||
+        lockedChallenge.passwordVersion !== Number(cred.PasswordVersion || 1) ||
+        lockedChallenge.accountEpoch !== Number(account.SessionEpoch || 1)) {
       throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'User credentials or MFA configuration not found.', 401);
     }
 
@@ -4487,7 +4535,8 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
     const sessionData = SessionService.createSession(
       account.UserID,
       normalizedClientType,
-      googleEmail
+      googleEmail,
+      'MFA'
     );
     const accesses = MasterRepository.getWorkspaceAccessForUser(account.UserID);
     const assignedWorkspaces = accesses.map(a => a.WorkspaceID);
@@ -4588,64 +4637,99 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
       );
     }
 
-    MasterRepository.updateCredentials(authContext.userId, {
-      LastSuccessfulTotpStep: verification.timeStep
-    });
+    // Expensive verification remains outside the lock. Its result is usable only
+    // if all mutable security state still agrees after acquiring the writer lock.
+    return this._withLoginStateLock(() => {
+      // A request may have loaded a whole-table snapshot before waiting. None of
+      // those snapshots can establish current authorization inside this lock.
+      [CONSTANTS.MASTER_TABS.CREDENTIALS, CONSTANTS.MASTER_TABS.ACCOUNTS,
+        CONSTANTS.MASTER_TABS.SESSIONS].forEach(tab => MasterRepository._invalidateTable(tab));
+      const latest = MasterRepository.getCredentials(authContext.userId);
+      const account = MasterRepository.findAccountById(authContext.userId);
+      const tokenHash = SecurityService.hashToken(String(rawSessionToken || '').trim());
+      const session = MasterRepository.findSessionByTokenHashFast(tokenHash);
+      const now = Date.now();
+      const isBlank = value => value === '' || value === undefined || value === null;
+      const integer = (value, blankValue) => {
+        if (isBlank(value)) return blankValue;
+        if ((typeof value !== 'number' && typeof value !== 'string') || !/^\d+$/.test(String(value))) return NaN;
+        const parsed = Number(value);
+        return Number.isSafeInteger(parsed) ? parsed : NaN;
+      };
+      const epoch = account && integer(account.SessionEpoch, 1);
+      const lastStep = latest && integer(latest.LastSuccessfulTotpStep, -1);
+      const lockUntil = latest && (isBlank(latest.LockUntil) ? 0 : new Date(latest.LockUntil).getTime());
+      if (!latest || !account || !session ||
+          account.UserID !== authContext.userId || latest.UserID !== authContext.userId ||
+          account.Status !== CONSTANTS.ACCOUNT_STATUS.ACTIVE || account.Role !== CONSTANTS.ROLES.SUPER_ADMIN ||
+          latest.PasswordHash !== cred.PasswordHash || latest.PasswordVersion !== cred.PasswordVersion ||
+          latest.TotpSecret !== cred.TotpSecret || !(latest.MfaEnabled === true || latest.MfaEnabled === 'TRUE') ||
+          !Number.isFinite(lockUntil) || lockUntil > now ||
+          !Number.isSafeInteger(lastStep) || verification.timeStep <= lastStep ||
+          !Number.isSafeInteger(verification.timeStep) || Math.abs(Math.floor(now / 30000) - verification.timeStep) > 1 ||
+          !Number.isSafeInteger(epoch) || epoch < 1 || integer(session.AccountEpoch, 1) !== epoch ||
+          integer(authContext.session.AccountEpoch, 1) !== epoch ||
+          session.SessionID !== authContext.session.SessionID || session.UserID !== authContext.userId ||
+          session.TokenHash !== tokenHash || session.Revoked === true || session.Revoked === 'TRUE' || session.Revoked === 1 ||
+          !(new Date(session.ExpiresAt).getTime() > now) || !(new Date(session.AbsoluteExpiresAt).getTime() > now)) {
+        throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'Security state changed. Sign in again before reauthenticating.', 401);
+      }
+      const email = IdentityService.assertAccountIdentity(account, session.ClientType);
+      if (IdentityService.normalizeEmail(session.ClientLabel) !== email) {
+        throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'Google identity changed. Sign in again.', 401);
+      }
+      const audit = action => MasterRepository.logGlobalAudit({
+        ActorUserID: authContext.userId, ActorRole: account.Role, WorkspaceID: 'MASTER',
+        EntityType: 'USER_SECURITY', EntityID: authContext.userId, Action: action,
+        BeforeJSON: { stepUpGranted: false, lastSuccessfulTotpStep: latest.LastSuccessfulTotpStep || '' },
+        AfterJSON: { stepUpGranted: true, lastSuccessfulTotpStep: verification.timeStep },
+        CorrelationID: authContext.session.SessionID,
+        Reason: action === 'STEP_UP_AUTHENTICATION_INTENT'
+          ? 'Proposed step-up state after fresh password and MFA verification'
+          : 'Step-up state written; response requires successful flush'
+      });
+      if (!audit('STEP_UP_AUTHENTICATION_INTENT')) {
+        throw new AppError(ERROR_CODES.CRYPTO_FAILURE, 'Security audit trail is unavailable. Step-up authentication was not activated.', 503);
+      }
+      if (typeof SpreadsheetApp !== 'undefined' && SpreadsheetApp.flush) SpreadsheetApp.flush();
 
-    const replacement = SessionService.createSession(
-      authContext.userId,
-      authContext.session.ClientType || 'WEB',
-      authContext.session.ClientLabel || ''
-    );
-    const stepUpToken = 'STP_' + SecurityService.generateRandomHex(32);
-    const stepUpExpiresAtMs =
-      Date.now() + (CONSTANTS.LIMITS.STEP_UP_TTL_MINUTES || 5) * 60 * 1000;
-    this._storeStepUp(replacement.sessionId, {
-      userId: authContext.userId,
-      sessionId: replacement.sessionId,
-      tokenHash: SecurityService.hashToken(stepUpToken),
-      expiresAtMs: stepUpExpiresAtMs
-    });
+      let replacement = null;
+      try {
+        MasterRepository.updateCredentials(authContext.userId, { LastSuccessfulTotpStep: verification.timeStep });
+        MasterRepository.invalidateUserCache(authContext.userId);
+        replacement = SessionService.createSession(authContext.userId, session.ClientType, email, 'MFA');
+        this._deleteStepUp(authContext.session.SessionID);
+        SessionService.revokeSession(rawSessionToken);
 
-    const auditOk = MasterRepository.logGlobalAudit({
-      ActorUserID: authContext.userId,
-      ActorRole: authContext.role,
-      WorkspaceID: 'MASTER',
-      EntityType: 'USER_SECURITY',
-      EntityID: authContext.userId,
-      Action: 'STEP_UP_AUTHENTICATED',
-      Reason: 'Fresh Super Admin password and MFA verification succeeded'
+        const stepUpToken = 'STP_' + SecurityService.generateRandomHex(32);
+        const stepUpExpiresAtMs = Date.now() + (CONSTANTS.LIMITS.STEP_UP_TTL_MINUTES || 5) * 60000;
+        this._storeStepUp(replacement.sessionId, {
+          userId: authContext.userId, sessionId: replacement.sessionId,
+          tokenHash: SecurityService.hashToken(stepUpToken), expiresAtMs: stepUpExpiresAtMs
+        });
+        if (!audit('STEP_UP_AUTHENTICATED')) {
+          throw new AppError(ERROR_CODES.CRYPTO_FAILURE, 'Security audit trail is unavailable. Step-up authentication was not activated.', 503);
+        }
+        MasterRepository.logSecurityEvent({
+          UserID: authContext.userId, Username: account.Username,
+          EventType: 'STEP_UP_SUCCESS', Success: true, metadata: { expiresAtMs: stepUpExpiresAtMs }
+        });
+        if (typeof SpreadsheetApp !== 'undefined' && SpreadsheetApp.flush) SpreadsheetApp.flush();
+        return { ok: true, sessionToken: replacement.sessionToken, expiresAt: replacement.expiresAt,
+          stepUpToken, stepUpExpiresAt: new Date(stepUpExpiresAtMs).toISOString() };
+      } catch (err) {
+        if (replacement) {
+          // Attempt both cleanups even when one backend is unavailable. Neither
+          // bearer token has been returned; retain the primary failure for callers.
+          try { this._deleteStepUp(replacement.sessionId); } catch (cleanupErr) {}
+          try { SessionService.revokeSession(replacement.sessionToken); } catch (cleanupErr) {}
+        }
+        try {
+          if (typeof SpreadsheetApp !== 'undefined' && SpreadsheetApp.flush) SpreadsheetApp.flush();
+        } catch (cleanupErr) {}
+        throw err;
+      }
     });
-    if (!auditOk) {
-      this._deleteStepUp(replacement.sessionId);
-      SessionService.revokeSession(replacement.sessionToken);
-      throw new AppError(
-        ERROR_CODES.CRYPTO_FAILURE,
-        'Security audit trail is unavailable. Step-up authentication was not activated.',
-        503
-      );
-    }
-
-    // Invalidate the previous session's privileged grant before revocation.
-    // Even if the old session row cannot be updated immediately, it must not
-    // retain high-risk authorization after the rotation.
-    this._deleteStepUp(authContext.session.SessionID);
-    SessionService.revokeSession(rawSessionToken);
-    MasterRepository.logSecurityEvent({
-      UserID: authContext.userId,
-      Username: authContext.user ? authContext.user.Username : '',
-      EventType: 'STEP_UP_SUCCESS',
-      Success: true,
-      metadata: { expiresAtMs: stepUpExpiresAtMs }
-    });
-
-    return {
-      ok: true,
-      sessionToken: replacement.sessionToken,
-      expiresAt: replacement.expiresAt,
-      stepUpToken,
-      stepUpExpiresAt: new Date(stepUpExpiresAtMs).toISOString()
-    };
   },
 
   assertStepUp(authContext, stepUpToken) {
@@ -4663,7 +4747,7 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
       !record ||
       record.userId !== authContext.userId ||
       record.sessionId !== authContext.session.SessionID ||
-      Number(record.expiresAtMs || 0) < Date.now() ||
+      !Number.isSafeInteger(record.expiresAtMs) || record.expiresAtMs <= Date.now() ||
       !record.tokenHash ||
       !SecurityService.constantTimeEquals(
         record.tokenHash,
@@ -4684,25 +4768,92 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
    * Enrolls or replaces TOTP MFA only after fresh credential verification.
    * Pending enrollment is bound to the current authenticated session and expires.
    */
+  _assertEnrollmentAccount(authContext) {
+    if (!authContext || !authContext.userId || !authContext.session || !authContext.session.SessionID) {
+      throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'A current authenticated session is required.', 401);
+    }
+    const account = MasterRepository.findAccountById(authContext.userId);
+    const cred = MasterRepository.getCredentials(authContext.userId);
+    const session = MasterRepository.findSessionByTokenHashFast(authContext.session.TokenHash);
+    const epochOf = value => {
+      if (value === '' || value == null) return 1;
+      const epoch = Number(value);
+      return typeof value !== 'boolean' && Number.isSafeInteger(epoch) && epoch > 0 ? epoch : NaN;
+    };
+    const accountEpoch = account ? epochOf(account.SessionEpoch) : NaN;
+    if (!account || !cred || !session || account.Status !== CONSTANTS.ACCOUNT_STATUS.ACTIVE ||
+        session.SessionID !== authContext.session.SessionID || session.UserID !== authContext.userId ||
+        session.TokenHash !== authContext.session.TokenHash || !['MFA', 'MFA_ENROLLMENT'].includes(session.AuthLevel) ||
+        session.Revoked === true || session.Revoked === 'TRUE' || session.Revoked === 1 ||
+        !(new Date(session.ExpiresAt).getTime() > Date.now()) || !(new Date(session.AbsoluteExpiresAt).getTime() > Date.now()) ||
+        accountEpoch !== epochOf(authContext.session.AccountEpoch) ||
+        epochOf(session.AccountEpoch) !== accountEpoch ||
+        (cred.LockUntil && new Date(cred.LockUntil).getTime() > Date.now())) {
+      throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'Sign in again before changing MFA.', 401);
+    }
+    const email = IdentityService.assertAccountIdentity(account, authContext.session.ClientType || 'WEB');
+    if (email !== IdentityService.normalizeEmail(authContext.session.ClientLabel)) {
+      throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'Enrollment identity changed. Sign in again.', 401);
+    }
+    return { account, cred };
+  },
+
+  _requireEnrollmentAudit(authContext, action, before, after) {
+    const ok = MasterRepository.logGlobalAudit({
+      ActorUserID: authContext.userId,
+      ActorRole: authContext.role,
+      WorkspaceID: 'MASTER',
+      EntityType: 'USER_SECURITY',
+      EntityID: authContext.userId,
+      Action: action,
+      BeforeJSON: before,
+      AfterJSON: after,
+      Reason: 'Mandatory authenticator enrollment; secrets excluded'
+    });
+    if (!ok) throw new AppError(ERROR_CODES.CRYPTO_FAILURE, 'Security audit is unavailable. Please retry.', 503);
+  },
+
+  _recordEnrollmentFailure(authContext, cred) {
+    const attempts = (parseInt(cred.FailedLoginCount, 10) || 0) + 1;
+    const locked = attempts >= CONSTANTS.LIMITS.MAX_FAILED_LOGIN_ATTEMPTS;
+    const updates = { FailedLoginCount: attempts, LastFailedAt: new Date().toISOString() };
+    if (locked) {
+      updates.LockUntil = new Date(Date.now() + CONSTANTS.LIMITS.LOCKOUT_DURATION_MINUTES * 60000).toISOString();
+    }
+    MasterRepository.updateCredentials(authContext.userId, updates);
+    if (locked) {
+      MasterRepository.updateAccount(authContext.userId, { Status: CONSTANTS.ACCOUNT_STATUS.LOCKED });
+      this._deleteMfaEnrollment(authContext.userId);
+      SessionService.revokeAllUserSessions(authContext.userId);
+    }
+    MasterRepository.logSecurityEvent({ UserID: authContext.userId, EventType: CONSTANTS.AUDIT_EVENTS.LOGIN_FAIL,
+      Success: false, metadata: { reason: 'Invalid MFA enrollment verification', failedAttempts: attempts } });
+    throw new AppError(locked ? ERROR_CODES.ACCOUNT_LOCKED : ERROR_CODES.AUTH_REQUIRED,
+      locked ? 'Account locked after repeated enrollment failures.' : 'Invalid authenticator verification.', locked ? 403 : 401);
+  },
+
   enrollMfa(authContext, currentPassword, currentMfaCode = '') {
     if (!authContext || !authContext.userId || !authContext.session || !authContext.session.SessionID) {
       throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'A current authenticated session is required.', 401);
     }
-
     const callerEmail = (authContext.user && authContext.user.Email) ||
       (authContext.session && authContext.session.ClientLabel) ||
       IdentityService.getCurrentGoogleEmail(false) ||
       authContext.userId;
     this._enforceLoginRateLimit(callerEmail, 'Fresh password verification is required before changing MFA.');
 
-    const cred = MasterRepository.getCredentials(authContext.userId);
-    if (!cred || !SecurityService.verifyPassword(currentPassword, cred.PasswordHash)) {
-      throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'Fresh password verification is required before changing MFA.', 401);
+    const initial = this._assertEnrollmentAccount(authContext);
+    const passwordValid = SecurityService.verifyPassword(currentPassword, initial.cred.PasswordHash);
+    return this._withLoginStateLock(() => {
+    const { cred } = this._assertEnrollmentAccount(authContext);
+    if (cred.PasswordHash !== initial.cred.PasswordHash) {
+      throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'Credentials changed. Sign in again.', 401);
     }
+    if (!passwordValid) return this._recordEnrollmentFailure(authContext, cred);
 
     const replacing =
       cred.MfaEnabled === true ||
-      cred.MfaEnabled === 'TRUE';
+      cred.MfaEnabled === 'TRUE' || cred.MfaEnabled === 1;
 
     if (replacing) {
       const cleanCurrentCode = String(currentMfaCode || '').trim();
@@ -4722,7 +4873,7 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
         !currentVerification.valid ||
         (!isNaN(previousStep) && currentVerification.timeStep <= previousStep)
       ) {
-        throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'Existing MFA verification failed.', 401);
+        return this._recordEnrollmentFailure(authContext, cred);
       }
       MasterRepository.updateCredentials(authContext.userId, {
         LastSuccessfulTotpStep: currentVerification.timeStep
@@ -4735,20 +4886,25 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
       Date.now() +
       (CONSTANTS.LIMITS.MFA_ENROLLMENT_TTL_MINUTES || 10) * 60 * 1000;
 
+    this._requireEnrollmentAudit(authContext, 'MFA_ENROLLMENT_STARTED',
+      { pendingEnrollment: !!cred.PendingTotpSecret, mfaEnabled: replacing },
+      { pendingEnrollment: true, mfaEnabled: replacing, phase: 'INTENT' });
     MasterRepository.updateCredentials(authContext.userId, {
       PendingTotpSecret: encryptedSecret
     });
     this._storeMfaEnrollment(authContext.userId, {
       sessionId: authContext.session.SessionID,
       expiresAtMs,
-      replacing
+      replacing,
+      passwordVersion: Number(cred.PasswordVersion || 1),
+      accountEpoch: Number(authContext.session.AccountEpoch || 1)
     });
 
     const username =
       authContext.username ||
       (authContext.user && (authContext.user.Username || authContext.user.username)) ||
       'user';
-    const uri = `otpauth://totp/FLINK:${username}?secret=${rawSecret}&issuer=FLINK`;
+    const uri = `otpauth://totp/FLINK:${encodeURIComponent(username)}?secret=${encodeURIComponent(rawSecret)}&issuer=FLINK`;
     return {
       secret: rawSecret,
       qrUri: uri,
@@ -4756,6 +4912,7 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
       replacing,
       message: 'Scan the QR code or enter the secret in your authenticator app, then confirm with a 6-digit code.'
     };
+    });
   },
 
   /**
@@ -4768,18 +4925,18 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
       if (!authContext || !authContext.session || !authContext.session.SessionID) {
         throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'A current authenticated session is required.', 401);
       }
+      const { cred } = this._assertEnrollmentAccount(authContext);
       const enrollment = this._getMfaEnrollment(authContext.userId);
       if (
         !enrollment ||
         enrollment.sessionId !== authContext.session.SessionID ||
-        Number(enrollment.expiresAtMs || 0) < Date.now()
+        !Number.isFinite(enrollment.expiresAtMs) || enrollment.expiresAtMs <= Date.now() ||
+        enrollment.passwordVersion !== Number(cred.PasswordVersion || 1) ||
+        enrollment.accountEpoch !== Number(authContext.session.AccountEpoch || 1)
       ) {
-        this._deleteMfaEnrollment(authContext.userId);
-        MasterRepository.updateCredentials(authContext.userId, { PendingTotpSecret: '' });
         throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'MFA enrollment is invalid, expired, or belongs to another session.', 401);
       }
 
-      const cred = MasterRepository.getCredentials(authContext.userId);
       if (!cred || !cred.PendingTotpSecret) {
         this._deleteMfaEnrollment(authContext.userId);
         throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'No pending MFA enrollment found. Call enrollMfa first.');
@@ -4799,37 +4956,31 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
         authContext.userId
       );
       if (!verification.valid) {
-        throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'Invalid verification code. Could not verify authenticator app.', 401);
+        return this._recordEnrollmentFailure(authContext, cred);
       }
 
+      const before = { mfaEnabled: cred.MfaEnabled === true || cred.MfaEnabled === 'TRUE' || cred.MfaEnabled === 1, pendingEnrollment: true };
+      const after = { mfaEnabled: true, pendingEnrollment: false };
+      this._requireEnrollmentAudit(authContext, 'MFA_ENROLLMENT_COMMIT_INTENT', before, after);
       MasterRepository.updateCredentials(authContext.userId, {
         TotpSecret: cred.PendingTotpSecret,
         MfaEnabled: true,
         PendingTotpSecret: '',
-        LastSuccessfulTotpStep: verification.timeStep
+        LastSuccessfulTotpStep: verification.timeStep,
+        FailedLoginCount: 0,
+        LastFailedAt: '',
+        LockUntil: ''
       });
       this._deleteMfaEnrollment(authContext.userId);
 
-      let replacementSession = null;
-      if (enrollment.replacing === true) {
-        SessionService.revokeAllUserSessions(authContext.userId);
-        replacementSession = SessionService.createSession(
-          authContext.userId,
-          authContext.session.ClientType || 'WEB',
-          authContext.session.ClientLabel || ''
-        );
-      }
-
-      MasterRepository.logGlobalAudit({
-        ActorUserID: authContext.userId,
-        ActorRole: authContext.role,
-        EntityType: 'USER_SECURITY',
-        EntityID: authContext.userId,
-        Action: CONSTANTS.AUDIT_EVENTS.MFA_ENROLLED,
-        Reason: enrollment.replacing === true
-          ? 'TOTP multi-factor authentication replaced after fresh reauthentication'
-          : 'TOTP multi-factor authentication successfully enabled'
-      });
+      SessionService.revokeAllUserSessions(authContext.userId);
+      this._requireEnrollmentAudit(authContext, CONSTANTS.AUDIT_EVENTS.MFA_ENROLLED, before, after);
+      const replacementSession = SessionService.createSession(
+        authContext.userId,
+        authContext.session.ClientType || 'WEB',
+        authContext.session.ClientLabel || '',
+        'MFA'
+      );
 
       return {
         ok: true,
@@ -4841,7 +4992,11 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
           : 'Two-factor authentication successfully enabled.'
       };
     } finally {
-      lock.releaseLock();
+      try {
+        if (typeof SpreadsheetApp !== 'undefined' && SpreadsheetApp.flush) SpreadsheetApp.flush();
+      } finally {
+        lock.releaseLock();
+      }
     }
   },
 
@@ -4849,73 +5004,7 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
    * Disables MFA for a user (Super Admin only or user password confirmation)
    */
   disableMfa(superAdminContext, targetUserId, adminPassword, adminTotpCode = '') {
-    AuthorizationService.assertRole(superAdminContext, [CONSTANTS.ROLES.SUPER_ADMIN]);
-    const targetAccount = MasterRepository.findAccountById(targetUserId);
-    if (!targetAccount) throw new AppError(ERROR_CODES.NOT_FOUND, `User ${targetUserId} not found.`);
-    if (targetAccount.Role === CONSTANTS.ROLES.SUPER_ADMIN) {
-      throw new AppError(
-        ERROR_CODES.PERMISSION_DENIED,
-        'MFA cannot be disabled for the root Super Admin through the web application.',
-        403
-      );
-    }
-
-    const callerEmail = (superAdminContext.user && superAdminContext.user.Email) ||
-      (superAdminContext.session && superAdminContext.session.ClientLabel) ||
-      IdentityService.getCurrentGoogleEmail(false) ||
-      superAdminContext.userId;
-    this._enforceLoginRateLimit(callerEmail, 'Fresh Super Admin password verification is required.');
-
-    const adminCred = MasterRepository.getCredentials(superAdminContext.userId);
-    if (!adminCred || !SecurityService.verifyPassword(adminPassword, adminCred.PasswordHash)) {
-      throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'Fresh Super Admin password verification is required.', 401);
-    }
-    if (adminCred.MfaEnabled === true || adminCred.MfaEnabled === 'TRUE') {
-      const cleanAdminCode = String(adminTotpCode || '').trim();
-      if (!/^\d{6}$/.test(cleanAdminCode)) {
-        throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'Fresh Super Admin MFA verification is required.', 401);
-      }
-      const verification = SecurityService.verifyTotpWithStep(
-        adminCred.TotpSecret,
-        cleanAdminCode,
-        1,
-        Date.now(),
-        30,
-        superAdminContext.userId
-      );
-      const previousStep = parseInt(adminCred.LastSuccessfulTotpStep, 10);
-      if (
-        !verification.valid ||
-        (!isNaN(previousStep) && verification.timeStep <= previousStep)
-      ) {
-        throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'Fresh Super Admin MFA verification is required.', 401);
-      }
-      MasterRepository.updateCredentials(superAdminContext.userId, {
-        LastSuccessfulTotpStep: verification.timeStep
-      });
-    }
-
-    MasterRepository.updateCredentials(targetUserId, {
-      TotpSecret: '',
-      MfaEnabled: false,
-      PendingTotpSecret: '',
-      LastSuccessfulTotpStep: ''
-    });
-
-    this._deleteMfaChallenge(targetUserId);
-    this._deleteMfaEnrollment(targetUserId);
-    SessionService.revokeAllUserSessions(targetUserId);
-
-    MasterRepository.logGlobalAudit({
-      ActorUserID: superAdminContext.userId,
-      ActorRole: superAdminContext.role,
-      EntityType: 'USER_SECURITY',
-      EntityID: targetUserId,
-      Action: CONSTANTS.AUDIT_EVENTS.MFA_DISABLED,
-      Reason: 'Two-factor authentication disabled by Super Admin after fresh reauthentication'
-    });
-
-    return { ok: true, message: `MFA disabled for user ${targetAccount.Username}. Active sessions were revoked.` };
+    throw new AppError(ERROR_CODES.PERMISSION_DENIED, 'MFA is mandatory and cannot be disabled. Use authenticator replacement or recovery.', 403);
   },
 
   /**
@@ -4983,7 +5072,9 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
           : 'WEB';
       const newSession = SessionService.createSession(
         authContext.userId,
-        replacementClientType
+        replacementClientType,
+        authContext.session.ClientLabel || '',
+        authContext.session.AuthLevel || 'MFA_ENROLLMENT'
       );
 
       MasterRepository.logSecurityEvent({
@@ -5363,7 +5454,7 @@ var MasterRepository = (typeof global !== 'undefined' && global.MasterRepository
   },
 
   _userCacheKey(userId) {
-    return 'U:' + String(userId || '');
+    return 'U:v2:' + String(userId || '');
   },
 
   invalidateUserCache(userId) {
@@ -5383,15 +5474,25 @@ var MasterRepository = (typeof global !== 'undefined' && global.MasterRepository
       raw = this._userCacheMemory[key] || '';
     }
     if (!raw) return null;
-    try { return JSON.parse(raw); } catch (e) {
+    try {
+      const cached = JSON.parse(raw);
+      if (!cached || !Number.isFinite(cached.expiresAtMs) || cached.expiresAtMs <= Date.now() ||
+          cached.expiresAtMs > Date.now() + 60000 || !cached.bundle) {
+        this.invalidateUserCache(userId);
+        return null;
+      }
+      return cached.bundle;
+    } catch (e) {
       this.invalidateUserCache(userId);
       return null;
     }
   },
 
-  _putCachedUserBundle(userId, bundle) {
+  _putCachedUserBundle(userId, bundle, observedAtMs = Date.now()) {
+    const expiresAtMs = observedAtMs + 60000;
+    if (!Number.isFinite(expiresAtMs) || expiresAtMs <= Date.now()) return;
     const key = this._userCacheKey(userId);
-    const raw = JSON.stringify(bundle);
+    const raw = JSON.stringify({ bundle, expiresAtMs });
     if (typeof CacheService !== 'undefined' && CacheService.getScriptCache) {
       try { CacheService.getScriptCache().put(key, raw, 60); } catch (e) {}
     } else {
@@ -5478,65 +5579,45 @@ var MasterRepository = (typeof global !== 'undefined' && global.MasterRepository
    */
   findRowByKey(tabName, columnName, value, options = {}) {
     if (value === undefined || value === null || value === '') return null;
-    if (this._requestCache && this._requestCache[tabName]) {
-      const cached = this._requestCache[tabName];
-      const match = cached.rows.find(r => {
-        const cell = r[columnName];
-        if (options.matchCase === false) {
-          return String(cell || '').toLowerCase() === String(value).toLowerCase();
-        }
-        return String(cell || '') === String(value);
-      });
-      return match || null;
+    const ss = this.getMasterSpreadsheet();
+    const sheet = ss.getSheetByName(tabName);
+    if (!sheet) {
+      throw new AppError(ERROR_CODES.NOT_FOUND, `Master tab '${tabName}' does not exist.`);
     }
-
-    try {
-      const ss = this.getMasterSpreadsheet();
-      const sheet = ss && ss.getSheetByName ? ss.getSheetByName(tabName) : null;
-      if (!sheet) {
-        throw new AppError(ERROR_CODES.NOT_FOUND, `Master tab '${tabName}' does not exist.`);
-      }
-
-      const schemaHeaders = MASTER_SCHEMA[tabName];
-      if (!schemaHeaders) {
-        throw new AppError(ERROR_CODES.INTERNAL_ERROR, `Schema missing for master tab '${tabName}'.`);
-      }
-      const columnIndex = schemaHeaders.indexOf(columnName);
-      if (columnIndex < 0) {
-        throw new AppError(ERROR_CODES.INTERNAL_ERROR, `Column '${columnName}' is not defined for '${tabName}'.`);
-      }
-
-      const lastRow = sheet.getLastRow();
-      if (lastRow < 2) return null;
-
-      const finderRange = sheet.getRange(2, columnIndex + 1, lastRow - 1, 1);
-      if (finderRange && typeof finderRange.createTextFinder === 'function') {
-        const cell = finderRange
-          .createTextFinder(String(value))
-          .matchEntireCell(true)
-          .matchCase(options.matchCase !== false)
-          .findNext();
-        if (!cell) return null;
-
-        const rowIndex = cell.getRow();
-        const values = sheet.getRange(rowIndex, 1, 1, schemaHeaders.length).getValues()[0];
-        const row = { _rowIndex: rowIndex };
-        for (let i = 0; i < schemaHeaders.length; i++) row[schemaHeaders[i]] = values[i];
-        return row;
-      }
-    } catch (e) {
-      if (e instanceof AppError) throw e;
-      // Fall back to table data if range/createTextFinder methods are unmocked or unavailable
+    const schemaHeaders = MASTER_SCHEMA[tabName];
+    if (!schemaHeaders) {
+      throw new AppError(ERROR_CODES.INTERNAL_ERROR, `Schema missing for master tab '${tabName}'.`);
     }
+    const columnIndex = schemaHeaders.indexOf(columnName);
+    if (columnIndex < 0) {
+      throw new AppError(ERROR_CODES.INTERNAL_ERROR, `Column '${columnName}' is not defined for '${tabName}'.`);
+    }
+    const lastRow = sheet.getLastRow();
+    if (lastRow < 2) return null;
 
-    const { rows } = this.getTableData(tabName);
-    return rows.find(r => {
-      const cell = r[columnName];
-      if (options.matchCase === false) {
-        return String(cell || '').toLowerCase() === String(value).toLowerCase();
-      }
-      return String(cell || '') === String(value);
-    }) || null;
+    const finder = sheet
+      .getRange(2, columnIndex + 1, lastRow - 1, 1)
+      .createTextFinder(String(value))
+      .matchEntireCell(true)
+      .matchCase(options.matchCase !== false)
+      .useRegularExpression(false);
+    const cell = finder.findNext();
+    if (!cell) return null;
+
+    const rowIndex = cell.getRow();
+    const next = finder.findNext();
+    if (next && next.getRow() !== rowIndex) {
+      throw new AppError(ERROR_CODES.CONFLICT, 'Duplicate key in master storage. Contact the administrator.', 409);
+    }
+    const values = sheet.getRange(rowIndex, 1, 1, schemaHeaders.length).getValues()[0];
+    const actualKey = String(values[columnIndex]);
+    const expectedKey = String(value);
+    if (options.matchCase === false ? actualKey.toLowerCase() !== expectedKey.toLowerCase() : actualKey !== expectedKey) {
+      throw new AppError(ERROR_CODES.SERVER_BUSY, 'Master storage changed during lookup. Please retry.', 503);
+    }
+    const row = { _rowIndex: rowIndex };
+    for (let i = 0; i < schemaHeaders.length; i++) row[schemaHeaders[i]] = values[i];
+    return row;
   },
 
   /**
@@ -5544,75 +5625,50 @@ var MasterRepository = (typeof global !== 'undefined' && global.MasterRepository
    */
   findRowsByKey(tabName, columnName, value, options = {}) {
     if (value === undefined || value === null || value === '') return [];
-    if (this._requestCache && this._requestCache[tabName]) {
-      const cached = this._requestCache[tabName];
-      return cached.rows.filter(r => {
-        const cell = r[columnName];
-        if (options.matchCase === false) {
-          return String(cell || '').toLowerCase() === String(value).toLowerCase();
-        }
-        return String(cell || '') === String(value);
-      });
+    const ss = this.getMasterSpreadsheet();
+    const sheet = ss.getSheetByName(tabName);
+    if (!sheet) {
+      throw new AppError(ERROR_CODES.NOT_FOUND, `Master tab '${tabName}' does not exist.`);
     }
-
-    try {
-      const ss = this.getMasterSpreadsheet();
-      const sheet = ss && ss.getSheetByName ? ss.getSheetByName(tabName) : null;
-      if (!sheet) {
-        throw new AppError(ERROR_CODES.NOT_FOUND, `Master tab '${tabName}' does not exist.`);
-      }
-
-      const schemaHeaders = MASTER_SCHEMA[tabName];
-      if (!schemaHeaders) {
-        throw new AppError(ERROR_CODES.INTERNAL_ERROR, `Schema missing for master tab '${tabName}'.`);
-      }
-      const columnIndex = schemaHeaders.indexOf(columnName);
-      if (columnIndex < 0) {
-        throw new AppError(ERROR_CODES.INTERNAL_ERROR, `Column '${columnName}' is not defined for '${tabName}'.`);
-      }
-
-      const lastRow = sheet.getLastRow();
-      if (lastRow < 2) return [];
-
-      const finderRange = sheet.getRange(2, columnIndex + 1, lastRow - 1, 1);
-      if (finderRange && typeof finderRange.createTextFinder === 'function') {
-        const cells = finderRange
-          .createTextFinder(String(value))
-          .matchEntireCell(true)
-          .matchCase(options.matchCase !== false)
-          .findAll();
-
-        return cells.map(cell => {
-          const rowIndex = cell.getRow();
-          const values = sheet.getRange(rowIndex, 1, 1, schemaHeaders.length).getValues()[0];
-          const row = { _rowIndex: rowIndex };
-          for (let i = 0; i < schemaHeaders.length; i++) row[schemaHeaders[i]] = values[i];
-          return row;
-        });
-      }
-    } catch (e) {
-      if (e instanceof AppError) throw e;
-      // Fall back to table data if range/createTextFinder methods are unmocked or unavailable
+    const schemaHeaders = MASTER_SCHEMA[tabName];
+    if (!schemaHeaders) {
+      throw new AppError(ERROR_CODES.INTERNAL_ERROR, `Schema missing for master tab '${tabName}'.`);
     }
+    const columnIndex = schemaHeaders.indexOf(columnName);
+    if (columnIndex < 0) {
+      throw new AppError(ERROR_CODES.INTERNAL_ERROR, `Column '${columnName}' is not defined for '${tabName}'.`);
+    }
+    const lastRow = sheet.getLastRow();
+    if (lastRow < 2) return [];
+    const cells = sheet
+      .getRange(2, columnIndex + 1, lastRow - 1, 1)
+      .createTextFinder(String(value))
+      .matchEntireCell(true)
+      .matchCase(options.matchCase !== false)
+      .useRegularExpression(false)
+      .findAll();
 
-    const { rows } = this.getTableData(tabName);
-    return rows.filter(r => {
-      const cell = r[columnName];
-      if (options.matchCase === false) {
-        return String(cell || '').toLowerCase() === String(value).toLowerCase();
-      }
-      return String(cell || '') === String(value);
+    return cells.map(cell => {
+      const rowIndex = cell.getRow();
+      const values = sheet.getRange(rowIndex, 1, 1, schemaHeaders.length).getValues()[0];
+      const row = { _rowIndex: rowIndex };
+      for (let i = 0; i < schemaHeaders.length; i++) row[schemaHeaders[i]] = values[i];
+      return row;
     });
   },
 
-  getUserAuthBundle(userId) {
+  getUserAuthBundle(userId, expectedEpoch = null) {
     const cached = this._getCachedUserBundle(userId);
-    if (cached) return cached;
+    // Cache eviction may fail during MFA/session rotation. A mismatched cached
+    // generation must be refreshed before rejecting the newly issued session.
+    if (cached && (expectedEpoch === null || (cached.account &&
+        Number(cached.account.SessionEpoch === '' || cached.account.SessionEpoch == null ? 1 : cached.account.SessionEpoch) === expectedEpoch))) return cached;
 
+    const observedAtMs = Date.now();
     const account = this.findAccountById(userId);
     const accesses = account ? this.getWorkspaceAccessForUser(userId) : [];
     const bundle = { account, accesses };
-    this._putCachedUserBundle(userId, bundle);
+    this._putCachedUserBundle(userId, bundle, observedAtMs);
     return bundle;
   },
 
@@ -6013,7 +6069,13 @@ var MasterRepository = (typeof global !== 'undefined' && global.MasterRepository
       this.invalidateUserCache(userId);
       return nextEpoch;
     } finally {
-      if (acquiredHere) lock.releaseLock();
+      if (acquiredHere) {
+        try {
+          if (typeof SpreadsheetApp !== 'undefined' && SpreadsheetApp.flush) SpreadsheetApp.flush();
+        } finally {
+          lock.releaseLock();
+        }
+      }
     }
   },
 
@@ -6032,18 +6094,60 @@ var MasterRepository = (typeof global !== 'undefined' && global.MasterRepository
     return this.findSessionByTokenHashFast(tokenHash);
   },
 
-  updateSession(sessionId, updates) {
-    const s = this.findRowByKey(CONSTANTS.MASTER_TABS.SESSIONS, 'SessionID', sessionId);
-    if (s) {
-      this.updateRow(CONSTANTS.MASTER_TABS.SESSIONS, s._rowIndex, updates);
-      if (
-        s.TokenHash &&
-        typeof SessionService !== 'undefined' &&
-        SessionService._deleteCachedSession
-      ) {
-        SessionService._deleteCachedSession(s.TokenHash);
+  _withSessionMutationLock(fn) {
+    // LockService is always present in Apps Script; missing service is supported
+    // only by the existing local adapters. Never use a document lock in a web app.
+    if (typeof LockService === 'undefined' || !LockService.getScriptLock) return fn();
+    const lock = LockService.getScriptLock();
+    if (typeof lock.hasLock === 'function' && lock.hasLock()) return fn();
+    if (!lock.tryLock(1000)) {
+      throw new AppError(ERROR_CODES.SERVER_BUSY, 'Session storage is busy. Please retry.', 503);
+    }
+    try {
+      return fn();
+    } finally {
+      try {
+        if (typeof SpreadsheetApp !== 'undefined' && SpreadsheetApp.flush) SpreadsheetApp.flush();
+      } finally {
+        lock.releaseLock();
       }
     }
+  },
+
+  updateSession(sessionId, updates, options = {}) {
+    return this._withSessionMutationLock(() => {
+      // Resolve after acquiring the lock, never write through a cached row index.
+      const s = this.findRowByKey(CONSTANTS.MASTER_TABS.SESSIONS, 'SessionID', sessionId);
+      if (!s) {
+        if (options.requireActive) throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'Session is no longer active.', 401);
+        return null;
+      }
+      if (options.requireActive) {
+        const revoked = s.Revoked === true || s.Revoked === 'TRUE' || s.Revoked === 1;
+        const epoch = s.AccountEpoch === '' || s.AccountEpoch == null ? 1 : Number(s.AccountEpoch);
+        const expires = new Date(s.ExpiresAt).getTime();
+        const hasAbsoluteExpiry = s.AbsoluteExpiresAt !== '' && s.AbsoluteExpiresAt != null;
+        const absolute = new Date(hasAbsoluteExpiry ? s.AbsoluteExpiresAt : updates.AbsoluteExpiresAt).getTime();
+        if (revoked || s.TokenHash !== options.expectedTokenHash || s.UserID !== options.expectedUserId ||
+            !Number.isInteger(epoch) || epoch < 1 || typeof s.AccountEpoch === 'boolean' ||
+            epoch !== options.expectedEpoch || !Number.isFinite(expires) || !Number.isFinite(absolute) ||
+            expires <= Date.now() || absolute <= Date.now()) {
+          throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'Session is no longer active.', 401);
+        }
+        // A delayed request cannot move durable activity backward or extend a
+        // shorter absolute expiry committed by another request.
+        if (new Date(s.LastSeenAt).getTime() > new Date(updates.LastSeenAt).getTime()) return s;
+        updates = { ...updates,
+          ExpiresAt: new Date(Math.min(new Date(updates.ExpiresAt).getTime(), absolute)).toISOString(),
+          AbsoluteExpiresAt: new Date(absolute).toISOString()
+        };
+      }
+      this.updateRow(CONSTANTS.MASTER_TABS.SESSIONS, s._rowIndex, updates);
+      if (s.TokenHash && typeof SessionService !== 'undefined' && SessionService._deleteCachedSession) {
+        SessionService._deleteCachedSession(s.TokenHash);
+      }
+      return { ...s, ...updates };
+    });
   },
 
   revokeAllUserSessions(userId) {
@@ -13024,6 +13128,7 @@ var SetupService = (typeof global !== 'undefined' && global.SetupService) || {
     return {
       ok: true,
       message: 'Super Admin initialized successfully.',
+      enrollmentRequired: true,
       user: {
         userId: adminUserId,
         username: cleanUsername,
@@ -14296,79 +14401,83 @@ var JobService = (typeof global !== 'undefined' && global.JobService) || {
     let purgedCheckpointsCount = 0;
 
     try {
-      const { rows: sessions } = MasterRepository.getTableData(CONSTANTS.MASTER_TABS.SESSIONS);
-      const { rows: accounts } = MasterRepository.getTableData(CONSTANTS.MASTER_TABS.ACCOUNTS);
-      const accountEpochs = {};
-      accounts.forEach(account => {
-        accountEpochs[account.UserID] =
-          Number(account.SessionEpoch) > 0 ? Number(account.SessionEpoch) : 1;
-      });
       const now = Date.now();
-      const nowIso = new Date().toISOString();
-      const retentionMs =
-        (CONSTANTS.LIMITS.SESSION_RETENTION_DAYS || 30) * 24 * 3600 * 1000;
-      const retentionCutoff = now - retentionMs;
+      // Snapshot + purge must share the lock with session writers: otherwise
+      // deleting rows can redirect a touch/revocation to somebody else's row.
+      MasterRepository._withSessionMutationLock(() => {
+        const { rows: sessions } = MasterRepository.getTableData(CONSTANTS.MASTER_TABS.SESSIONS);
+        const { rows: accounts } = MasterRepository.getTableData(CONSTANTS.MASTER_TABS.ACCOUNTS);
+        const accountEpochs = {};
+        accounts.forEach(account => {
+          accountEpochs[account.UserID] =
+            Number(account.SessionEpoch) > 0 ? Number(account.SessionEpoch) : 1;
+        });
+        const nowIso = new Date(now).toISOString();
+        const retentionMs =
+          (CONSTANTS.LIMITS.SESSION_RETENTION_DAYS || 30) * 24 * 3600 * 1000;
+        const retentionCutoff = now - retentionMs;
 
-      for (const s of sessions) {
-        const expiresMs = new Date(s.ExpiresAt).getTime();
-        const revoked =
-          s.Revoked === true || s.Revoked === 'TRUE' || s.Revoked === 1;
-
-        const sessionEpoch = Number(s.AccountEpoch) > 0 ? Number(s.AccountEpoch) : 1;
-        const currentEpoch = accountEpochs[s.UserID];
-        const epochRevoked = currentEpoch === undefined || sessionEpoch !== currentEpoch;
-
-        if (!revoked && (epochRevoked || (!isNaN(expiresMs) && expiresMs <= now))) {
-          MasterRepository.updateRow(CONSTANTS.MASTER_TABS.SESSIONS, s._rowIndex, {
-            Revoked: true,
-            RevokedAt: nowIso,
-            RevokeReason: epochRevoked ? 'ACCOUNT_EPOCH_REVOKED' : 'EXPIRED_IDLE_TIMEOUT'
-          });
-          expiredSessionsCount++;
-        }
-      }
-
-      // Purge only old, already-invalid session rows; security/audit events remain
-      // in their dedicated logs.
-      const refreshedSessions =
-        MasterRepository.getTableData(CONSTANTS.MASTER_TABS.SESSIONS).rows || [];
-      const purgeRows = refreshedSessions
-        .filter(s => {
+        for (const s of sessions) {
+          const expiresMs = new Date(s.ExpiresAt).getTime();
           const revoked =
             s.Revoked === true || s.Revoked === 'TRUE' || s.Revoked === 1;
-          const revokedAt = new Date(s.RevokedAt || '').getTime();
-          const expiresAt = new Date(s.ExpiresAt || '').getTime();
-          const oldEnough =
-            (!isNaN(revokedAt) && revokedAt < retentionCutoff) ||
-            (!isNaN(expiresAt) && expiresAt < retentionCutoff);
-          return revoked && oldEnough;
-        })
-        .sort((a, b) => b._rowIndex - a._rowIndex);
 
-      // Delete contiguous row groups from highest to lowest so row shifts
-      // never invalidate a later group. This keeps service calls bounded by
-      // fragmentation rather than by the number of retained sessions.
-      for (let i = 0; i < purgeRows.length;) {
-        let high = purgeRows[i]._rowIndex;
-        let low = high;
-        let count = 1;
-        let j = i + 1;
-        while (
-          j < purgeRows.length &&
-          purgeRows[j]._rowIndex === low - 1
-        ) {
-          low = purgeRows[j]._rowIndex;
-          count++;
-          j++;
+          const sessionEpoch = Number(s.AccountEpoch) > 0 ? Number(s.AccountEpoch) : 1;
+          const currentEpoch = accountEpochs[s.UserID];
+          const epochRevoked = currentEpoch === undefined || sessionEpoch !== currentEpoch;
+
+          if (!revoked && (epochRevoked || (!isNaN(expiresMs) && expiresMs <= now))) {
+            MasterRepository.updateRow(CONSTANTS.MASTER_TABS.SESSIONS, s._rowIndex, {
+              Revoked: true,
+              RevokedAt: nowIso,
+              RevokeReason: epochRevoked ? 'ACCOUNT_EPOCH_REVOKED' : 'EXPIRED_IDLE_TIMEOUT'
+            });
+            expiredSessionsCount++;
+          }
         }
-        MasterRepository.deleteRows(
-          CONSTANTS.MASTER_TABS.SESSIONS,
-          low,
-          count
-        );
-        purgedSessionsCount += count;
-        i = j;
-      }
+
+        // Purge only old, already-invalid session rows; security/audit events remain
+        // in their dedicated logs.
+        const refreshedSessions =
+          MasterRepository.getTableData(CONSTANTS.MASTER_TABS.SESSIONS).rows || [];
+        const purgeRows = refreshedSessions
+          .filter(s => {
+            const revoked =
+              s.Revoked === true || s.Revoked === 'TRUE' || s.Revoked === 1;
+            const revokedAt = new Date(s.RevokedAt || '').getTime();
+            const expiresAt = new Date(s.ExpiresAt || '').getTime();
+            const oldEnough =
+              (!isNaN(revokedAt) && revokedAt < retentionCutoff) ||
+              (!isNaN(expiresAt) && expiresAt < retentionCutoff);
+            return revoked && oldEnough;
+          })
+          .sort((a, b) => b._rowIndex - a._rowIndex);
+
+        // Delete contiguous row groups from highest to lowest so row shifts
+        // never invalidate a later group. Calls depend on fragmentation rather
+        // than the number of retained sessions.
+        for (let i = 0; i < purgeRows.length;) {
+          let high = purgeRows[i]._rowIndex;
+          let low = high;
+          let count = 1;
+          let j = i + 1;
+          while (
+            j < purgeRows.length &&
+            purgeRows[j]._rowIndex === low - 1
+          ) {
+            low = purgeRows[j]._rowIndex;
+            count++;
+            j++;
+          }
+          MasterRepository.deleteRows(
+            CONSTANTS.MASTER_TABS.SESSIONS,
+            low,
+            count
+          );
+          purgedSessionsCount += count;
+          i = j;
+        }
+      });
 
       // MFA challenges are one-per-user, but failed/abandoned challenges should
       // not occupy Script Properties forever.
@@ -15509,26 +15618,43 @@ var BackupService = (typeof global !== 'undefined' && global.BackupService) || {
 
     let previousSpreadsheetId = '';
     let candidateFileId = '';
-    let workspaceWasQuiesced = false;
+    let safetyBackupId = '';
+    let workspaceMutationAttempted = false;
+    let pointerSwitchAttempted = false;
+    let ownsCandidate = false;
+    const readFreshWorkspace = () => {
+      MasterRepository._invalidateTable(CONSTANTS.MASTER_TABS.WORKSPACES);
+      delete MasterRepository._requestCache['WS:' + workspaceId];
+      if (typeof WorkspaceRouter !== 'undefined' && WorkspaceRouter.clearCache) WorkspaceRouter.clearCache();
+      return MasterRepository.getWorkspace(workspaceId);
+    };
 
     try {
-      const ws = MasterRepository.getWorkspace(workspaceId);
+      const ws = readFreshWorkspace();
       if (!ws) throw new AppError(ERROR_CODES.NOT_FOUND, `Workspace ${workspaceId} not found.`, 404);
       if (ws.Status !== CONSTANTS.WORKSPACE_STATUS.ACTIVE) {
         throw new AppError(ERROR_CODES.WORKSPACE_DENIED, `Workspace must be ACTIVE before restore; current status is ${ws.Status}.`, 403);
       }
       previousSpreadsheetId = ws.SpreadsheetID;
+      if (!previousSpreadsheetId || ws.WorkspaceID !== workspaceId) {
+        throw new AppError(ERROR_CODES.CONFLICT, 'Workspace storage identity could not be verified.', 409);
+      }
 
       const validation = this.validateBackup(superAdminContext, workspaceId, backupId);
       const record = this._getRegistryRecord(backupId);
 
       // Safety snapshot of the currently live workspace before any pointer change.
       const safetyBackup = this._createBackupUnlocked(superAdminContext, workspaceId);
+      safetyBackupId = safetyBackup.backupId;
 
       const backupFile = DriveApp.getFileById(record.BackupFileID);
       const candidateName = `RESTORE_${workspaceId}_${new Date().toISOString().replace(/[:.]/g, '-')}`;
       const candidateFile = backupFile.makeCopy(candidateName);
       candidateFileId = candidateFile.getId();
+      ownsCandidate = !!candidateFileId && candidateFileId !== previousSpreadsheetId && candidateFileId !== record.BackupFileID;
+      if (!ownsCandidate) {
+        throw new AppError(ERROR_CODES.CONFLICT, 'Restore working-copy identity could not be verified.', 409);
+      }
 
       const candidateSpreadsheet = this._openBackupSpreadsheet(candidateFileId);
       const candidateManifest = this._buildManifest(candidateSpreadsheet, 'WORKSPACE', workspaceId);
@@ -15540,12 +15666,27 @@ var BackupService = (typeof global !== 'undefined' && global.BackupService) || {
       // A stale/corrupt rollup set is rejected rather than exposed live.
       const candidateRollupValidation = this._validateWorkspaceRollupTotals(candidateSpreadsheet);
 
+      const intentOk = MasterRepository.logGlobalAudit({
+        ActorUserID: superAdminContext.userId,
+        ActorRole: superAdminContext.role,
+        WorkspaceID: workspaceId,
+        EntityType: 'WORKSPACE', EntityID: workspaceId, Action: 'RESTORE_INTENT',
+        CorrelationID: candidateFileId,
+        BeforeJSON: { spreadsheetId: previousSpreadsheetId, status: ws.Status },
+        AfterJSON: { spreadsheetId: candidateFileId, status: CONSTANTS.WORKSPACE_STATUS.ACTIVE,
+          restoredBackupId: backupId, safetyBackupId, rollbackSpreadsheetId: previousSpreadsheetId },
+        Reason: 'Proposed isolated-copy restore; failures must restore the prior pointer or preserve the candidate'
+      });
+      if (!intentOk) throw new AppError(ERROR_CODES.CRYPTO_FAILURE, 'Restore audit trail is unavailable.', 503);
+      if (typeof SpreadsheetApp !== 'undefined' && SpreadsheetApp.flush) SpreadsheetApp.flush();
+
       // Quiesce all normal workspace operations before changing the live pointer.
+      // Mark attempts BEFORE I/O: a Sheets write may apply and then throw.
+      workspaceMutationAttempted = true;
       MasterRepository.updateWorkspace(workspaceId, {
         Status: CONSTANTS.WORKSPACE_STATUS.MAINTENANCE,
         UpdatedAt: new Date().toISOString()
       });
-      workspaceWasQuiesced = true;
 
       // Clear stale active timers directly on the candidate while it is still offline.
       const timersSheet = candidateSpreadsheet.getSheetByName(CONSTANTS.WORKSPACE_TABS.ACTIVE_TIMERS);
@@ -15553,6 +15694,7 @@ var BackupService = (typeof global !== 'undefined' && global.BackupService) || {
         timersSheet.deleteRows(2, timersSheet.getLastRow() - 1);
       }
 
+      pointerSwitchAttempted = true;
       MasterRepository.updateWorkspace(workspaceId, {
         SpreadsheetID: candidateFileId,
         Status: CONSTANTS.WORKSPACE_STATUS.MAINTENANCE,
@@ -15569,8 +15711,7 @@ var BackupService = (typeof global !== 'undefined' && global.BackupService) || {
       }
 
       // Commit ACTIVE only after candidate integrity, timer cleanup, pointer switch,
-      // and session revocation have all succeeded. No normal request can observe
-      // the candidate while it is still in MAINTENANCE.
+      // and session revocation have all succeeded.
       if (typeof SpreadsheetApp !== 'undefined' && SpreadsheetApp.flush) {
         SpreadsheetApp.flush();
       }
@@ -15583,22 +15724,26 @@ var BackupService = (typeof global !== 'undefined' && global.BackupService) || {
         WorkspaceRouter.clearCache();
       }
 
-      MasterRepository.logGlobalAudit({
+      const completionOk = MasterRepository.logGlobalAudit({
         ActorUserID: superAdminContext.userId,
         ActorRole: superAdminContext.role,
         WorkspaceID: workspaceId,
         EntityType: 'WORKSPACE',
         EntityID: workspaceId,
         Action: 'RESTORE_COMPLETED',
-        BeforeJSON: { spreadsheetId: previousSpreadsheetId },
+        CorrelationID: candidateFileId,
+        BeforeJSON: { spreadsheetId: previousSpreadsheetId, status: CONSTANTS.WORKSPACE_STATUS.ACTIVE },
         AfterJSON: {
           spreadsheetId: candidateFileId,
+          status: CONSTANTS.WORKSPACE_STATUS.ACTIVE,
           restoredBackupId: backupId,
           safetyBackupId: safetyBackup.backupId,
           candidateRollupValidation
         },
         Reason: 'Verified registered workspace restore applied through isolated working copy'
       });
+      if (!completionOk) throw new AppError(ERROR_CODES.CRYPTO_FAILURE, 'Restore completion audit failed.', 503);
+      if (typeof SpreadsheetApp !== 'undefined' && SpreadsheetApp.flush) SpreadsheetApp.flush();
 
       return {
         ok: true,
@@ -15611,25 +15756,70 @@ var BackupService = (typeof global !== 'undefined' && global.BackupService) || {
         message: `Workspace ${workspaceId} restored from verified backup ${backupId}.`
       };
     } catch (err) {
-      if (workspaceWasQuiesced && previousSpreadsheetId) {
+      let rollbackState = workspaceMutationAttempted ? 'UNCONFIRMED' : 'NOT_REQUIRED';
+      let observedWorkspace = null;
+      if (workspaceMutationAttempted && previousSpreadsheetId) {
         try {
+          readFreshWorkspace();
           MasterRepository.updateWorkspace(workspaceId, {
             SpreadsheetID: previousSpreadsheetId,
             Status: CONSTANTS.WORKSPACE_STATUS.ACTIVE,
             UpdatedAt: new Date().toISOString()
           });
-          if (typeof WorkspaceRouter !== 'undefined' && WorkspaceRouter.clearCache) {
-            WorkspaceRouter.clearCache();
+          if (typeof SpreadsheetApp !== 'undefined' && SpreadsheetApp.flush) SpreadsheetApp.flush();
+          observedWorkspace = readFreshWorkspace();
+          if (observedWorkspace && observedWorkspace.WorkspaceID === workspaceId &&
+              observedWorkspace.SpreadsheetID === previousSpreadsheetId &&
+              observedWorkspace.Status === CONSTANTS.WORKSPACE_STATUS.ACTIVE) {
+            rollbackState = 'CONFIRMED';
           }
         } catch (rollbackErr) {
-          console.error('Restore rollback failed: ' + rollbackErr.message);
+          console.error('Restore rollback could not be confirmed. Candidate preserved.');
         }
       }
 
-      if (candidateFileId) {
-        try { DriveApp.getFileById(candidateFileId).setTrashed(true); } catch (trashErr) {}
+      if (rollbackState === 'UNCONFIRMED') {
+        // Preserve both datasets and make a best-effort containment transition.
+        // An unavailable backend can prevent even this; do not claim isolation.
+        observedWorkspace = null;
+        try {
+          readFreshWorkspace();
+          MasterRepository.updateWorkspace(workspaceId, {
+            Status: CONSTANTS.WORKSPACE_STATUS.MAINTENANCE,
+            UpdatedAt: new Date().toISOString()
+          });
+          if (typeof SpreadsheetApp !== 'undefined' && SpreadsheetApp.flush) SpreadsheetApp.flush();
+          observedWorkspace = readFreshWorkspace();
+        } catch (containmentErr) {}
       }
 
+      let candidateDisposition = candidateFileId ? 'PRESERVED' : 'NONE';
+      // A successful update call alone does not prove detachment. A candidate
+      // ever offered as a live pointer is retained unless rollback was flushed
+      // and freshly read back under this same lock.
+      if (ownsCandidate && rollbackState !== 'UNCONFIRMED' &&
+          (!pointerSwitchAttempted || rollbackState === 'CONFIRMED')) {
+        try {
+          const cleanupOk = MasterRepository.logGlobalAudit({
+            ActorUserID: superAdminContext.userId, ActorRole: superAdminContext.role,
+            WorkspaceID: workspaceId, EntityType: 'RESTORE_CANDIDATE', EntityID: candidateFileId,
+            Action: 'RESTORE_CANDIDATE_CLEANUP_INTENT', CorrelationID: candidateFileId,
+            BeforeJSON: { trashed: false }, AfterJSON: { trashed: true },
+            Reason: 'Failed restore candidate was never referenced or its detachment was confirmed'
+          });
+          if (cleanupOk) {
+            if (typeof SpreadsheetApp !== 'undefined' && SpreadsheetApp.flush) SpreadsheetApp.flush();
+            DriveApp.getFileById(candidateFileId).setTrashed(true);
+            candidateDisposition = 'TRASHED';
+          }
+        } catch (trashErr) {
+          candidateDisposition = 'UNKNOWN';
+        }
+      }
+
+      const recoveryRequired = rollbackState === 'UNCONFIRMED';
+      const failureDetails = { workspaceId, backupId, previousSpreadsheetId, candidateFileId,
+        safetyBackupId, rollbackState, candidateDisposition, recoveryRequired };
       try {
         MasterRepository.logGlobalAudit({
           ActorUserID: superAdminContext.userId,
@@ -15638,14 +15828,25 @@ var BackupService = (typeof global !== 'undefined' && global.BackupService) || {
           EntityType: 'WORKSPACE',
           EntityID: workspaceId,
           Action: 'RESTORE_FAILED',
+          CorrelationID: candidateFileId,
           BeforeJSON: { spreadsheetId: previousSpreadsheetId },
-          AfterJSON: { backupId, candidateFileId },
-          Reason: err && err.message ? err.message : 'Restore failed'
+          AfterJSON: { ...failureDetails,
+            spreadsheetId: observedWorkspace ? observedWorkspace.SpreadsheetID : null,
+            status: observedWorkspace ? observedWorkspace.Status : null },
+          Reason: recoveryRequired ? 'Restore failed; automatic recovery could not be confirmed' : 'Restore failed; prior workspace retained'
         });
+        if (typeof SpreadsheetApp !== 'undefined' && SpreadsheetApp.flush) SpreadsheetApp.flush();
       } catch (auditErr) {}
 
+      if (recoveryRequired) {
+        throw new AppError(ERROR_CODES.INTERNAL_ERROR,
+          'Restore failed; automatic rollback could not be confirmed. Recovery is required. The candidate file was preserved.',
+          500, failureDetails);
+      }
       if (err instanceof AppError) throw err;
-      throw new AppError(ERROR_CODES.INTERNAL_ERROR, 'Restore failed and was rolled back: ' + err.message, 500);
+      throw new AppError(ERROR_CODES.INTERNAL_ERROR,
+        rollbackState === 'CONFIRMED' ? 'Restore failed; the previous workspace was restored.' : 'Restore failed before activation.',
+        500, failureDetails);
     } finally {
       if (scriptLock) {
         try { scriptLock.releaseLock(); } catch (e) {}
@@ -16303,6 +16504,50 @@ function trimSheetToSchema_(sheet, columnCount, minimumRows = 1000) {
 }
 
 var MigrationService = (typeof global !== 'undefined' && global.MigrationService) || {
+  /** Owner/editor-only additive migration. Existing tokens never gain assurance. */
+  migrateSessionAssuranceSchema() {
+    const ownerEmail = IdentityService.assertInstallationOwner();
+    return MasterRepository._withSessionMutationLock(() => {
+      const sheet = MasterRepository.getMasterSpreadsheet().getSheetByName(CONSTANTS.MASTER_TABS.SESSIONS);
+      const expected = MASTER_SCHEMA.Sessions;
+      if (!sheet) throw new AppError(ERROR_CODES.CONFLICT, 'Sessions schema is missing. Review the installation before migrating.', 409);
+      const width = sheet.getLastColumn();
+      if (width !== expected.length && width !== expected.length - 1) {
+        throw new AppError(ERROR_CODES.CONFLICT, 'Unrecognized Sessions schema. No columns were changed.', 409);
+      }
+      const before = sheet.getRange(1, 1, 1, width).getValues()[0];
+      if (!before.every((header, index) => header === expected[index])) {
+        throw new AppError(ERROR_CODES.CONFLICT, 'Unrecognized Sessions headers. No columns were changed.', 409);
+      }
+      const audit = action => {
+        if (!MasterRepository.logGlobalAudit({
+          ActorUserID: ownerEmail, ActorRole: 'INSTALLATION_OWNER', WorkspaceID: 'MASTER',
+          EntityType: 'SCHEMA', EntityID: 'Sessions.AuthLevel', Action: action,
+          BeforeJSON: { headers: before }, AfterJSON: { headers: expected, legacySessionsAssured: false },
+          Reason: 'Owner-verified additive mandatory-MFA session migration; no session rows changed'
+        })) throw new AppError(ERROR_CODES.CRYPTO_FAILURE, 'Schema migration audit is unavailable. Retry the migration.', 503);
+        SpreadsheetApp.flush();
+      };
+      const changed = width !== expected.length;
+      if (changed) {
+        audit('SESSION_ASSURANCE_SCHEMA_INTENT');
+        const allocated = sheet.getMaxColumns();
+        if (allocated < expected.length) sheet.insertColumnsAfter(allocated, expected.length - allocated);
+        sheet.getRange(1, expected.length, 1, 1).setValue('AuthLevel');
+        SpreadsheetApp.flush();
+        const actual = sheet.getRange(1, 1, 1, expected.length).getValues()[0];
+        if (!expected.every((header, index) => header === actual[index])) {
+          throw new AppError(ERROR_CODES.CONFLICT, 'Session schema write could not be verified. Retry the migration.', 409);
+        }
+        MasterRepository._invalidateTable(CONSTANTS.MASTER_TABS.SESSIONS);
+      }
+      // Also records verified completion on retry after a prior write/flush or
+      // completion-audit failure. No automatic assurance backfill is permitted.
+      audit('SESSION_ASSURANCE_SCHEMA_COMPLETED');
+      return { ok: true, changed };
+    });
+  },
+
   /**
    * Bootstraps only the Master Control Sheet schema and cryptographic secret.
    * It deliberately does NOT create any default/admin credentials.
@@ -16358,13 +16603,11 @@ var MigrationService = (typeof global !== 'undefined' && global.MigrationService
   }
 };
 
-/**
- * Deployment-owner-only PBKDF2 benchmark.
- *
- * Run this private function from the Apps Script editor against the production
- * Apps Script runtime. It does not read or write user credentials. The sample
- * password and salt below are fixed, non-secret benchmark data.
- */
+/** Deployment-owner-only migration; run from the editor before upgrading existing sessions. */
+function migrateSessionAssuranceSchema_() {
+  return MigrationService.migrateSessionAssuranceSchema();
+}
+
 /**
  * Deployment-owner-only bounded migration of stored MFA secrets to Cloud KMS.
  * Run repeatedly from the Apps Script editor until done=true.

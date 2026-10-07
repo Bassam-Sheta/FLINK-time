@@ -39,6 +39,9 @@ function loadFixture() {
     LastSuccessfulTotpStep: ''
   };
   const events = [];
+  const session = { SessionID: 'S1', UserID: 'USR-1', TokenHash: 'SYNTHETIC-HASH', AuthLevel: 'MFA_ENROLLMENT',
+    AccountEpoch: 1, ClientType: 'WEB', ClientLabel: 'worker@example.com',
+    ExpiresAt: new Date(Date.now() + 600000).toISOString(), AbsoluteExpiresAt: new Date(Date.now() + 600000).toISOString() };
   const accountUpdates = [];
   let sessionCount = 0;
 
@@ -83,16 +86,19 @@ function loadFixture() {
     findAccountByUsername() { return account; },
     findAccountById() { return account; },
     getCredentials() { return cred; },
+    findSessionByTokenHashFast(hash) { return hash === session.TokenHash ? { ...session } : null; },
     updateCredentials(_id, updates) { Object.assign(cred, updates); },
     updateAccount(_id, updates) {
       accountUpdates.push({ ...updates });
       Object.assign(account, updates);
     },
     logSecurityEvent(event) { events.push({ ...event }); },
-    logGlobalAudit() {},
+    logGlobalAudit() { return true; },
+    revokeAllUserSessions() {},
     getWorkspaceAccessForUser() { return [{ WorkspaceID: 'W1' }]; }
   };
   global.SessionService = {
+    revokeAllUserSessions() {},
     createSession() {
       sessionCount++;
       return { sessionToken: 'SESSION-' + sessionCount, expiresAt: 'later' };
@@ -112,6 +118,7 @@ function loadFixture() {
 
   return {
     AuthService,
+    session,
     account,
     cred,
     events,
@@ -235,6 +242,8 @@ test('MFA enrollment consumes the confirmation TOTP timestep', () => {
   fx.AuthService._storeMfaEnrollment('USR-1', {
     sessionId: 'S1',
     expiresAtMs: Date.now() + 60000,
+    passwordVersion: 1,
+    accountEpoch: 1,
     replacing: false
   });
 
@@ -243,7 +252,7 @@ test('MFA enrollment consumes the confirmation TOTP timestep', () => {
       userId: 'USR-1',
       role: 'USER',
       user: fx.account,
-      session: { SessionID: 'S1', ClientType: 'WEB', ClientLabel: 'worker@example.com' }
+      session: { ...fx.session }
     },
     '123456'
   );
@@ -261,6 +270,8 @@ test('MFA enrollment confirmation is rejected from another session', () => {
   fx.AuthService._storeMfaEnrollment('USR-1', {
     sessionId: 'S1',
     expiresAtMs: Date.now() + 60000,
+    passwordVersion: 1,
+    accountEpoch: 1,
     replacing: false
   });
 
@@ -270,13 +281,13 @@ test('MFA enrollment confirmation is rejected from another session', () => {
         userId: 'USR-1',
         role: 'USER',
         user: fx.account,
-        session: { SessionID: 'S2', ClientType: 'WEB', ClientLabel: 'worker@example.com' }
+        session: { ...fx.session, SessionID: 'S2' }
       },
       '123456'
     ),
     err => err instanceof AppError && err.code === 'AUTH_REQUIRED'
   );
-  assert.equal(fx.cred.PendingTotpSecret, '');
+  assert.equal(fx.cred.PendingTotpSecret, 'PENDING-SECRET', 'another session must not erase the active enrollment');
 });
 
 test('verifyMfa strictly validates 6-digit numeric pattern before acquiring lock', () => {
@@ -391,6 +402,8 @@ test('confirmMfa strictly rejects non-6-digit verification code', () => {
   fx.AuthService._storeMfaEnrollment('USR-1', {
     sessionId: 'S1',
     expiresAtMs: Date.now() + 60000,
+    passwordVersion: 1,
+    accountEpoch: 1,
     replacing: false
   });
 
@@ -398,7 +411,7 @@ test('confirmMfa strictly rejects non-6-digit verification code', () => {
     userId: 'USR-1',
     role: 'USER',
     user: fx.account,
-    session: { SessionID: 'S1', ClientType: 'WEB', ClientLabel: 'worker@example.com' }
+    session: { ...fx.session }
   };
 
   const invalidCodes = ['', '12345', '1234567', 'abcdef', '12345a', null, undefined];
@@ -409,4 +422,3 @@ test('confirmMfa strictly rejects non-6-digit verification code', () => {
     );
   }
 });
-

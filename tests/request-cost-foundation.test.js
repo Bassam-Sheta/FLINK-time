@@ -27,12 +27,14 @@ test('request-time master lookups use bounded TextFinder reads', () => {
   assert.doesNotMatch(s, /getTableData/);
 });
 
-test('session validation uses a bounded five-minute ScriptCache entry', () => {
+test('session validation uses a bounded one-minute ScriptCache entry', () => {
   const src = source();
   assert.match(src, /_sessionCacheKey\(tokenHash\)/);
-  assert.match(src, /CacheService\.getScriptCache\(\)\.put\(key, raw, 300\)/);
+  const sessionBlock = src.slice(src.indexOf('var SessionService'), src.indexOf('var AuthService'));
+  assert.match(sessionBlock, /CacheService\.getScriptCache\(\)\.put\(key, raw, 60\)/);
   assert.match(src, /let session = this\._getCachedSession\(tokenHash\)/);
-  assert.match(src, /this\._putCachedSession\(tokenHash, session\)/);
+  assert.match(sessionBlock, /this\._putCachedSession\(tokenHash, session, observedAtMs\)/);
+  assert.match(sessionBlock, /cached\.expiresAtMs <= Date\.now\(\)/);
   assert.match(src, /this\._deleteCachedSession\(tokenHash\)/);
 });
 
@@ -47,7 +49,9 @@ test('workspace access hot path is bounded and U cache is short-lived', () => {
   assert.match(src, /findRowsByKey\(tabName, columnName, value/);
   assert.match(accessBlock, /findRowsByKey/);
   assert.doesNotMatch(accessBlock, /getTableData/);
-  assert.match(src, /return 'U:' \+ String\(userId \|\| ''\)/);
+  const repoBlock = src.slice(repoStart, src.indexOf('var SheetRepository', repoStart));
+  assert.match(repoBlock, /return 'U:v2:' \+ String\(userId \|\| ''\)/);
+  assert.match(repoBlock, /cached\.expiresAtMs <= Date\.now\(\)/);
   assert.match(src, /CacheService\.getScriptCache\(\)\.put\(key, raw, 60\)/);
   assert.match(src, /invalidateUserCache\(userId\)/);
 });

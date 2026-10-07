@@ -78,7 +78,7 @@ test('root Super Admin trust anchor cannot be demoted, deactivated, re-bound, or
   assert.match(src, /root Super Admin role cannot be demoted through generic user CRUD/);
   assert.match(src, /root Super Admin account cannot be deactivated/);
   assert.match(src, /root Super Admin Google Workspace identity cannot be changed/);
-  assert.match(src, /MFA cannot be disabled for the root Super Admin through the web application/);
+  assert.match(src, /MFA is mandatory and cannot be disabled/);
 });
 
 test('destructive workspace confirmation is enforced server-side', () => {

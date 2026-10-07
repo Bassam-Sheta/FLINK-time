@@ -35,6 +35,7 @@ function runSingleLookup(totalRows, tabName, columnName, value, rowObject) {
           return {
             matchEntireCell() { return this; },
             matchCase() { return this; },
+            useRegularExpression(flag) { assert.equal(flag, false); return this; },
             findNext() {
               counters.findNext++;
               return { getRow() { return targetRow; } };
@@ -122,6 +123,7 @@ function runAccessLookup(totalRows) {
           return {
             matchEntireCell() { return this; },
             matchCase() { return this; },
+            useRegularExpression(flag) { assert.equal(flag, false); return this; },
             findAll() {
               counters.findAll++;
               return targetRows.map(r => ({ getRow() { return r; } }));
@@ -164,37 +166,18 @@ test('workspace-access lookup call count is independent of table size', () => {
   assert.ok(small.counters.getRange <= 3);
 });
 
-test('MasterRepository.findRowByKey and findRowsByKey reuse in-memory _requestCache without sheet calls', () => {
-  delete require.cache[require.resolve(codePath)];
-  const mod = require(codePath);
-  mod.MasterRepository.beginRequest();
+test('master authorization lookups bypass stale request snapshots with bounded durable reads', () => {
+  const { sessionSheetFixture } = require('./helpers/session-sheet-fixture');
+  const fx = sessionSheetFixture(50000);
+  const repo = fx.context.MasterRepository;
+  repo._requestCache.Accounts = { rows: [{ ...fx.account }] };
+  fx.account.Status = 'PASSIVE';
 
-  // Populate cache directly as getTableData would
-  mod.MasterRepository._requestCache['Accounts'] = {
-    headers: ['UserID', 'Email', 'Role', 'Status'],
-    rows: [
-      { _rowIndex: 2, UserID: 'USR-CACHED-1', Email: 'cached1@flink.test', Role: 'USER', Status: 'ACTIVE' },
-      { _rowIndex: 3, UserID: 'USR-CACHED-2', Email: 'cached2@flink.test', Role: 'ADMIN', Status: 'ACTIVE' }
-    ]
-  };
-
-  let getSheetCalls = 0;
-  global.SpreadsheetApp = {
-    openById() {
-      getSheetCalls++;
-      throw new Error('SpreadsheetApp should not be called when table is cached');
-    }
-  };
-
-  const single = mod.MasterRepository.findRowByKey('Accounts', 'Email', 'cached2@flink.test');
-  assert.ok(single);
-  assert.equal(single.UserID, 'USR-CACHED-2');
-  assert.equal(single._rowIndex, 3);
-  assert.equal(getSheetCalls, 0);
-
-  const multiple = mod.MasterRepository.findRowsByKey('Accounts', 'Role', 'USER');
+  const single = repo.findRowByKey('Accounts', 'UserID', fx.account.UserID);
+  assert.equal(single.Status, 'PASSIVE');
+  const multiple = repo.findRowsByKey('Accounts', 'Role', 'USER');
   assert.equal(multiple.length, 1);
-  assert.equal(multiple[0].UserID, 'USR-CACHED-1');
-  assert.equal(getSheetCalls, 0);
+  assert.equal(multiple[0].Status, 'PASSIVE');
+  // The adapter rejects any growing-table getDataRange or multi-row transfer.
+  assert.equal(single.UserID, fx.account.UserID);
 });
-
