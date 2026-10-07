@@ -15,7 +15,7 @@ function mfaFixture() {
   const account = { UserID: 'U1', Username: 'worker', DisplayName: 'Worker', Email: 'worker@example.test',
     Role: 'USER', Status: 'ACTIVE', SessionEpoch: 1, MustChangePassword: false };
   const cred = { UserID: 'U1', PasswordHash: 'synthetic-hash', PasswordVersion: 1, FailedLoginCount: 0,
-    MfaEnabled: false, TotpSecret: '', PendingTotpSecret: '', LastSuccessfulTotpStep: '' };
+    MfaEnabled: false, TotpSecret: '', PendingTotpSecret: '', LastSuccessfulTotpStep: '', RecoveryJSON: '' };
   const sessions = [];
   const events = [];
   const audits = [];
@@ -42,7 +42,7 @@ function mfaFixture() {
   Object.assign(context.SecurityService, {
     hashToken: value => crypto.createHash('sha256').update(String(value)).digest('hex'),
     generateSessionToken: () => 'SYNTHETIC-TOKEN-' + (++next),
-    generateRandomHex: () => String(++next).padStart(64, '0'),
+    generateRandomHex: (bytes = 16) => String(++next).padStart(bytes * 2, '0'),
     generateTotpSecret: () => 'SYNTHETIC-SECRET',
     getPepper: () => 'SYNTHETIC-PEPPER',
     verifyPassword: password => password === 'SyntheticPassword1!',
@@ -53,6 +53,7 @@ function mfaFixture() {
   context.Validation.generateId = prefix => prefix + '-' + (++next);
   context.Flags.getNumber = () => 0;
   Object.assign(context.MasterRepository, {
+    assertRecoverySchema() {},
     findAccountByUsername: () => ({ ...account }),
     findAccountById: () => ({ ...account }),
     getUserAuthBundle: () => ({ account: { ...account }, accesses: [] }),

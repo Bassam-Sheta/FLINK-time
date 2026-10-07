@@ -315,7 +315,7 @@ var MASTER_SCHEMA = {
   Credentials: [
     'UserID', 'PasswordHash', 'PasswordVersion', 'PasswordChangedAt',
     'FailedLoginCount', 'LastFailedAt', 'LockUntil', 'ResetIssuedAt', 'ResetExpiresAt',
-    'TotpSecret', 'MfaEnabled', 'PendingTotpSecret', 'LastSuccessfulTotpStep'
+    'TotpSecret', 'MfaEnabled', 'PendingTotpSecret', 'LastSuccessfulTotpStep', 'RecoveryJSON'
   ],
   Workspaces: [
     'WorkspaceID', 'WorkspaceCode', 'WorkspaceName', 'SpreadsheetID', 'DriveFolderID',
@@ -470,7 +470,7 @@ var SETTINGS_CATALOG = [
   { key:'AUTO_STOP_HOURS', group:'Time Tracking', label:'Auto-stop Long Timers (Hours)', type:'number', default:14, min:1, max:168, options:[], scope:'GLOBAL', stepUp:false, help:'Maximum timer length before automated protection applies.' },
   { key:'IDLE_TIMEOUT_HOURS', group:'Compatibility', label:'Legacy Idle Timeout (Hours)', type:'number', default:8, min:1, max:24, options:[], scope:'GLOBAL', stepUp:false, help:'Compatibility setting retained for older installations.', visible:false },
 
-  { key:'PASSWORD_RECOVERY_EMAIL', group:'Security', label:'Email Password Recovery', type:'bool', default:false, min:null, max:null, options:[], scope:'GLOBAL', stepUp:true, help:'Enables the email recovery workflow once WP6 is installed.' },
+  { key:'PASSWORD_RECOVERY_EMAIL', group:'Security', label:'Email Password Recovery', type:'bool', default:false, min:null, max:null, options:[], scope:'GLOBAL', stepUp:true, help:'Enables Google-identity-bound email password recovery. MFA remains mandatory; requires the recovery schema and MailApp consent.' },
   { key:'MFA_REQUIRED', group:'Security', label:'Require MFA (mandatory)', type:'bool', default:true, min:null, max:null, options:[], scope:'GLOBAL', stepUp:true, readOnly:true, help:'Authenticator verification is mandatory and cannot be disabled.' },
   { key:'SESSION_IDLE_MINUTES', group:'Security', label:'Session Idle Timeout (Minutes)', type:'number', default:480, min:5, max:1440, options:[], scope:'GLOBAL', stepUp:true, help:'Maximum inactivity before a session expires.' },
   { key:'SESSION_MAX_HOURS', group:'Security', label:'Maximum Session Length (Hours)', type:'number', default:24, min:1, max:168, options:[], scope:'GLOBAL', stepUp:true, help:'Absolute maximum session lifetime.' },
@@ -1059,6 +1059,9 @@ const ACTION_PERMISSIONS = {
   // Public / Unauthenticated
   'auth.login': { authRequired: false, isWrite: true },
   'auth.verifyMfa': { authRequired: false, isWrite: true },
+  'auth.recoverMfa': { authRequired: false, isWrite: true },
+  'auth.requestPasswordRecovery': { authRequired: false, isWrite: true },
+  'auth.completePasswordRecovery': { authRequired: false, isWrite: true },
   'setup.status': { authRequired: false, isWrite: false },
 
   // User Authentication, MFA & Profile
@@ -1068,6 +1071,7 @@ const ACTION_PERMISSIONS = {
   'auth.changePassword': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN, CONSTANTS.ROLES.ADMIN, CONSTANTS.ROLES.USER], isWrite: true },
   'auth.enrollMfa': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN, CONSTANTS.ROLES.ADMIN, CONSTANTS.ROLES.USER], isWrite: true },
   'auth.confirmMfa': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN, CONSTANTS.ROLES.ADMIN, CONSTANTS.ROLES.USER], isWrite: true },
+  'auth.regenerateRecoveryCodes': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN, CONSTANTS.ROLES.ADMIN, CONSTANTS.ROLES.USER], isWrite: true },
   'auth.disableMfa': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN], isWrite: true },
 
   // Setup Wizard
@@ -1208,6 +1212,9 @@ const PRIVILEGED_STEP_UP_ACTIONS = new Set([
 const PUBLIC_ACTIONS = new Set([
   'auth.login',
   'auth.verifyMfa',
+  'auth.recoverMfa',
+  'auth.requestPasswordRecovery',
+  'auth.completePasswordRecovery',
   'setup.status'
 ]);
 
@@ -1353,6 +1360,9 @@ function dispatchAction_(action, data) {
     if (action === 'auth.verifyMfa') {
       return AuthService.verifyMfa(payload.mfaChallengeToken, payload.code, payload.clientType);
     }
+    if (action === 'auth.recoverMfa') return RecoveryService.recoverMfa(payload.username, payload.password, payload.code);
+    if (action === 'auth.requestPasswordRecovery') return RecoveryService.requestPasswordRecovery(payload.username);
+    if (action === 'auth.completePasswordRecovery') return RecoveryService.completePasswordRecovery(payload.username, payload.code, payload.newPassword);
     if (action === 'setup.status') {
       return SetupService.getSetupStatus();
     }
@@ -1367,9 +1377,11 @@ function dispatchAction_(action, data) {
   // All other actions require authenticated session
   const authContext = SessionService.validateSession(token);
 
-  // Password-only sessions are capabilities for enrollment, never app access.
-  const enrollmentRequired = authContext.session && authContext.session.AuthLevel === 'MFA_ENROLLMENT';
-  if (enrollmentRequired && !['auth.validateSession', 'auth.enrollMfa', 'auth.confirmMfa', 'auth.logout', 'auth.changePassword'].includes(action)) {
+  // Restricted sessions are capabilities for enrollment, never app access.
+  const enrollmentRequired = authContext.session && authContext.session.AuthLevel !== 'MFA';
+  const restrictedActions = ['auth.validateSession', 'auth.enrollMfa', 'auth.confirmMfa', 'auth.logout'];
+  if (authContext.session && authContext.session.AuthLevel === 'MFA_ENROLLMENT') restrictedActions.push('auth.changePassword');
+  if (enrollmentRequired && !restrictedActions.includes(action)) {
     throw new AppError(ERROR_CODES.MFA_REQUIRED, 'Set up your authenticator before using the application.', 403);
   }
 
@@ -1446,6 +1458,9 @@ function dispatchAction_(action, data) {
 
     case 'auth.confirmMfa':
       return AuthService.confirmMfa(authContext, payload.code);
+
+    case 'auth.regenerateRecoveryCodes':
+      return RecoveryService.regenerateCodes(authContext, payload.currentPassword, payload.totpCode);
 
     case 'auth.disableMfa':
       return AuthService.disableMfa(
@@ -3323,7 +3338,7 @@ var SessionService = (typeof global !== 'undefined' && global.SessionService) ||
    * Creates and registers a new authenticated session
    */
   createSession(userId, clientType = 'WEB', clientLabel = '', authLevel = 'MFA_ENROLLMENT') {
-    if (!['MFA', 'MFA_ENROLLMENT'].includes(authLevel)) {
+    if (!['MFA', 'MFA_ENROLLMENT', 'MFA_RECOVERY'].includes(authLevel)) {
       throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'Invalid authentication assurance.', 401);
     }
     return MasterRepository._withSessionMutationLock(() => {
@@ -3388,8 +3403,8 @@ var SessionService = (typeof global !== 'undefined' && global.SessionService) ||
     const idleTimeoutMs = idleTimeoutMinutes * 60 * 1000;
     const absoluteTimeoutMs = absoluteTimeoutHours * 3600 * 1000;
     const enrollmentMs = (CONSTANTS.LIMITS.MFA_ENROLLMENT_TTL_MINUTES || 10) * 60000;
-    const expiresAt = new Date(now.getTime() + (authLevel === 'MFA_ENROLLMENT' ? Math.min(idleTimeoutMs, enrollmentMs) : idleTimeoutMs));
-    const absoluteExpiresAt = new Date(now.getTime() + (authLevel === 'MFA_ENROLLMENT' ? enrollmentMs : absoluteTimeoutMs));
+    const expiresAt = new Date(now.getTime() + (authLevel !== 'MFA' ? Math.min(idleTimeoutMs, enrollmentMs) : idleTimeoutMs));
+    const absoluteExpiresAt = new Date(now.getTime() + (authLevel !== 'MFA' ? enrollmentMs : absoluteTimeoutMs));
 
     const sessionRecord = {
       SessionID: sessionId,
@@ -3451,7 +3466,7 @@ var SessionService = (typeof global !== 'undefined' && global.SessionService) ||
       throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'Invalid or expired session.', 401);
     }
 
-    if (!['MFA', 'MFA_ENROLLMENT'].includes(session.AuthLevel)) {
+    if (!['MFA', 'MFA_ENROLLMENT', 'MFA_RECOVERY'].includes(session.AuthLevel)) {
       this._deleteCachedSession(tokenHash);
       throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'Sign in again to complete mandatory MFA.', 401);
     }
@@ -4783,7 +4798,8 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
     const accountEpoch = account ? epochOf(account.SessionEpoch) : NaN;
     if (!account || !cred || !session || account.Status !== CONSTANTS.ACCOUNT_STATUS.ACTIVE ||
         session.SessionID !== authContext.session.SessionID || session.UserID !== authContext.userId ||
-        session.TokenHash !== authContext.session.TokenHash || !['MFA', 'MFA_ENROLLMENT'].includes(session.AuthLevel) ||
+        session.TokenHash !== authContext.session.TokenHash || !['MFA', 'MFA_ENROLLMENT', 'MFA_RECOVERY'].includes(session.AuthLevel) ||
+        session.AuthLevel !== authContext.session.AuthLevel ||
         session.Revoked === true || session.Revoked === 'TRUE' || session.Revoked === 1 ||
         !(new Date(session.ExpiresAt).getTime() > Date.now()) || !(new Date(session.AbsoluteExpiresAt).getTime() > Date.now()) ||
         accountEpoch !== epochOf(authContext.session.AccountEpoch) ||
@@ -4855,7 +4871,7 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
       cred.MfaEnabled === true ||
       cred.MfaEnabled === 'TRUE' || cred.MfaEnabled === 1;
 
-    if (replacing) {
+    if (replacing && authContext.session.AuthLevel !== 'MFA_RECOVERY') {
       const cleanCurrentCode = String(currentMfaCode || '').trim();
       if (!cleanCurrentCode || !/^\d{6}$/.test(cleanCurrentCode) || !cred.TotpSecret) {
         throw new AppError(ERROR_CODES.AUTH_REQUIRED, 'The existing authenticator code is required before replacing MFA.', 401);
@@ -4960,12 +4976,15 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
       }
 
       const before = { mfaEnabled: cred.MfaEnabled === true || cred.MfaEnabled === 'TRUE' || cred.MfaEnabled === 1, pendingEnrollment: true };
-      const after = { mfaEnabled: true, pendingEnrollment: false };
+      const recovery = RecoveryService.codesForEnrollment(authContext.userId, cred, cred.PendingTotpSecret);
+      const after = { mfaEnabled: true, pendingEnrollment: false, recoveryCodes: 8, recoveryGeneration: recovery.state.codes.generation };
       this._requireEnrollmentAudit(authContext, 'MFA_ENROLLMENT_COMMIT_INTENT', before, after);
+      SpreadsheetApp.flush();
       MasterRepository.updateCredentials(authContext.userId, {
         TotpSecret: cred.PendingTotpSecret,
         MfaEnabled: true,
         PendingTotpSecret: '',
+        RecoveryJSON: JSON.stringify(recovery.state),
         LastSuccessfulTotpStep: verification.timeStep,
         FailedLoginCount: 0,
         LastFailedAt: '',
@@ -4985,6 +5004,7 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
       return {
         ok: true,
         replaced: enrollment.replacing === true,
+        recoveryCodes: recovery.codes,
         sessionToken: replacementSession ? replacementSession.sessionToken : undefined,
         expiresAt: replacementSession ? replacementSession.expiresAt : undefined,
         message: enrollment.replacing === true
@@ -5195,6 +5215,275 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
   logout(sessionToken) {
     SessionService.revokeSession(sessionToken);
     return { ok: true };
+  }
+};
+
+/* ===== RecoveryService.gs ===== */
+// One bounded credential cell per account; no cache or Script Properties authority.
+var RecoveryService = (typeof global !== 'undefined' && global.RecoveryService) || {
+  _denied() { return new AppError(ERROR_CODES.AUTH_REQUIRED, 'Recovery verification failed. Sign in again or request a new code.', 401); },
+  _generation(value) {
+    if (value === '' || value == null) return 1;
+    const n = Number(value);
+    if (typeof value === 'boolean' || !Number.isSafeInteger(n) || n < 1 || n >= Number.MAX_SAFE_INTEGER) throw this._denied();
+    return n;
+  },
+  _read(cred) {
+    MasterRepository.assertRecoverySchema();
+    if (!cred || !Object.prototype.hasOwnProperty.call(cred, 'RecoveryJSON')) {
+      throw new AppError(ERROR_CODES.CRYPTO_FAILURE, 'Recovery schema migration is required.', 503);
+    }
+    if (cred.RecoveryJSON === '') return { v: 1, codes: null, reset: null, failures: 0, lockUntil: 0, mailAt: [] };
+    try {
+      if (typeof cred.RecoveryJSON !== 'string' || cred.RecoveryJSON.length > 8192) throw new Error();
+      const state = JSON.parse(cred.RecoveryJSON);
+      const integer = value => Number.isSafeInteger(value) && value >= 0;
+      const hash = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
+      const shape = (value, keys) => value && typeof value === 'object' && !Array.isArray(value) &&
+        Object.keys(value).length === keys.length && keys.every(key => Object.prototype.hasOwnProperty.call(value, key));
+      if (!shape(state, ['v', 'codes', 'reset', 'failures', 'lockUntil', 'mailAt']) ||
+          state.v !== 1 || !integer(state.failures) || state.failures > 5 || !integer(state.lockUntil) ||
+          ((state.failures === 5) !== (state.lockUntil > 0)) ||
+          !Array.isArray(state.mailAt) || state.mailAt.length > 3 || state.mailAt.some(t => !integer(t)) ||
+          (state.codes !== null && (!shape(state.codes, ['generation', 'binding', 'hashes']) || !/^[a-f0-9]{32}$/.test(state.codes.generation) || !hash(state.codes.binding) ||
+            !Array.isArray(state.codes.hashes) || state.codes.hashes.length > 8 || state.codes.hashes.some(h => !hash(h)) ||
+            new Set(state.codes.hashes).size !== state.codes.hashes.length)) ||
+          (state.reset !== null && (!shape(state.reset, ['hash', 'expires', 'version', 'epoch']) || !hash(state.reset.hash) || !integer(state.reset.expires) ||
+            !integer(state.reset.version) || !state.reset.version || !integer(state.reset.epoch) || !state.reset.epoch))) throw new Error();
+      return state;
+    } catch (_) { throw new AppError(ERROR_CODES.CRYPTO_FAILURE, 'Recovery security state is invalid.', 503); }
+  },
+  _summary(state) {
+    return { remainingCodes: state.codes ? state.codes.hashes.length : 0,
+      codeGeneration: state.codes ? state.codes.generation : '', resetPending: !!state.reset,
+      failures: state.failures, lockUntil: state.lockUntil, emailRequests: state.mailAt.length };
+  },
+  _audit(account, action, before, after) {
+    if (!MasterRepository.logGlobalAudit({ ActorUserID: account.UserID, ActorRole: account.Role,
+      WorkspaceID: 'MASTER', EntityType: 'USER_RECOVERY', EntityID: account.UserID, Action: action,
+      BeforeJSON: before, AfterJSON: after, Reason: 'Google-bound recovery; credentials and codes excluded' })) {
+      throw new AppError(ERROR_CODES.CRYPTO_FAILURE, 'Recovery audit is unavailable. Retry after signing in.', 503);
+    }
+    SpreadsheetApp.flush();
+  },
+  _commit(account, before, state, action, updates = {}) {
+    const after = { ...this._summary(state), operationId: Validation.generateId('RCV') };
+    this._audit(account, action + '_INTENT', before, after);
+    MasterRepository.updateCredentials(account.UserID, { ...updates, RecoveryJSON: JSON.stringify(state) });
+    SpreadsheetApp.flush();
+    this._audit(account, action + '_COMPLETED', before, after);
+  },
+  _available(state) {
+    if (state.lockUntil > Date.now()) throw this._denied();
+    if (state.lockUntil) { state.failures = 0; state.lockUntil = 0; }
+  },
+  _failure(account, before, state) {
+    state.failures = Math.min(5, state.failures + 1);
+    if (state.failures >= 5) state.lockUntil = Date.now() + 15 * 60000;
+    this._commit(account, before, state, 'RECOVERY_FAILED');
+    throw this._denied();
+  },
+  _identity(username) {
+    if (typeof username !== 'string' || !/^[a-z0-9_.-]{3,50}$/i.test(username.trim())) throw this._denied();
+    const account = MasterRepository.findAccountByUsername(username.trim().toLowerCase());
+    if (!account) throw this._denied();
+    const cred = MasterRepository.getCredentials(account.UserID);
+    if (!cred || account.Status !== CONSTANTS.ACCOUNT_STATUS.ACTIVE ||
+        (cred.LockUntil && !(new Date(cred.LockUntil).getTime() <= Date.now()))) throw this._denied();
+    IdentityService.assertAccountIdentity(account, 'WEB');
+    this._generation(account.SessionEpoch);
+    this._generation(cred.PasswordVersion);
+    return { account, cred };
+  },
+  _same(initial, latest) {
+    return initial.account.UserID === latest.account.UserID && initial.account.Email === latest.account.Email &&
+      this._generation(initial.account.SessionEpoch) === this._generation(latest.account.SessionEpoch) &&
+      this._generation(initial.cred.PasswordVersion) === this._generation(latest.cred.PasswordVersion) &&
+      initial.cred.PasswordHash === latest.cred.PasswordHash && initial.cred.TotpSecret === latest.cred.TotpSecret;
+  },
+  _normalizeCode(value) {
+    if (typeof value !== 'string' || value.length > 80) return '';
+    const code = value.replace(/[\s-]/g, '').toLowerCase();
+    return /^[a-f0-9]{32}$/.test(code) ? code : '';
+  },
+  _hash(userId, purpose, code) { return SecurityService.hashToken('FLINK_RECOVERY_V1|' + userId + '|' + purpose + '|' + code); },
+  _format(code) { return code.toUpperCase().match(/.{4}/g).join('-'); },
+  _randomCode() {
+    // The Apps Script helper concatenates UUIDs, whose version bits are fixed.
+    // Hash two UUIDs (32 bytes of input) before truncating to a 128-bit code.
+    const entropy = SecurityService.generateRandomHex(32);
+    if (!/^[a-f0-9]{64}$/.test(entropy)) throw new AppError(ERROR_CODES.CRYPTO_FAILURE, 'Recovery code generation failed.', 503);
+    return SecurityService.hashToken('FLINK_RECOVERY_RANDOM_V1|' + entropy).slice(0, 32);
+  },
+  _newCodes(userId, state, secret) {
+    const generation = this._randomCode();
+    const raw = Array.from({ length: 8 }, () => this._randomCode());
+    if (!/^[a-f0-9]{32}$/.test(generation) || raw.some(c => !/^[a-f0-9]{32}$/.test(c)) || new Set(raw).size !== 8) {
+      throw new AppError(ERROR_CODES.CRYPTO_FAILURE, 'Recovery code generation failed.', 503);
+    }
+    state.codes = { generation, binding: this._hash(userId, 'TOTP', secret),
+      hashes: raw.map(code => this._hash(userId, generation, code)) };
+    state.failures = 0;
+    state.lockUntil = 0;
+    return { state, codes: raw.map(code => this._format(code)) };
+  },
+  codesForEnrollment(userId, cred, secret) {
+    const state = this._read(cred);
+    state.reset = null;
+    return this._newCodes(userId, state, secret);
+  },
+  recoverMfa(username, password, code) {
+    const initial = this._identity(username);
+    this._available(this._read(initial.cred));
+    const validPassword = typeof password === 'string' && password.length <= 128 &&
+      SecurityService.verifyPassword(password, initial.cred.PasswordHash);
+    return MasterRepository._withSessionMutationLock(() => {
+      const latest = this._identity(username);
+      if (!this._same(initial, latest)) throw this._denied();
+      const { account, cred } = latest;
+      const state = this._read(cred);
+      const before = this._summary(state);
+      this._available(state);
+      const clean = this._normalizeCode(code);
+      const index = state.codes && clean ? state.codes.hashes.findIndex(hash =>
+        SecurityService.constantTimeEquals(hash, this._hash(account.UserID, state.codes.generation, clean))) : -1;
+      if (!validPassword || index < 0 || !cred.TotpSecret ||
+          ![true, 'TRUE', 1].includes(cred.MfaEnabled) || state.codes.binding !== this._hash(account.UserID, 'TOTP', cred.TotpSecret)) {
+        return this._failure(account, before, state);
+      }
+      state.codes.hashes.splice(index, 1);
+      state.failures = 0;
+      state.lockUntil = 0;
+      this._commit(account, before, state, 'RECOVERY_CODE_CONSUMED');
+      const epoch = this._generation(account.SessionEpoch);
+      const sessionAudit = { epoch: epoch + 1, authLevel: 'MFA_RECOVERY', operationId: Validation.generateId('RCV') };
+      this._audit(account, 'MFA_RECOVERY_SESSION_INTENT', { epoch }, sessionAudit);
+      SessionService.revokeAllUserSessions(account.UserID);
+      AuthService._deleteMfaChallenge(account.UserID);
+      AuthService._deleteMfaEnrollment(account.UserID);
+      const session = SessionService.createSession(account.UserID, 'WEB', account.Email, 'MFA_RECOVERY');
+      this._audit(account, 'MFA_RECOVERY_SESSION_COMPLETED', { epoch }, { ...sessionAudit, sessionId: session.sessionId });
+      return { ...session, enrollmentRequired: true, user: {
+        userId: account.UserID, username: account.Username, displayName: account.DisplayName,
+        role: account.Role, status: account.Status, email: account.Email,
+        primaryWorkspaceId: account.PrimaryWorkspaceID || '', assignedWorkspaces: [],
+        mustChangePassword: account.MustChangePassword === true || account.MustChangePassword === 'TRUE'
+      } };
+    });
+  },
+  regenerateCodes(authContext, password, code) {
+    if (!authContext.session || authContext.session.AuthLevel !== 'MFA') throw this._denied();
+    const initial = AuthService._assertEnrollmentAccount(authContext);
+    this._available(this._read(initial.cred));
+    const passwordValid = typeof password === 'string' && password.length <= 128 &&
+      SecurityService.verifyPassword(password, initial.cred.PasswordHash);
+    const verification = /^\d{6}$/.test(String(code || ''))
+      ? SecurityService.verifyTotpWithStep(initial.cred.TotpSecret, code, 1, Date.now(), 30, authContext.userId) : { valid: false };
+    return MasterRepository._withSessionMutationLock(() => {
+      const latest = AuthService._assertEnrollmentAccount(authContext);
+      if (!this._same(initial, latest)) throw this._denied();
+      const { account, cred } = latest;
+      const state = this._read(cred);
+      const before = this._summary(state);
+      this._available(state);
+      const last = cred.LastSuccessfulTotpStep === '' || cred.LastSuccessfulTotpStep == null ? -1 : Number(cred.LastSuccessfulTotpStep);
+      if (!passwordValid || ![true, 'TRUE', 1].includes(cred.MfaEnabled) || !verification.valid ||
+          !Number.isSafeInteger(verification.timeStep) || !Number.isSafeInteger(last) || verification.timeStep <= last ||
+          Math.abs(verification.timeStep - Math.floor(Date.now() / 30000)) > 1) return this._failure(account, before, state);
+      const generated = this._newCodes(account.UserID, state, cred.TotpSecret);
+      this._commit(account, before, state, 'RECOVERY_CODES_ROTATED', { LastSuccessfulTotpStep: verification.timeStep });
+      return { recoveryCodes: generated.codes };
+    });
+  },
+  _emailEnabled() {
+    return [true, 'true', 'TRUE', 1, '1'].includes(MasterRepository.getGlobalSettingFast('PASSWORD_RECOVERY_EMAIL', false));
+  },
+  requestPasswordRecovery(username) {
+    const generic = { ok: true, message: 'If recovery is available for your Google account, a code will be emailed to you.' };
+    if (!this._emailEnabled()) return generic;
+    let initial;
+    try { initial = this._identity(username); } catch (_) { return generic; }
+    const issued = MasterRepository._withSessionMutationLock(() => {
+      if (!this._emailEnabled()) return null;
+      let latest;
+      try { latest = this._identity(username); } catch (_) { return null; }
+      if (!this._same(initial, latest)) return null;
+      const { account, cred } = latest;
+      const state = this._read(cred);
+      const before = this._summary(state);
+      const now = Date.now();
+      if (state.lockUntil > now) return null;
+      state.mailAt = state.mailAt.filter(t => t > now - 3600000);
+      if (state.mailAt.length >= 3 || state.mailAt.some(t => t > now - 60000) || MailApp.getRemainingDailyQuota() < 1) return null;
+      const raw = this._randomCode();
+      if (!/^[a-f0-9]{32}$/.test(raw)) throw new AppError(ERROR_CODES.CRYPTO_FAILURE, 'Recovery code generation failed.', 503);
+      state.reset = { hash: this._hash(account.UserID, 'PASSWORD', raw), expires: now + 15 * 60000,
+        version: this._generation(cred.PasswordVersion), epoch: this._generation(account.SessionEpoch) };
+      state.mailAt.push(now);
+      this._commit(account, before, state, 'PASSWORD_RECOVERY_ISSUED');
+      return { account, raw };
+    });
+    if (!issued) return generic;
+    // The durable issuance/audit/cooldown precede MailApp. Sending does not hold
+    // the script lock, and an uncertain send never triggers automatic resending.
+    let sent = false;
+    try {
+      MailApp.sendEmail({ to: issued.account.Email, subject: 'FLINK password recovery',
+        body: 'Your FLINK password recovery code is:\n\n' + this._format(issued.raw) +
+          '\n\nIt expires in 15 minutes. Enter it in the original FLINK portal. MFA is still required after changing your password. If you did not request this, ignore this message.' });
+      sent = true;
+    } catch (_) { /* Delivery can be uncertain; preserve the already-issued token. */ }
+    MasterRepository._withSessionMutationLock(() => this._audit(issued.account,
+      sent ? 'PASSWORD_RECOVERY_MAIL_SUBMITTED' : 'PASSWORD_RECOVERY_MAIL_UNCONFIRMED',
+      { delivery: 'PENDING' }, { delivery: sent ? 'SUBMITTED' : 'UNCONFIRMED' }));
+    return generic;
+  },
+  completePasswordRecovery(username, code, newPassword) {
+    if (!this._emailEnabled()) throw this._denied();
+    const initial = this._identity(username);
+    this._available(this._read(initial.cred));
+    Validation.validatePassword(newPassword);
+    const newHash = SecurityService.hashPassword(newPassword);
+    return MasterRepository._withSessionMutationLock(() => {
+      if (!this._emailEnabled()) throw this._denied();
+      const latest = this._identity(username);
+      if (!this._same(initial, latest)) throw this._denied();
+      const { account, cred } = latest;
+      const state = this._read(cred);
+      const before = this._summary(state);
+      this._available(state);
+      const clean = this._normalizeCode(code);
+      const version = this._generation(cred.PasswordVersion);
+      const epoch = this._generation(account.SessionEpoch);
+      if (!clean || !state.reset || state.reset.expires <= Date.now() || state.reset.version !== version || state.reset.epoch !== epoch ||
+          !SecurityService.constantTimeEquals(state.reset.hash, this._hash(account.UserID, 'PASSWORD', clean))) {
+        return this._failure(account, before, state);
+      }
+      state.reset = null;
+      state.failures = 0;
+      state.lockUntil = 0;
+      const beforeAudit = { ...before, passwordVersion: version, epoch,
+        mustChangePassword: account.MustChangePassword === true || account.MustChangePassword === 'TRUE' };
+      const afterAudit = { ...this._summary(state), passwordVersion: version + 1, epoch: epoch + 1, mfaChanged: false,
+        mustChangePassword: false, operationId: Validation.generateId('RCV') };
+      this._audit(account, 'PASSWORD_RECOVERY_RESET_INTENT', beforeAudit, afterAudit);
+      // Revoke before changing the password. If interrupted here, request a new
+      // email code bound to the new epoch; never resurrect an old reset token.
+      MasterRepository.updateAccount(account.UserID, { SessionEpoch: epoch + 1,
+        UpdatedAt: new Date().toISOString(), UpdatedBy: account.UserID });
+      SpreadsheetApp.flush();
+      MasterRepository.updateCredentials(account.UserID, { PasswordHash: newHash, PasswordVersion: version + 1,
+        PasswordChangedAt: new Date().toISOString(), ResetIssuedAt: '', ResetExpiresAt: '', PendingTotpSecret: '',
+        RecoveryJSON: JSON.stringify(state) });
+      SpreadsheetApp.flush();
+      MasterRepository.updateAccount(account.UserID, { MustChangePassword: false,
+        UpdatedAt: new Date().toISOString(), UpdatedBy: account.UserID });
+      AuthService._deleteMfaChallenge(account.UserID);
+      AuthService._deleteMfaEnrollment(account.UserID);
+      SpreadsheetApp.flush();
+      this._audit(account, 'PASSWORD_RECOVERY_RESET_COMPLETED', beforeAudit, afterAudit);
+      return { ok: true, signInRequired: true, message: 'Password changed. Sign in and complete MFA.' };
+    });
   }
 };
 
@@ -5888,6 +6177,23 @@ var MasterRepository = (typeof global !== 'undefined' && global.MasterRepository
 
   getCredentials(userId) {
     return this.findRowByKey(CONSTANTS.MASTER_TABS.CREDENTIALS, 'UserID', userId);
+  },
+
+  assertRecoverySchema() {
+    // Key lookups map against MASTER_SCHEMA and cannot prove that a new column
+    // actually exists. updateRow uses the physical header; never silently drop
+    // recovery counters/hashes on a pre-migration credentials sheet.
+    const tab = CONSTANTS.MASTER_TABS.CREDENTIALS;
+    const sheet = this.getMasterSpreadsheet().getSheetByName(tab);
+    const expected = MASTER_SCHEMA.Credentials;
+    if (!sheet || sheet.getLastColumn() !== expected.length) {
+      throw new AppError(ERROR_CODES.CRYPTO_FAILURE, 'Recovery schema migration is required.', 503);
+    }
+    const actual = sheet.getRange(1, 1, 1, expected.length).getValues()[0];
+    if (!expected.every((header, index) => header === actual[index])) {
+      throw new AppError(ERROR_CODES.CRYPTO_FAILURE, 'Recovery credential headers require owner review.', 503);
+    }
+    this._headerCache[tab] = actual;
   },
 
   updateCredentials(userId, updates) {
@@ -16506,44 +16812,53 @@ function trimSheetToSchema_(sheet, columnCount, minimumRows = 1000) {
 var MigrationService = (typeof global !== 'undefined' && global.MigrationService) || {
   /** Owner/editor-only additive migration. Existing tokens never gain assurance. */
   migrateSessionAssuranceSchema() {
+    return this._migrateSecurityColumn('Sessions', 'AuthLevel', 'SESSION_ASSURANCE_SCHEMA');
+  },
+
+  migrateRecoverySchema() {
+    return this._migrateSecurityColumn('Credentials', 'RecoveryJSON', 'CREDENTIAL_RECOVERY_SCHEMA');
+  },
+
+  _migrateSecurityColumn(tabName, column, eventPrefix) {
     const ownerEmail = IdentityService.assertInstallationOwner();
     return MasterRepository._withSessionMutationLock(() => {
-      const sheet = MasterRepository.getMasterSpreadsheet().getSheetByName(CONSTANTS.MASTER_TABS.SESSIONS);
-      const expected = MASTER_SCHEMA.Sessions;
-      if (!sheet) throw new AppError(ERROR_CODES.CONFLICT, 'Sessions schema is missing. Review the installation before migrating.', 409);
+      const sheet = MasterRepository.getMasterSpreadsheet().getSheetByName(tabName);
+      const expected = MASTER_SCHEMA[tabName];
+      if (!sheet || expected[expected.length - 1] !== column) throw new AppError(ERROR_CODES.CONFLICT, 'Security schema is missing. Review the installation before migrating.', 409);
       const width = sheet.getLastColumn();
       if (width !== expected.length && width !== expected.length - 1) {
-        throw new AppError(ERROR_CODES.CONFLICT, 'Unrecognized Sessions schema. No columns were changed.', 409);
+        throw new AppError(ERROR_CODES.CONFLICT, 'Unrecognized security schema. No columns were changed.', 409);
       }
       const before = sheet.getRange(1, 1, 1, width).getValues()[0];
       if (!before.every((header, index) => header === expected[index])) {
-        throw new AppError(ERROR_CODES.CONFLICT, 'Unrecognized Sessions headers. No columns were changed.', 409);
+        throw new AppError(ERROR_CODES.CONFLICT, 'Unrecognized security headers. No columns were changed.', 409);
       }
       const audit = action => {
         if (!MasterRepository.logGlobalAudit({
           ActorUserID: ownerEmail, ActorRole: 'INSTALLATION_OWNER', WorkspaceID: 'MASTER',
-          EntityType: 'SCHEMA', EntityID: 'Sessions.AuthLevel', Action: action,
-          BeforeJSON: { headers: before }, AfterJSON: { headers: expected, legacySessionsAssured: false },
-          Reason: 'Owner-verified additive mandatory-MFA session migration; no session rows changed'
+          EntityType: 'SCHEMA', EntityID: tabName + '.' + column, Action: action,
+          BeforeJSON: { headers: before }, AfterJSON: { headers: expected, dataRowsChanged: false },
+          Reason: 'Owner-verified additive security migration; no data rows changed'
         })) throw new AppError(ERROR_CODES.CRYPTO_FAILURE, 'Schema migration audit is unavailable. Retry the migration.', 503);
         SpreadsheetApp.flush();
       };
       const changed = width !== expected.length;
       if (changed) {
-        audit('SESSION_ASSURANCE_SCHEMA_INTENT');
+        audit(eventPrefix + '_INTENT');
         const allocated = sheet.getMaxColumns();
         if (allocated < expected.length) sheet.insertColumnsAfter(allocated, expected.length - allocated);
-        sheet.getRange(1, expected.length, 1, 1).setValue('AuthLevel');
+        sheet.getRange(1, expected.length, 1, 1).setValue(column);
         SpreadsheetApp.flush();
         const actual = sheet.getRange(1, 1, 1, expected.length).getValues()[0];
         if (!expected.every((header, index) => header === actual[index])) {
-          throw new AppError(ERROR_CODES.CONFLICT, 'Session schema write could not be verified. Retry the migration.', 409);
+          throw new AppError(ERROR_CODES.CONFLICT, 'Security schema write could not be verified. Retry the migration.', 409);
         }
-        MasterRepository._invalidateTable(CONSTANTS.MASTER_TABS.SESSIONS);
+        MasterRepository._invalidateTable(tabName);
+        if (MasterRepository._headerCache) delete MasterRepository._headerCache[tabName];
       }
       // Also records verified completion on retry after a prior write/flush or
       // completion-audit failure. No automatic assurance backfill is permitted.
-      audit('SESSION_ASSURANCE_SCHEMA_COMPLETED');
+      audit(eventPrefix + '_COMPLETED');
       return { ok: true, changed };
     });
   },
@@ -16606,6 +16921,10 @@ var MigrationService = (typeof global !== 'undefined' && global.MigrationService
 /** Deployment-owner-only migration; run from the editor before upgrading existing sessions. */
 function migrateSessionAssuranceSchema_() {
   return MigrationService.migrateSessionAssuranceSchema();
+}
+
+function migrateRecoverySchema_() {
+  return MigrationService.migrateRecoverySchema();
 }
 
 /**

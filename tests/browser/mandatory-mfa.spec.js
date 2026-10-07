@@ -22,6 +22,8 @@ for (const route of ['/user', '/admin']) {
     await expect(page.locator('#appHeader')).toBeHidden();
     await page.getByLabel('New authenticator code').fill('123456');
     await page.getByRole('button', { name: 'Confirm authenticator' }).click();
+    await expect(page.getByRole('heading', { name: 'Save your recovery codes' })).toBeVisible();
+    await page.getByRole('button', { name: 'I saved my recovery codes' }).click();
     await expect(page.locator('#appHeader')).toBeVisible();
     await expect(page.locator('#enrollmentSecret')).toHaveText('');
     expect(await page.evaluate(() => sessionStorage.getItem('flink_session_token'))).toBe('MFA-VERIFIED');
@@ -42,6 +44,7 @@ test('owner setup pauses for MFA before company configuration', async ({ page })
   await page.getByRole('button', { name: 'Generate setup key' }).click();
   await page.getByLabel('New authenticator code').fill('123456');
   await page.getByRole('button', { name: 'Confirm authenticator' }).click();
+  await page.getByRole('button', { name: 'I saved my recovery codes' }).click();
   await expect(page.locator('#wzCompanyName')).toBeVisible();
   await expect(page.locator('#appHeader')).toBeHidden();
 });

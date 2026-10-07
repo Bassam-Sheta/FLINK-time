@@ -4,9 +4,9 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { sessionSheetFixture } = require('./helpers/session-sheet-fixture');
 
-function fixture() {
+function fixture(tab = 'Sessions') {
   const fx = sessionSheetFixture();
-  const expected = Array.from(fx.context.MASTER_SCHEMA.Sessions);
+  const expected = Array.from(fx.context.MASTER_SCHEMA[tab]);
   const headers = expected.slice(0, -1);
   const originalRows = [['existing-session', 'no-assurance-added']];
   const rowsBefore = JSON.stringify(originalRows);
@@ -36,17 +36,17 @@ function fixture() {
       };
     }
   };
-  fx.context.MasterRepository.getMasterSpreadsheet = () => ({ getSheetByName: name => name === 'Sessions' ? sheet : null });
+  fx.context.MasterRepository.getMasterSpreadsheet = () => ({ getSheetByName: name => name === tab ? sheet : null });
   fx.context.MasterRepository.logGlobalAudit = record => {
     events.push(record.Action);
-    return controls.audit && !(controls.failCompletion && record.Action === 'SESSION_ASSURANCE_SCHEMA_COMPLETED');
+    return controls.audit && !(controls.failCompletion && record.Action.endsWith('_COMPLETED'));
   };
   fx.context.SpreadsheetApp.flush = () => {
     assert.equal(fx.controls.locked, true); events.push('flush');
     if (events.filter(event => event === 'flush').length === controls.failFlush) throw new Error('Synthetic flush failure');
   };
   return { ...fx, headers, expected, controls, events, originalRows, rowsBefore,
-    run: () => fx.context.migrateSessionAssuranceSchema_() };
+    run: () => tab === 'Sessions' ? fx.context.migrateSessionAssuranceSchema_() : fx.context.migrateRecoverySchema_() };
 }
 
 test('owner session schema migration appends only AuthLevel and keeps old sessions unassured', () => {
@@ -105,4 +105,17 @@ test('completion audit failure is reported and retry records completion of the a
   assert.equal(fx.run().changed, false);
   assert.equal(fx.events.filter(event => event === 'header').length, 1);
   assert.equal(fx.events.filter(event => event === 'SESSION_ASSURANCE_SCHEMA_COMPLETED').length, 2);
+});
+
+test('recovery migration appends only its credential header and recovers after failed completion audit', () => {
+  const fx = fixture('Credentials');
+  fx.controls.failCompletion = true;
+  assert.throws(fx.run, error => error.code === 'CRYPTO_FAILURE');
+  assert.deepEqual(fx.headers, fx.expected);
+  assert.equal(fx.headers.at(-1), 'RecoveryJSON');
+  assert.equal(JSON.stringify(fx.originalRows), fx.rowsBefore);
+  fx.controls.failCompletion = false;
+  assert.equal(fx.run().changed, false);
+  assert.equal(fx.events.filter(event => event === 'header').length, 1);
+  assert.ok(fx.events.includes('CREDENTIAL_RECOVERY_SCHEMA_COMPLETED'));
 });
