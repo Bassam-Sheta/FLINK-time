@@ -23,3 +23,5 @@ artifacts/screenshots/
 .clasp*.json
 client_secret*.json
 .staging/
+.staging.config.json
+application_default_credentials.json

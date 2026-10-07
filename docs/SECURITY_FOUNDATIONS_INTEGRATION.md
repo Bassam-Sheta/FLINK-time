@@ -50,6 +50,8 @@ below apply to the actual combined code, including integration corrections.
   entries from the single `braces` advisory through developer-only clasp.
   `DEPENDENCY_REVIEW.md` records reachability, mitigation and the next review date.
   The native CI audit gate remains enabled.
+- Follow-up: `fix-staging-audit-dependency` removes clasp and resolves this finding;
+  current dependency results and authorization migration are in `DEPENDENCY_REVIEW.md`.
 - These checks do not measure live Google latency, quotas, concurrency or KMS.
 
 ## Existing-installation migration runbook

@@ -14,7 +14,7 @@
     "node": ">=20"
   },
   "devDependencies": {
-    "@google/clasp": "3.4.1",
+    "google-auth-library": "10.5.0",
     "@playwright/test": "1.63.0"
   }
 }

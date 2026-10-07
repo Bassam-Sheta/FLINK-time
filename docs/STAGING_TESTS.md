@@ -6,8 +6,9 @@ The local baseline is commit `9e6db78`. Its Windows action-inventory test failed
 because it searched CRLF source using an LF-only delimiter. Normalizing the
 test's source string fixes the boundary without weakening permission assertions.
 
-Clasp **3.4.1** is pinned in the developer lockfile. Dependency lifecycle scripts
-are disabled. Developer dependencies are not uploaded or used by the live app.
+Staging uses Google's official **google-auth-library 10.5.0** and the Apps Script
+REST API. Clasp and its vulnerable file matcher have been removed. Dependency
+lifecycle scripts are disabled. Developer dependencies are not uploaded or used by the live app.
 The local browser suite uses synthetic RPC mocks: it is **not** evidence of real
 Google authorization, MFA, Sheet latency, embedding, triggers or production load.
 
@@ -18,8 +19,9 @@ Google authorization, MFA, Sheet latency, embedding, triggers or production load
 2. Associate the diagnostic script and your Desktop OAuth client with the same
    standard Google Cloud project. Enable the Apps Script API and the user's Apps
    Script API setting. Use least privilege; do not copy production credentials.
-3. Copy `scripts/staging.config.example.json` to `.clasp-staging.json` at the repo
-   root. Replace both IDs, Cloud project ID and the named account. The tool
+3. Copy `scripts/staging.config.example.json` to `.staging.config.json` at the repo
+   root. Replace both script IDs, Cloud project ID, owner's Google email and the
+   Desktop OAuth client ID (the public ID, not its secret). The tool
    rejects missing/placeholder IDs, identical targets and unexpected fields.
 4. Keep OAuth client/authorization files outside version control. Do not paste
    passwords, MFA secrets, access tokens or refresh tokens into chat or logs.
@@ -39,16 +41,35 @@ overwrite an existing bundle. Its upload contains precisely the five app files
 and a developer-only `RuntimeChecks.gs`; no Node tests, credentials or installer.
 It adds `executionApi.access = MYSELF` **only to the staging manifest**.
 
-From that generated directory, run the locally pinned CLI (adjust its relative
-path if needed):
+Use the official Google Cloud CLI for interactive authorization, in a dedicated
+configuration directory outside this repository. Run from the repository root
+in a separate PowerShell window (replace the example private paths and email):
 
 ```powershell
-node ../../node_modules/@google/clasp/build/src/index.js --user flink-staging login --creds "C:\private\oauth-client.json" --use-project-scopes --include-clasp-scopes
+$env:CLOUDSDK_CONFIG = 'C:\private\flink-staging-gcloud'
+$scopes = node scripts/staging.js scopes
+gcloud auth application-default login staging-owner@example.com --client-id-file="C:\private\oauth-client.json" --scopes="$scopes"
+$env:FLINK_STAGING_CREDENTIALS = Join-Path $env:CLOUDSDK_CONFIG 'application_default_credentials.json'
 ```
 
 Complete Google login/consent yourself. The named account must own the diagnostic
-script. Use the account name selected in your configuration. Scripts.run does
-not support service accounts. No production authorization changes are required.
+script and match `accountEmail`. The OAuth client's ID must match `oauthClientId`
+and belong to the Cloud project associated with the script. `projectId` documents
+that owner-verified association; it does not change a script's Cloud project.
+Scopes come from the staging manifest plus `script.projects` and
+`script.deployments.readonly`. Production OAuth scopes are unchanged.
+
+The tool accepts only a regular, explicitly selected `authorized_user` credential
+file outside the repository. It checks the client ID and verifies the signed-in
+email with Google before upload/execution. Service accounts, external-account
+configurations, endpoint overrides and automatic credential discovery are refused.
+Restrict access to the private directory; credential contents are never printed.
+Google Cloud CLI authorization may overwrite its ADC file, which is why this
+example uses a dedicated `CLOUDSDK_CONFIG` directory.
+
+Existing `.clasp-staging.json` files and old prepared bundles are not automatically
+migrated. Create the new configuration and preserve/move old local evidence before
+preparing a fresh bundle for the same staging script. The tool never deletes them.
 
 ## Upload and measure
 
@@ -59,22 +80,32 @@ npm run staging -- check
 npm run staging -- push --confirm-staging
 ```
 
-Before pushing, inspect the exact target and file list. **Clasp push replaces the
+`check` is entirely local and prints the exact validated target/file list.
+Before pushing, inspect it. **The content API replaces the
 remote project's content. Never point this bundle at an existing application.**
 In the diagnostic Apps Script editor, deploy as **API Executable**, accessible
-only to yourself. Then:
+only to yourself. Copy its deployment ID from **Deploy → Manage deployments**.
+Then, in the same authorized PowerShell window:
 
 ```powershell
+$env:FLINK_STAGING_DEPLOYMENT_ID = 'REPLACE_WITH_API_EXECUTABLE_DEPLOYMENT_ID'
 npm run staging -- run --confirm-staging
 ```
 
-The runner verifies bundle hashes and refuses changed/stale source or target.
+The runner verifies bundle hashes and refuses changed/stale source or target. It
+checks that the API deployment belongs to the configured staging script and has
+`MYSELF` access, then
+calls the fixed diagnostic function using owner-only `devMode: true` (latest saved
+source). Upload responses must contain the exact expected source files.
 The remote private test checks the exact script ID and refuses a configured
 Master book. It verifies a PBKDF2 vector, measures exact-match lookups at 10 and
 5,000 synthetic rows, trashes only the exact spreadsheet it created, and runs
 the existing KDF calibration with synthetic inputs. Cleanup failure fails the
-run. Measurements are stored locally only after a valid passing response; an
-Apps Script error cannot count as a successful result even if clasp exits zero.
+run. Measurements are stored in a new ignored `runtime-results-<uuid>.json` file
+only after a complete, valid passing response. Errors, unfinished executions and
+failed cleanup cannot produce passing evidence. HTTP errors are sanitized;
+transport retries and redirects are disabled. A network timeout may occur after
+a remote change: inspect the staging project before retrying a mutation.
 
 This is **runtime-primitives coverage**, not complete app acceptance. It makes
 no settings changes and does not run concurrent users against production. A
@@ -119,7 +150,10 @@ API quotas in Cloud Console. Do not substitute these tables for measurements.
 
 ## Sources
 
-- https://github.com/google/clasp
+- https://github.com/googleapis/google-auth-library-nodejs
+- https://cloud.google.com/sdk/gcloud/reference/auth/application-default/login
+- https://developers.google.com/apps-script/api/reference/rest/v1/projects/updateContent
+- https://developers.google.com/apps-script/api/reference/rest/v1/scripts/run
 - https://developers.google.com/apps-script/api/how-tos/execute
 - https://developers.google.com/apps-script/guides/services/quotas
 - https://developers.google.com/workspace/sheets/api/limits

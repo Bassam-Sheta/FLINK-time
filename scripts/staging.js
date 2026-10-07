@@ -3,13 +3,12 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { spawnSync } = require('node:child_process');
 
 const root = path.resolve(__dirname, '..');
 const runtimeFiles = ['Code.gs', 'User.html', 'Admin.html', 'SuperAdmin.html', 'appsscript.json'];
 
 function validateConfig(config) {
-  const keys = ['environment', 'scriptId', 'productionScriptId', 'projectId', 'account'];
+  const keys = ['environment', 'scriptId', 'productionScriptId', 'projectId', 'accountEmail', 'oauthClientId'];
   if (!config || Object.keys(config).some(key => !keys.includes(key)) ||
       keys.some(key => typeof config[key] !== 'string')) throw new Error('Invalid staging configuration');
   if (config.environment !== 'STAGING') throw new Error('Only STAGING is permitted');
@@ -20,7 +19,9 @@ function validateConfig(config) {
   }
   if (config.scriptId === config.productionScriptId) throw new Error('Production target refused');
   if (!/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/.test(config.projectId)) throw new Error('Invalid projectId');
-  if (!/^[a-z][a-z0-9-]{0,50}$/.test(config.account)) throw new Error('Invalid account');
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(config.accountEmail)) throw new Error('Invalid accountEmail');
+  if (!/^[0-9]+-[A-Za-z0-9_-]+\.apps\.googleusercontent\.com$/.test(config.oauthClientId) ||
+      /REPLACE|YOUR_|PLACEHOLDER/i.test(config.oauthClientId)) throw new Error('Invalid oauthClientId');
   return config;
 }
 
@@ -82,6 +83,8 @@ function assertDirectory(directory) {
 }
 
 function prepare(config) {
+  validateConfig(config);
+  const bundle = createBundle(config);
   const staging = path.join(root, '.staging');
   if (!fs.existsSync(staging)) fs.mkdirSync(staging);
   assertDirectory(staging);
@@ -90,94 +93,103 @@ function prepare(config) {
   fs.mkdirSync(directory);
   const source = path.join(directory, 'source');
   fs.mkdirSync(source);
-  const bundle = createBundle(config);
   const hashes = {};
   for (const [file, text] of Object.entries(bundle)) {
     fs.writeFileSync(path.join(source, file), text, { flag: 'wx' });
     hashes[file] = digest(text);
   }
-  fs.writeFileSync(path.join(directory, '.clasp.json'), JSON.stringify({
-    scriptId: config.scriptId, projectId: config.projectId, rootDir: './source'
+  fs.writeFileSync(path.join(directory, 'target.json'), JSON.stringify({
+    scriptId: config.scriptId, projectId: config.projectId, environment: 'STAGING'
   }, null, 2), { flag: 'wx' });
-  // The source directory already has an exact file allowlist. No glob patterns
-  // are needed, and untrusted patterns must never reach clasp's matcher.
-  fs.writeFileSync(path.join(directory, '.claspignore'), '', { flag: 'wx' });
   fs.writeFileSync(path.join(directory, 'bundle.json'), JSON.stringify({
     config, hashes, createdAt: new Date().toISOString()
   }, null, 2), { flag: 'wx' });
   return directory;
 }
 
-function checkBundle(config) {
+function checkedBundle(config) {
+  validateConfig(config);
   const directory = path.join(root, '.staging', config.scriptId);
   for (const dir of [path.join(root, '.staging'), directory, path.join(directory, 'source')]) {
     assertDirectory(dir);
   }
-  const record = JSON.parse(fs.readFileSync(path.join(directory, 'bundle.json'), 'utf8'));
+  const readFile = file => {
+    if (!fs.lstatSync(file).isFile() || fs.lstatSync(file).isSymbolicLink()) throw new Error('Staging files must be regular files');
+    return fs.readFileSync(file, 'utf8');
+  };
+  const readJson = file => {
+    const text = readFile(path.join(directory, file));
+    try { return JSON.parse(text); }
+    catch (_) { throw new Error('Invalid staging bundle metadata'); }
+  };
+  const record = readJson('bundle.json');
   if (JSON.stringify(record.config) !== JSON.stringify(config)) throw new Error('Staging config changed; prepare a new bundle');
-  const ignoreFile = path.join(directory, '.claspignore');
-  if (!fs.existsSync(ignoreFile) || !fs.lstatSync(ignoreFile).isFile() ||
-      fs.lstatSync(ignoreFile).isSymbolicLink() || fs.readFileSync(ignoreFile, 'utf8') !== '') {
-    throw new Error('Staging ignore rules must be the generated empty file');
-  }
-  const settings = JSON.parse(fs.readFileSync(path.join(directory, '.clasp.json'), 'utf8'));
-  if (settings.scriptId !== config.scriptId || settings.projectId !== config.projectId || settings.rootDir !== './source') {
-    throw new Error('Clasp target changed');
+  const settings = readJson('target.json');
+  if (settings.scriptId !== config.scriptId || settings.projectId !== config.projectId || settings.environment !== 'STAGING') {
+    throw new Error('Staging target changed');
   }
   const bundle = createBundle(config);
   const actualFiles = fs.readdirSync(path.join(directory, 'source')).sort();
   if (JSON.stringify(actualFiles) !== JSON.stringify(Object.keys(bundle).sort())) throw new Error('Unexpected upload files');
   for (const [file, text] of Object.entries(bundle)) {
     const target = path.join(directory, 'source', file);
-    if (!fs.lstatSync(target).isFile() || digest(fs.readFileSync(target)) !== record.hashes[file] ||
+    if (digest(readFile(target)) !== record.hashes[file] ||
         digest(text) !== record.hashes[file]) throw new Error('Stale or changed staging source');
   }
-  return directory;
+  return { directory, bundle };
 }
 
-function clasp(directory, config, args, capture = false) {
-  const cli = path.join(root, 'node_modules', '@google', 'clasp', 'build', 'src', 'index.js');
-  const result = spawnSync(process.execPath, [cli, '--user', config.account,
-    '--project', path.join(directory, '.clasp.json'),
-    '--ignore', path.join(directory, '.claspignore'), ...args], {
-    cwd: directory, shell: false, stdio: capture ? 'pipe' : 'inherit', encoding: 'utf8', timeout: 420000
-  });
-  if (result.error || result.status !== 0) throw new Error('Clasp failed; inspect authorization and staging setup');
-  return capture ? JSON.parse(result.stdout) : undefined;
+function checkBundle(config) {
+  return checkedBundle(config).directory;
 }
 
-function main() {
-  const operation = process.argv[2];
-  if (!['prepare', 'check', 'push', 'run'].includes(operation)) {
-    throw new Error('Usage: npm run staging -- prepare|check|push|run [--confirm-staging]');
+async function executeOperation(operation, config, { confirmed = false, env = process.env, clientFactory } = {}) {
+  validateConfig(config);
+  if (!['prepare', 'check', 'scopes', 'push', 'run'].includes(operation)) {
+    throw new Error('Usage: npm run staging -- prepare|check|scopes|push|run [--confirm-staging]');
   }
-  const file = path.join(root, '.clasp-staging.json');
-  if (!fs.existsSync(file)) throw new Error('Staging is not configured. See docs/STAGING_TESTS.md; no Google calls made.');
-  const config = validateConfig(JSON.parse(fs.readFileSync(file, 'utf8')));
+  if (operation === 'scopes') {
+    return [...new Set([...JSON.parse(createBundle(config)['appsscript.json']).oauthScopes,
+      'https://www.googleapis.com/auth/script.projects', 'https://www.googleapis.com/auth/script.deployments.readonly'])].join(',');
+  }
   if (operation === 'prepare') {
     prepare(config);
-    console.log('Local staging bundle prepared. Nothing uploaded.');
-    return;
+    return 'Local staging bundle prepared. Nothing uploaded.';
   }
-  const directory = checkBundle(config);
+  const { directory, bundle } = checkedBundle(config);
   if (operation === 'check') {
-    clasp(directory, config, ['show-file-status']);
-    return;
+    return { environment: 'STAGING', scriptId: config.scriptId, files: Object.keys(bundle) };
   }
-  if (!process.argv.includes('--confirm-staging')) throw new Error('Explicit --confirm-staging required');
+  if (!confirmed) throw new Error('Explicit --confirm-staging required');
+  const { loadCredentials, makeClient, createGoogleStaging } = require('./staging-google');
+  const client = clientFactory ? clientFactory() : makeClient(loadCredentials(env.FLINK_STAGING_CREDENTIALS, config));
+  const api = createGoogleStaging(config, client);
   if (operation === 'push') {
-    clasp(directory, config, ['push']);
-  } else {
-    const result = clasp(directory, config, ['--json', 'run-function', 'runStagingChecks_'], true);
-    // Clasp can return HTTP success/exit 0 with an Apps Script execution error.
-    if (result.error) throw new Error('Google runtime reported a test error; no passing report recorded');
-    const report = validateReport(result.response);
-    fs.writeFileSync(path.join(directory, 'runtime-results.json'), JSON.stringify(report, null, 2));
-    console.log(JSON.stringify(report, null, 2));
+    const files = Object.entries(bundle).map(([file, source]) => ({
+      name: file.slice(0, file.lastIndexOf('.')), source,
+      type: file.endsWith('.gs') ? 'SERVER_JS' : file.endsWith('.html') ? 'HTML' : 'JSON'
+    }));
+    await api.push(files);
+    return 'Staging upload verified.';
   }
+  const report = validateReport(await api.run(env.FLINK_STAGING_DEPLOYMENT_ID));
+  // Each success owns a new evidence file; never follow/overwrite an existing link.
+  const evidence = path.join(directory, 'runtime-results-' + crypto.randomUUID() + '.json');
+  fs.writeFileSync(evidence, JSON.stringify(report, null, 2), { flag: 'wx' });
+  return report;
 }
 
-module.exports = { validateConfig, createBundle, validateReport, prepare, checkBundle };
+async function main() {
+  const file = path.join(root, '.staging.config.json');
+  if (!fs.existsSync(file)) throw new Error('Staging is not configured. See docs/STAGING_TESTS.md; no Google calls made.');
+  let config;
+  try { config = JSON.parse(fs.readFileSync(file, 'utf8')); }
+  catch (_) { throw new Error('Invalid staging configuration JSON'); }
+  const result = await executeOperation(process.argv[2], config, { confirmed: process.argv.includes('--confirm-staging') });
+  console.log(typeof result === 'string' ? result : JSON.stringify(result, null, 2));
+}
+
+module.exports = { validateConfig, createBundle, validateReport, prepare, checkBundle, executeOperation };
 if (require.main === module) {
-  try { main(); } catch (err) { console.error(err.message); process.exitCode = 1; }
+  main().catch(err => { console.error(err.message); process.exitCode = 1; });
 }
