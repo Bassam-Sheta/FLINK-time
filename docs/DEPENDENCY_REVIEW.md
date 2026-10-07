@@ -1,4 +1,33 @@
-# Developer dependency review — 2026-10-06
+# Developer dependency review — 2026-10-07
+
+## Resolved by dependency removal
+
+With owner approval, the staging wrapper now uses **google-auth-library 10.5.0**
+and fixed Apps Script REST endpoints instead of clasp. The exact source allowlist,
+hash checks, distinct-production-target guard and explicit mutation confirmation
+remain. No glob patterns are parsed. New checks bind the OAuth client, verified
+Google email and API deployment to the staging configuration. Authorization uses
+a separately created authorized-user ADC file; see `STAGING_TESTS.md`.
+
+- `npm ci --ignore-scripts --no-audit --no-fund`: clean frozen install succeeded.
+- `npm audit --audit-level=high --ignore-scripts`: **0 vulnerabilities**.
+- `npm audit signatures`: **72 verified registry signatures**, four attestations.
+- Lockfile reduced from **298 to 72 packages**; **226 removed**, no new packages
+  and no retained package version/integrity changes. Google auth was already
+  present through clasp and is now a pinned direct developer dependency.
+- No retained package declares an install lifecycle script. `.npmrc` continues
+  to disable lifecycle scripts, and the CI native audit gate remains enabled.
+- Synthetic regressions cover target/identity/deployment denials, credential
+  validation/redaction, file projection, remote failures and successful evidence.
+  Live Google authorization/upload/execution remains untested pending staging.
+- **505 unit tests and 9 mocked Chromium tests pass** on the replacement graph.
+
+Registry/advisory recheck still found no patched upstream `braces` version. The
+vulnerable package and both dependency ancestors are absent from this lockfile;
+the finding was removed by eliminating its dependency path, without an audit
+exception, renamed fork or forced downgrade.
+
+## Historical finding — 2026-10-06
 
 Native check: `npm audit --audit-level=high --ignore-scripts`.
 Result: **3 high entries**, all in `@google/clasp -> micromatch -> braces`.
@@ -26,8 +55,7 @@ No untrusted patterns are accepted through the guarded staging path. This assume
 a trusted local working tree; it does not prevent hostile concurrent local edits
 or protect direct, unrestricted use of the clasp CLI.
 
-Disposition: **upstream fix deferred; staging-path exposure mitigated**.
-Next review: **2026-10-13**, or immediately when a patched upstream version exists.
-Keep clasp pinned. The suggested forced downgrade to clasp 2.5.0 is an incompatible
-change and was not applied. The native audit still exits nonzero; the CI advisory
-gate has not been bypassed, and these results are not a release approval.
+Initial disposition was to defer the upstream fix and mitigate the staging path.
+The suggested forced downgrade to clasp 2.5.0 was incompatible and was not applied.
+The original audit exited nonzero. The removal above supersedes that deferral;
+continue native dependency auditing on every dependency change/release.

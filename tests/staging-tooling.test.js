@@ -6,14 +6,15 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const crypto = require('node:crypto');
-const { validateConfig, createBundle, validateReport, prepare, checkBundle } = require('../scripts/staging');
+const { validateConfig, createBundle, validateReport, prepare, checkBundle, executeOperation } = require('../scripts/staging');
 
 const config = {
   environment: 'STAGING',
   scriptId: 'staging-script-1234567890',
   productionScriptId: 'production-script-1234567890',
   projectId: 'flink-staging-123',
-  account: 'flink-staging'
+  accountEmail: 'owner@example.test',
+  oauthClientId: '123456-synthetic.apps.googleusercontent.com'
 };
 
 test('staging configuration rejects production, malformed IDs and unknown fields', () => {
@@ -23,7 +24,8 @@ test('staging configuration rejects production, malformed IDs and unknown fields
     { scriptId: config.productionScriptId },
     { scriptId: '../escape' },
     { projectId: '--malicious' },
-    { account: '../../credentials' },
+    { accountEmail: 'invalid' },
+    { oauthClientId: 'https://attacker.example' },
     { extra: 'unexpected' }
   ]) {
     assert.throws(() => validateConfig({ ...config, ...changed }));
@@ -89,7 +91,7 @@ test('prepared bundle refuses overwrite, changed upload files and changed target
   fs.appendFileSync(sourceFile, '\n// changed\n');
   assert.throws(() => checkBundle(local), /changed staging source/);
   fs.writeFileSync(sourceFile, createBundle(local)['RuntimeChecks.gs']);
-  const settingsFile = path.join(directory, '.clasp.json');
+  const settingsFile = path.join(directory, 'target.json');
   const settings = JSON.parse(fs.readFileSync(settingsFile, 'utf8'));
   settings.scriptId = config.productionScriptId;
   fs.writeFileSync(settingsFile, JSON.stringify(settings));
@@ -138,36 +140,69 @@ test('runtime primitive checks measure both sizes and clean up only their own bo
   assert.equal(validateReport(result).cleanedUp, true);
 });
 
-test('staging refuses altered ignore patterns before starting clasp', t => {
+test('staging ignores obsolete clasp settings and uploads only the checked allowlist', async t => {
   const local = { ...config, scriptId: 'offline-staging-' + crypto.randomUUID() };
   const directory = prepare(local);
   t.after(() => fs.rmSync(directory, { recursive: true }));
-  fs.writeFileSync(path.join(directory, '.claspignore'), '{{untrusted-pattern}}');
-  assert.throws(() => checkBundle(local), /ignore rules/);
+  fs.writeFileSync(path.join(directory, '.claspignore'), '{'.repeat(20000));
+  fs.writeFileSync(path.join(directory, '.clasp.json'), JSON.stringify({ scriptId: config.productionScriptId }));
+  const calls = [];
+  const clientFactory = () => ({ async request(options) {
+    calls.push(options);
+    if (options.method === 'GET') return { data: { email: config.accountEmail, verified_email: true } };
+    return { data: { scriptId: local.scriptId, files: options.data.files } };
+  } });
+  const result = await executeOperation('push', local, { confirmed: true, clientFactory,
+    env: { clasp_config_project: 'PRODUCTION', clasp_config_ignore: 'UNTRUSTED' } });
+  assert.equal(result, 'Staging upload verified.');
+  assert.equal(calls[1].url, `https://script.googleapis.com/v1/projects/${local.scriptId}/content`);
+  const files = calls[1].data.files;
+  assert.equal(files.length, 6);
+  assert.deepEqual(files.map(file => file.type), ['SERVER_JS', 'HTML', 'HTML', 'HTML', 'JSON', 'SERVER_JS']);
+  assert.equal(files.find(file => file.name === 'Code').source, createBundle(local)['Code.gs']);
+  assert.equal(files.find(file => file.name === 'appsscript').source, createBundle(local)['appsscript.json']);
 });
 
-test('clasp invocation pins project and ignore paths despite environment overrides', () => {
-  let invocation;
-  const source = fs.readFileSync(path.resolve(__dirname, '../scripts/staging.js'), 'utf8');
-  const directory = path.resolve(__dirname, '../.staging/synthetic-target');
-  const context = vm.createContext({
-    __dirname: path.resolve(__dirname, '../scripts'),
-    module: { exports: {} }, console,
-    process: { execPath: process.execPath, env: { clasp_config_project: 'OTHER', clasp_config_ignore: 'UNTRUSTED' } },
-    require(name) {
-      if (name === 'node:child_process') return { spawnSync(_program, args, options) {
-        invocation = { args: Array.from(args), cwd: options.cwd, shell: options.shell };
-        return { status: 0 };
-      } };
-      return require(name);
-    },
-    directory, config
-  });
-  vm.runInContext(source, context);
-  vm.runInContext("clasp(directory, config, ['show-file-status'])", context);
-  const valueOf = flag => invocation.args[invocation.args.indexOf(flag) + 1];
-  assert.equal(valueOf('--project'), path.join(directory, '.clasp.json'));
-  assert.equal(valueOf('--ignore'), path.join(directory, '.claspignore'));
-  assert.equal(invocation.cwd, directory);
-  assert.equal(invocation.shell, false);
+test('unconfirmed mutations and changed bundles never load credentials or call Google', async t => {
+  const local = { ...config, scriptId: 'offline-staging-' + crypto.randomUUID() };
+  const directory = prepare(local);
+  t.after(() => fs.rmSync(directory, { recursive: true }));
+  const clientFactory = () => assert.fail('must not load credentials');
+  for (const operation of ['push', 'run']) {
+    await assert.rejects(executeOperation(operation, local, { clientFactory }), /confirm-staging/);
+  }
+  const check = await executeOperation('check', local, { clientFactory });
+  assert.equal(check.files.length, 6);
+  const scopes = await executeOperation('scopes', local, { clientFactory });
+  assert.ok(scopes.split(',').includes('https://www.googleapis.com/auth/script.projects'));
+  fs.appendFileSync(path.join(directory, 'source', 'Code.gs'), '\n// unverified change');
+  await assert.rejects(executeOperation('push', local, { confirmed: true, clientFactory }), /changed staging source/);
+});
+
+test('only complete valid runtime reports create new sanitized evidence files', async t => {
+  const local = { ...config, scriptId: 'offline-staging-' + crypto.randomUUID() };
+  const directory = prepare(local);
+  t.after(() => fs.rmSync(directory, { recursive: true }));
+  const deploymentId = 'synthetic-api-deployment-12345';
+  const report = { environment: 'STAGING', suite: 'runtime-primitives', cryptoVectorPassed: true, cleanedUp: true,
+    sheetLookups: [{ rows: 10, elapsedMs: 1, matched: true }, { rows: 5000, elapsedMs: 2, matched: true }],
+    kdf: { results: [{ iterations: 10000, elapsedMs: 100 }] } };
+  let response = { done: true, error: { message: 'PRIVATE' } };
+  const clientFactory = () => ({ async request(options) {
+    if (options.url.endsWith('/userinfo')) return { data: { email: local.accountEmail, verified_email: true } };
+    if (options.method === 'GET') return { data: { deploymentId, deploymentConfig: { scriptId: local.scriptId },
+      entryPoints: [{ entryPointType: 'EXECUTION_API', executionApi: { entryPointConfig: { access: 'MYSELF' } } }] } };
+    return { data: response };
+  } });
+  const options = { confirmed: true, clientFactory, env: { FLINK_STAGING_DEPLOYMENT_ID: deploymentId } };
+  await assert.rejects(executeOperation('run', local, options), /Google runtime/);
+  assert.equal(fs.readdirSync(directory).some(file => file.startsWith('runtime-results-')), false);
+  response = { done: true, response: { result: { ...report, cleanedUp: false } } };
+  await assert.rejects(executeOperation('run', local, options), /Incomplete or failed/);
+  response = { done: true, response: { result: { ...report, token: 'PRIVATE' } } };
+  await executeOperation('run', local, options);
+  await executeOperation('run', local, options);
+  const evidence = fs.readdirSync(directory).filter(file => file.startsWith('runtime-results-'));
+  assert.equal(evidence.length, 2);
+  for (const file of evidence) assert.deepEqual(JSON.parse(fs.readFileSync(path.join(directory, file))), report);
 });

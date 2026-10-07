@@ -127,6 +127,18 @@ The active source remains source-first. Compiled executables, temporary packagin
 - `PBKDF2_ITERATIONS` remains bounded server-side to 10,000–1,000,000 and is compatible with WP1 upgrade-on-login.
 - `FEATURE_TIMESHEET_APPROVAL` defaults to false in preparation for WP3; WP3 attaches the approval actions/UI to that flag.
 
+## Developer staging boundary
+
+The isolated staging tool uses pinned Google auth and fixed Apps Script REST
+endpoints, with an exact six-file upload allowlist and hash-checked source. It
+requires an explicit staging configuration, distinct production ID and mutation
+confirmation. OAuth client ID and Google-verified email are checked before upload
+or execution; execution also checks deployment binding and `MYSELF` access.
+Credential files stay outside the repo;
+local `check`/`scopes` need no authorization. Error/incomplete runtime responses
+cannot become passing evidence. Clasp and its vulnerable matcher are removed;
+the native dependency audit remains a CI gate. See `STAGING_TESTS.md`.
+
 ## Request-cost hardening (WP1 in progress)
 
 Authenticated request paths no longer require whole-table scans for session token, account ID/username, credentials, or workspace-ID lookups. These hot-path reads use bounded TextFinder column searches followed by a single-row read.
