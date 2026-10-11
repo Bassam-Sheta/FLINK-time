@@ -1104,6 +1104,7 @@ const ACTION_PERMISSIONS = {
   // Timer & Time Entries
   'timer.start': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN, CONSTANTS.ROLES.ADMIN, CONSTANTS.ROLES.USER], requiresWorkspace: true, isWrite: true },
   'timer.stop': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN, CONSTANTS.ROLES.ADMIN, CONSTANTS.ROLES.USER], requiresWorkspace: true, isWrite: true },
+  'timer.changeProject': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN, CONSTANTS.ROLES.ADMIN, CONSTANTS.ROLES.USER], requiresWorkspace: true, isWrite: true },
   'timer.getActive': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN, CONSTANTS.ROLES.ADMIN, CONSTANTS.ROLES.USER], requiresWorkspace: true, isWrite: false },
   'entries.createManual': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN, CONSTANTS.ROLES.ADMIN, CONSTANTS.ROLES.USER], requiresWorkspace: true, isWrite: true },
   'entries.update': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN, CONSTANTS.ROLES.ADMIN, CONSTANTS.ROLES.USER], requiresWorkspace: true, isWrite: true },
@@ -1530,6 +1531,9 @@ function dispatchAction_(action, data) {
 
     case 'timer.stop':
       return TimerService.stopTimer(authContext, wsId, payload);
+
+    case 'timer.changeProject':
+      return TimerService.changeProject(authContext, wsId, payload);
 
     case 'timer.getActive':
       return TimerService.getActiveTimer(authContext, wsId);
@@ -7154,6 +7158,13 @@ var SheetRepository = (typeof global !== 'undefined' && global.SheetRepository) 
     return this.appendRow(workspaceId, CONSTANTS.WORKSPACE_TABS.ACTIVE_TIMERS, timerData);
   },
 
+  updateActiveTimer(workspaceId, userId, updates) {
+    const timer = this.getActiveTimer(workspaceId, userId);
+    if (!timer) throw new AppError(ERROR_CODES.TIMER_NOT_FOUND, 'Running timer not found.', 404);
+    this.updateRow(workspaceId, CONSTANTS.WORKSPACE_TABS.ACTIVE_TIMERS, timer._rowIndex, updates);
+    return { ...timer, ...updates };
+  },
+
   deleteActiveTimer(workspaceId, userId) {
     const timer = this.getActiveTimer(workspaceId, userId);
     if (!timer) return false;
@@ -9202,6 +9213,46 @@ var TimeEntryService = (typeof global !== 'undefined' && global.TimeEntryService
  */
 
 var TimerService = (typeof global !== 'undefined' && global.TimerService) || {
+  changeProject(authContext, workspaceId, payload) {
+    AuthorizationService.assertWorkspaceAccess(authContext, workspaceId);
+    if (!payload || typeof payload.timerId !== 'string' || !payload.timerId ||
+        typeof payload.projectId !== 'string' || typeof payload.expectedProjectId !== 'string') {
+      throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'timerId, projectId and expectedProjectId are required.', 400);
+    }
+    const lock = LockService.getScriptLock();
+    if (!lock.tryLock(10000)) throw new AppError(ERROR_CODES.SERVER_BUSY, 'Timer is busy. Please retry.', 409);
+    try {
+      AuthorizationService.assertWorkspaceAccess(authContext, workspaceId);
+      const before = SheetRepository.getActiveTimer(workspaceId, authContext.userId);
+      if (!before || before.TimerID !== payload.timerId || String(before.ProjectID || '') !== payload.expectedProjectId) {
+        throw new AppError(ERROR_CODES.CONFLICT, 'Running timer changed. Refresh before changing its project.', 409);
+      }
+      if (SheetRepository.getEntryAnyStatus(workspaceId, this._entryIdForTimer(before.TimerID))) {
+        throw new AppError(ERROR_CODES.CONFLICT, 'Timer finalization has started. Complete its stop before continuing.', 409);
+      }
+      const tracking = TrackingPolicyService.validateTrackingContext(authContext, workspaceId, {
+        projectId: payload.projectId, taskId: '', description: before.Description,
+        tags: before.TagIDs, billable: before.Billable
+      }, { manual: false, enforceRequired: false });
+      const after = { ...before, ProjectID: tracking.projectId, TaskID: '' };
+      const audit = action => {
+        if (!SheetRepository.logWorkspaceAudit(workspaceId, {
+          ActorUserID: authContext.userId, ActorRole: authContext.role,
+          EntityType: 'ACTIVE_TIMER', EntityID: before.TimerID, Action: action,
+          BeforeJSON: before, AfterJSON: after
+        })) throw new AppError(ERROR_CODES.SERVER_BUSY, 'Timer audit unavailable. Refresh before retrying.', 503);
+        SpreadsheetApp.flush();
+      };
+      audit('TIMER_PROJECT_CHANGE_INTENT');
+      SheetRepository.updateActiveTimer(workspaceId, authContext.userId, { ProjectID: after.ProjectID, TaskID: '' });
+      SpreadsheetApp.flush();
+      audit('TIMER_PROJECT_CHANGED');
+      return this._toActiveTimerResponse(workspaceId, after);
+    } finally {
+      try { SpreadsheetApp.flush(); } finally { lock.releaseLock(); }
+    }
+  },
+
   _normalizeOperationId(rawOperationId) {
     if (rawOperationId === undefined || rawOperationId === null || rawOperationId === '') {
       return '';

@@ -95,6 +95,9 @@ Client-side portal separation is a usability layer only. Server-side `ACTION_PER
 - UTC storage.
 - Workspace-local timezone/date/week interpretation.
 - One active timer per user.
+- Stop immediately saves a completed, unlocked `OPEN` entry with no timesheet membership; submission and approval are separate actions.
+- `timer.changeProject` moves the entire running interval to the selected authorized project without changing its TimerID or start timestamp or creating an intermediate entry. It clears the prior project's task, requires the current timer/project snapshot under ScriptLock, and flushes attributable Before/After intent and completion audits. A finalization already in progress blocks reassignment.
+- All three portals persist running-project changes immediately. Stopped-entry edits use only the named entry and its expected version; they never read or mutate another active timer. A failed stop when continuing a recent task leaves the current timer intact.
 - Idempotent timer operations.
 - Optimistic concurrency for time-entry mutation.
 - Immutable timesheet submission membership.

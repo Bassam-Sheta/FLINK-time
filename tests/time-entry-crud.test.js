@@ -169,6 +169,17 @@ function fixture(options = {}) {
 
 const user = { userId:'U1', role:'USER' };
 
+test('editing a stopped entry never reads or mutates a separate running timer', () => {
+  const fx = fixture();
+  for (const method of ['getActiveTimer', 'createActiveTimer', 'updateActiveTimer', 'deleteActiveTimer']) {
+    global.SheetRepository[method] = () => { throw new Error('Stopped-entry edit touched running timer'); };
+  }
+  const updated = fx.service.updateEntry(user, 'W1', 'E1', { projectId:'P2', description:'Stopped entry only' }, 3);
+  assert.equal(updated.projectId, 'P2');
+  assert.equal(fx.stored.StartUTC, '2026-09-28T08:00:00.000Z');
+  assert.equal(fx.stored.DurationSeconds, 3600);
+});
+
 test('manual create canonicalizes timestamps, rejects zero duration, and enforces past edit window', () => {
   let fx = fixture();
   const created = fx.service.createManualEntry(user, 'W1', {

@@ -1575,6 +1575,21 @@
 
     async function onTimerProjectChange() {
       const projId = document.getElementById('timerProjectSelect').value;
+      if (state.activeTimer) {
+        if (state.timerRequestInFlight) { document.getElementById('timerProjectSelect').value = state.activeTimer.projectId || ''; return; }
+        state.timerRequestInFlight = true;
+        try {
+          state.activeTimer = await apiCall('timer.changeProject', {
+            timerId: state.activeTimer.timerId,
+            expectedProjectId: state.activeTimer.projectId || '', projectId: projId
+          });
+        } catch (err) {
+          await recoverActiveTimer();
+          document.getElementById('timerProjectSelect').value = state.activeTimer ? state.activeTimer.projectId || '' : '';
+          showAppNotice(err.message || 'Could not change the running project.');
+          return;
+        } finally { finishTimerRequest(); }
+      }
       const taskSelect = document.getElementById('timerTaskSelect');
       taskSelect.replaceChildren(new Option('Select Task (Optional)', ''));
       if (!projId) return;
@@ -1851,6 +1866,7 @@
         const confirmSwitch = confirm('A timer is currently running. Stop it and switch to this task?');
         if (!confirmSwitch) return;
         await toggleTimer();
+        if (state.activeTimer) return;
       }
 
       if (projSelect && entry.projectId) {
