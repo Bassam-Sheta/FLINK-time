@@ -7440,6 +7440,264 @@ var WorkspaceRouter = (typeof global !== 'undefined' && global.WorkspaceRouter) 
   }
 };
 
+/* ===== YearlyDataFileService.gs ===== */
+// Allocation foundation only. Application repositories are not routed here yet.
+// Registry and physical metadata, never cache, define immutable file locations.
+var YearlyDataFileService = {
+  registryTab: 'DataFileRegistry',
+  registryHeaders: ['WorkspaceID', 'CoreSpreadsheetID', 'Year', 'Part', 'SpreadsheetID', 'State', 'OperationID', 'CreatedAt'],
+  infoHeaders: ['WorkspaceID', 'CoreSpreadsheetID', 'Year', 'Part', 'OperationID', 'SpreadsheetID'],
+  dataTabs: ['TimeEntries', 'Timesheets', 'Approvals', 'Comments', 'DailyRollups', 'WeeklyRollups',
+    'MonthlyRollups', 'ProjectRollups', 'UserRollups', 'Alerts', 'AuditLog'],
+  maxRegistryRows: 512,
+  cellBoundary: 7000000,
+
+  _conflict(message) { return new AppError(ERROR_CODES.CONFLICT, message, 409); },
+  _workspace(workspaceId) {
+    if (typeof workspaceId !== 'string' || !/^[A-Za-z0-9_-]{1,100}$/.test(workspaceId)) {
+      throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'Invalid workspace ID.', 400);
+    }
+    const ws = MasterRepository.findRowByKey(CONSTANTS.MASTER_TABS.WORKSPACES, 'WorkspaceID', workspaceId);
+    if (!ws || ws.WorkspaceID !== workspaceId || ws.Status !== CONSTANTS.WORKSPACE_STATUS.ACTIVE || !ws.SpreadsheetID) {
+      throw this._conflict('An ACTIVE workspace with registered Core storage is required.');
+    }
+    return ws;
+  },
+  _allocated(book) {
+    let total = 0;
+    for (const sheet of book.getSheets()) {
+      const rows = sheet.getMaxRows(), columns = sheet.getMaxColumns();
+      if (!Number.isSafeInteger(rows) || rows < 1 || !Number.isSafeInteger(columns) || columns < 1) {
+        throw this._conflict('Invalid allocated-grid metadata.');
+      }
+      total += rows * columns;
+    }
+    if (!Number.isSafeInteger(total)) throw this._conflict('Invalid spreadsheet capacity.');
+    return total;
+  },
+  _audit(owner, workspaceId, action, before, after, operationId) {
+    if (!MasterRepository.logGlobalAudit({ ActorUserID: owner, ActorRole: 'INSTALLATION_OWNER',
+      WorkspaceID: workspaceId, EntityType: 'DATA_FILE', EntityID: operationId,
+      Action: action, CorrelationID: operationId, BeforeJSON: before, AfterJSON: after,
+      Reason: 'Owner-only yearly Data allocation; application routing not activated' })) {
+      throw new AppError(ERROR_CODES.CRYPTO_FAILURE, 'Data-file audit unavailable.', 503);
+    }
+    SpreadsheetApp.flush();
+  },
+  _assertHeaders(sheet, expected, strictGrid = true) {
+    if (!sheet || sheet.getLastColumn() !== expected.length || (strictGrid && sheet.getMaxColumns() !== expected.length)) {
+      throw this._conflict('Unrecognized Data-file headers; owner review is required.');
+    }
+    const actual = sheet.getRange(1, 1, 1, expected.length).getValues()[0];
+    if (!expected.every((header, i) => actual[i] === header)) {
+      throw this._conflict('Unrecognized Data-file headers; owner review is required.');
+    }
+  },
+  _registry(core, workspaceId, owner = '') {
+    let sheet = core.getSheetByName(this.registryTab);
+    if (!sheet || sheet.getLastRow() === 0) {
+      if (!owner) throw this._conflict('Data-file registry is not initialized.');
+      const operationId = Validation.generateId('DFREG');
+      const before = { registryPresent: !!sheet };
+      const after = { coreSpreadsheetId: core.getId(), headers: this.registryHeaders };
+      // insertSheet's default grid is allocated before trimming; account for it.
+      if (this._allocated(core) + (sheet ? 0 : 26000) >= this.cellBoundary) {
+        throw this._conflict('Core capacity cannot accommodate the Data-file registry.');
+      }
+      this._audit(owner, workspaceId, 'DATA_REGISTRY_SCHEMA_INTENT', before, after, operationId);
+      if (!sheet) sheet = core.insertSheet(this.registryTab);
+      if (sheet.getMaxColumns() < this.registryHeaders.length) {
+        sheet.insertColumnsAfter(sheet.getMaxColumns(), this.registryHeaders.length - sheet.getMaxColumns());
+      }
+      sheet.getRange(1, 1, 1, this.registryHeaders.length).setValues([this.registryHeaders]);
+      trimSheetToSchema_(sheet, this.registryHeaders.length, 1);
+      SpreadsheetApp.flush();
+      this._assertHeaders(sheet, this.registryHeaders);
+      this._audit(owner, workspaceId, 'DATA_REGISTRY_SCHEMA_COMPLETED', before, after, operationId);
+    }
+    this._assertHeaders(sheet, this.registryHeaders);
+    const count = sheet.getLastRow() - 1;
+    if (count < 0 || count > this.maxRegistryRows) throw this._conflict('Data-file directory limit reached; owner review is required.');
+    const values = count ? sheet.getRange(2, 1, count, this.registryHeaders.length).getValues() : [];
+    const keys = new Set(), fileIds = new Set();
+    const records = values.map((row, i) => {
+      const record = Object.fromEntries(this.registryHeaders.map((header, j) => [header, row[j]]));
+      if (record.WorkspaceID !== workspaceId || record.CoreSpreadsheetID !== core.getId() ||
+          !Number.isSafeInteger(record.Year) || record.Year < 1970 || record.Year > 9999 ||
+          !Number.isSafeInteger(record.Part) || record.Part < 1 || record.Part > this.maxRegistryRows ||
+          !['PREPARING', 'READY'].includes(record.State) || typeof record.SpreadsheetID !== 'string' ||
+          (record.State === 'READY' && !record.SpreadsheetID) || record.SpreadsheetID === core.getId() ||
+          typeof record.OperationID !== 'string' || !record.OperationID || typeof record.CreatedAt !== 'string' ||
+          !Number.isFinite(new Date(record.CreatedAt).getTime())) throw this._conflict('Invalid Data-file registry state.');
+      const key = record.Year + ':' + record.Part;
+      if (keys.has(key) || (record.SpreadsheetID && fileIds.has(record.SpreadsheetID))) throw this._conflict('Duplicate Data-file location.');
+      keys.add(key);
+      if (record.SpreadsheetID) fileIds.add(record.SpreadsheetID);
+      return { ...record, _rowIndex: i + 2 };
+    });
+    for (const record of records) {
+      if (record.Part > 1 && !keys.has(record.Year + ':' + (record.Part - 1))) throw this._conflict('Data-file part sequence is incomplete.');
+    }
+    return { sheet, records };
+  },
+  _writeRegistry(core, sheet, record) {
+    const growth = Math.max(0, record._rowIndex - sheet.getMaxRows());
+    if (this._allocated(core) + growth * this.registryHeaders.length >= this.cellBoundary) {
+      throw this._conflict('Core capacity cannot accommodate another file location.');
+    }
+    if (growth) sheet.insertRowsAfter(sheet.getMaxRows(), growth);
+    sheet.getRange(record._rowIndex, 1, 1, this.registryHeaders.length)
+      .setValues([this.registryHeaders.map(header => record[header])]);
+    SpreadsheetApp.flush();
+  },
+  _info(record) {
+    return this.infoHeaders.map(header => record[header]);
+  },
+  _assertPrivate(book) {
+    const file = DriveApp.getFileById(book.getId());
+    const owner = file.getOwner();
+    const expectedOwner = IdentityService.normalizeEmail(IdentityService.assertInstallationOwner());
+    if (file.isTrashed() || file.getSharingAccess() !== DriveApp.Access.PRIVATE ||
+        !owner || IdentityService.normalizeEmail(owner.getEmail()) !== expectedOwner ||
+        file.getEditors().length || file.getViewers().length) {
+      throw new AppError(ERROR_CODES.PERMISSION_DENIED, 'Data files must remain private, unshared infrastructure. Owner review is required.', 403);
+    }
+  },
+  _initialize(book, record) {
+    this._assertPrivate(book);
+    let info = book.getSheetByName('DataFileInfo');
+    if (!info) info = book.insertSheet('DataFileInfo');
+    if (info.getLastRow() === 0) {
+      info.getRange(1, 1, 2, this.infoHeaders.length).setValues([this.infoHeaders, this._info(record)]);
+      trimSheetToSchema_(info, this.infoHeaders.length, 2);
+      SpreadsheetApp.flush();
+    }
+    // A recognized metadata/header write may have applied before grid trimming
+    // failed. Verify content first, then finish only its empty grid on retry.
+    this._verifyInfo(book, record, false);
+    trimSheetToSchema_(info, this.infoHeaders.length, 2);
+    for (const tab of this.dataTabs) {
+      let sheet = book.getSheetByName(tab);
+      if (!sheet) sheet = book.insertSheet(tab);
+      if (sheet.getLastRow() === 0) {
+        const headers = WORKSPACE_SCHEMA[tab];
+        sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+        trimSheetToSchema_(sheet, headers.length, 1);
+      } else {
+        this._assertHeaders(sheet, WORKSPACE_SCHEMA[tab], false);
+        if (sheet.getLastRow() !== 1) throw this._conflict('A PREPARING Data file already contains records. Owner recovery is required.');
+        trimSheetToSchema_(sheet, WORKSPACE_SCHEMA[tab].length, 1);
+      }
+    }
+    // Only remove the still-empty default tab in this registered new file.
+    const defaultSheet = book.getSheetByName('Sheet1');
+    if (defaultSheet && defaultSheet.getLastRow() === 0) book.deleteSheet(defaultSheet);
+    SpreadsheetApp.flush();
+    this._verify(book, record);
+  },
+  _verifyInfo(book, record, strictGrid = true) {
+    const sheet = book.getSheetByName('DataFileInfo');
+    this._assertHeaders(sheet, this.infoHeaders, strictGrid);
+    const actual = sheet.getRange(2, 1, 1, this.infoHeaders.length).getValues()[0];
+    if (book.getId() !== record.SpreadsheetID || sheet.getLastRow() !== 2 ||
+        !this._info(record).every((value, i) => actual[i] === value)) {
+      throw this._conflict('Data-file ownership/cohort metadata does not match its registry.');
+    }
+  },
+  _verify(book, record) {
+    this._assertPrivate(book);
+    this._verifyInfo(book, record);
+    for (const tab of this.dataTabs) this._assertHeaders(book.getSheetByName(tab), WORKSPACE_SCHEMA[tab]);
+  },
+  _location(record) {
+    return { workspaceId: record.WorkspaceID, coreSpreadsheetId: record.CoreSpreadsheetID,
+      year: record.Year, part: record.Part, spreadsheetId: record.SpreadsheetID };
+  },
+  prepare(workspaceId, year, tab, additionalRows) {
+    const owner = IdentityService.assertInstallationOwner();
+    if (!Number.isSafeInteger(year) || year < 1970 || year > 9999 || !this.dataTabs.includes(tab) ||
+        !Number.isSafeInteger(additionalRows) || additionalRows < 1 || additionalRows > 250) {
+      throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'A valid year, Data tab and 1-250 pending rows are required.', 400);
+    }
+    const lock = LockService.getScriptLock();
+    if (!lock.tryLock(1000)) throw new AppError(ERROR_CODES.SERVER_BUSY, 'Data allocation is busy. Retry.', 503);
+    try {
+      IdentityService.assertInstallationOwner();
+      const ws = this._workspace(workspaceId);
+      const core = SpreadsheetApp.openById(ws.SpreadsheetID);
+      const registry = this._registry(core, workspaceId, owner);
+      let record = registry.records.filter(row => row.Year === year).sort((a, b) => b.Part - a.Part)[0];
+      let book = null;
+      if (record && record.State === 'PREPARING') {
+        if (!record.SpreadsheetID) throw this._conflict('Uncertain file creation. Inspect the recorded operation before retrying; no file will be recreated automatically.');
+        book = SpreadsheetApp.openById(record.SpreadsheetID);
+        this._initialize(book, record);
+      } else if (record) {
+        book = SpreadsheetApp.openById(record.SpreadsheetID);
+        this._verify(book, record);
+        const sheet = book.getSheetByName(tab);
+        const growth = Math.max(0, sheet.getLastRow() + additionalRows - sheet.getMaxRows());
+        if (this._allocated(book) + growth * sheet.getMaxColumns() >= this.cellBoundary) book = null;
+      }
+      if (!book) {
+        if (registry.records.length >= this.maxRegistryRows) throw this._conflict('Data-file directory limit reached.');
+        const before = record ? this._location(record) : null;
+        record = { WorkspaceID: workspaceId, CoreSpreadsheetID: core.getId(), Year: year,
+          Part: record ? record.Part + 1 : 1, SpreadsheetID: '', State: 'PREPARING',
+          OperationID: Validation.generateId('DATA'), CreatedAt: new Date().toISOString(),
+          _rowIndex: registry.records.length + 2 };
+        this._audit(owner, workspaceId, 'DATA_FILE_CREATE_INTENT', before, this._location(record), record.OperationID);
+        // Persist uncertainty BEFORE Drive creation. A crash cannot safely retry
+        // an unknown create; a registered file can be verified and initialized.
+        this._writeRegistry(core, registry.sheet, record);
+        book = SpreadsheetApp.create('FLINK Data ' + workspaceId + ' ' + year + ' part ' + record.Part + ' ' + record.OperationID);
+        record.SpreadsheetID = book.getId();
+        if (!record.SpreadsheetID || record.SpreadsheetID === core.getId()) throw this._conflict('Unexpected created file identity.');
+        this._writeRegistry(core, registry.sheet, record);
+        this._initialize(book, record);
+      }
+      if (record.State !== 'READY') {
+        const readyAfter = { ...this._location(record), state: 'READY' };
+        this._audit(owner, workspaceId, 'DATA_FILE_READY_INTENT', { state: record.State }, readyAfter, record.OperationID);
+        record.State = 'READY';
+        this._writeRegistry(core, registry.sheet, record);
+        this._audit(owner, workspaceId, 'DATA_FILE_READY_COMPLETED', { state: 'PREPARING' }, readyAfter, record.OperationID);
+      }
+      const sheet = book.getSheetByName(tab);
+      const growth = Math.max(0, sheet.getLastRow() + additionalRows - sheet.getMaxRows());
+      const proposedCells = this._allocated(book) + growth * sheet.getMaxColumns();
+      if (proposedCells >= this.cellBoundary) throw this._conflict('Pending allocation exceeds the safe Data-file boundary.');
+      const after = { ...this._location(record), tab, additionalRows, proposedCells };
+      const before = { allocatedCells: this._allocated(book) };
+      const allocationId = Validation.generateId('DFALLOC');
+      this._audit(owner, workspaceId, 'DATA_FILE_ALLOCATION_INTENT', before, after, allocationId);
+      if (growth) sheet.insertRowsAfter(sheet.getMaxRows(), growth);
+      SpreadsheetApp.flush();
+      this._audit(owner, workspaceId, 'DATA_FILE_ALLOCATION_COMPLETED', before, after, allocationId);
+      return this._location(record);
+    } finally {
+      try { SpreadsheetApp.flush(); } finally { lock.releaseLock(); }
+    }
+  },
+  resolve(location) {
+    IdentityService.assertInstallationOwner();
+    if (!location || !Number.isSafeInteger(location.year) || !Number.isSafeInteger(location.part)) throw this._conflict('Invalid immutable Data-file location.');
+    const ws = this._workspace(location.workspaceId);
+    if (ws.SpreadsheetID !== location.coreSpreadsheetId) throw this._conflict('Data-file Core cohort changed.');
+    const core = SpreadsheetApp.openById(ws.SpreadsheetID);
+    const record = this._registry(core, location.workspaceId).records.find(row => row.Year === location.year && row.Part === location.part);
+    if (!record || record.State !== 'READY' || record.SpreadsheetID !== location.spreadsheetId) throw this._conflict('Data-file location is not registered READY.');
+    const book = SpreadsheetApp.openById(record.SpreadsheetID);
+    this._verify(book, record);
+    return book;
+  }
+};
+
+/** Owner/editor-only preparation; does not migrate or reroute application data. */
+function prepareYearlyDataFile_(workspaceId, year, tabName, additionalRows) {
+  return YearlyDataFileService.prepare(workspaceId, year, tabName, additionalRows);
+}
+
 /* ===== WorkspaceService.gs ===== */
 /**
  * FLINK Time & Workforce Platform — Workspace Service
@@ -17279,7 +17537,7 @@ if (typeof module !== 'undefined' && module.exports) {
     Flags, SettingsService,
     IdentityService, SecurityService, KmsSecretService, AuthorizationService,
     SessionService, AuthService, TrackingPolicyService,
-    MasterRepository, SheetRepository, WorkspaceRouter,
+    MasterRepository, SheetRepository, WorkspaceRouter, YearlyDataFileService,
     WorkspaceService, TimezoneService,
     ClientService, ProjectService, TaskService, TagService,
     TimeEntryService, TimerService, TimesheetService,

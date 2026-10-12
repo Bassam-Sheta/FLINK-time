@@ -91,6 +91,13 @@ Client-side portal separation is a usability layer only. Server-side `ACTION_PER
 - Production should use a dedicated deployment/automation identity where possible.
 - Admin and Super Admin portals are direct Web App pages and are not framed with ALLOWALL.
 
+### Yearly Data-file allocation foundation (WP9)
+
+- `YearlyDataFileService` can prepare separate Google spreadsheet files per workspace/Core cohort/year/part. It counts every allocated row × column across the file and includes pending row growth; projected allocation at or above 7,000,000 cells selects a new physical part. Backdated years have independent part sequences.
+- The owner-only private editor helper `prepareYearlyDataFile_()` prepares a bounded 1-250-row grid. Its bounded Core `DataFileRegistry` and each file's `DataFileInfo` bind workspace, Core file ID, year, part, creation operation and physical file ID. Historical resolution requires the whole immutable location and never substitutes the current/newest file.
+- Creation persists a PREPARING checkpoint before creating the Drive file, then registers the returned file ID before initialization. READY follows verified headers/metadata. An unknown creation result stops for owner review rather than blindly creating another file. Registered incomplete files are retained for verified retry; no broad file cleanup occurs. Data files must be privately owned by the installation owner, with no extra editors/viewers.
+- This is an **inactive allocation foundation**, not automatic application rotation. Existing repositories, record IDs, reports, rollups and backups still use the current single-file contract. Preparing a grid neither migrates data nor reserves rows for a later write. Application routing, immutable record-location integration and multi-file backup/restore must be completed and validated together before activation. No new setting or browser RPC enables it.
+
 ## Data integrity
 - UTC storage.
 - Workspace-local timezone/date/week interpretation.
