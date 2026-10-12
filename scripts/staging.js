@@ -181,6 +181,17 @@ async function executeOperation(operation, config, { confirmed = false, env = pr
 
 async function main() {
   const file = path.join(root, '.staging.config.json');
+  if (process.argv[2] === 'doctor') {
+    let config = null;
+    if (fs.existsSync(file)) {
+      try { config = JSON.parse(fs.readFileSync(file, 'utf8')); }
+      catch (_) { config = {}; }
+    }
+    const report = readiness(config, process.env);
+    console.log(JSON.stringify(report, null, 2));
+    if (!report.readyForUpload) process.exitCode = 1;
+    return;
+  }
   if (!fs.existsSync(file)) throw new Error('Staging is not configured. See docs/STAGING_TESTS.md; no Google calls made.');
   let config;
   try { config = JSON.parse(fs.readFileSync(file, 'utf8')); }
@@ -189,7 +200,32 @@ async function main() {
   console.log(typeof result === 'string' ? result : JSON.stringify(result, null, 2));
 }
 
-module.exports = { validateConfig, createBundle, validateReport, prepare, checkBundle, executeOperation };
+function readiness(config, env = {}) {
+  const report = { config: config === null ? 'MISSING' : 'INVALID', bundle: 'NOT_CHECKED',
+    credentials: 'NOT_CHECKED', deployment: 'NOT_CONFIGURED', readyForUpload: false,
+    readyForRuntimeCheck: false, googleContacted: false, liveVerified: false, next: [] };
+  try { validateConfig(config); report.config = 'VALID'; } catch (_) {
+    report.next.push('Fill .staging.config.json from scripts/staging.config.example.json with an owner-approved disposable target.');
+    return report;
+  }
+  try { checkedBundle(config); report.bundle = 'CURRENT'; }
+  catch (_) { report.bundle = 'MISSING_OR_STALE'; report.next.push('Prepare a current bundle; preserve any previous bundle before preparing again.'); }
+  try {
+    require('./staging-google').loadCredentials(env.FLINK_STAGING_CREDENTIALS, config);
+    report.credentials = 'VALID_LOCAL_FILE';
+  } catch (_) {
+    report.credentials = 'MISSING_OR_INVALID';
+    report.next.push('Complete owner Google consent and set FLINK_STAGING_CREDENTIALS to the authorized-user file outside the repository.');
+  }
+  if (typeof env.FLINK_STAGING_DEPLOYMENT_ID === 'string' && /^[A-Za-z0-9_-]{20,200}$/.test(env.FLINK_STAGING_DEPLOYMENT_ID)) report.deployment = 'CONFIGURED_UNVERIFIED';
+  else report.next.push('Set FLINK_STAGING_DEPLOYMENT_ID after creating the owner-only API deployment.');
+  report.readyForUpload = report.bundle === 'CURRENT' && report.credentials === 'VALID_LOCAL_FILE';
+  report.readyForRuntimeCheck = report.readyForUpload && report.deployment === 'CONFIGURED_UNVERIFIED';
+  report.next.push('Owner confirmation is required before upload/run. Local readiness does not verify identity, consent, IAM or remote ownership.');
+  return report;
+}
+
+module.exports = { validateConfig, createBundle, validateReport, prepare, checkBundle, executeOperation, readiness };
 if (require.main === module) {
   main().catch(err => { console.error(err.message); process.exitCode = 1; });
 }

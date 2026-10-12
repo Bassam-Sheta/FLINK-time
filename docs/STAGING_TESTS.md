@@ -14,6 +14,13 @@ Google authorization, MFA, Sheet latency, embedding, triggers or production load
 
 ## Prerequisites requiring the installation owner's participation
 
+Run `npm run staging -- doctor` first. It makes no Google calls and prints only
+readiness statuses and next steps, not configuration or credential values. Exit 1
+means local upload prerequisites are missing. A ready result is not proof of live
+identity, consent, remote ownership, deployment or IAM. Upload/run retain their
+existing explicit staging confirmation. Use `docs/LIVE_ACCEPTANCE.md` to track
+application checks separately from runtime primitives.
+
 1. Identify the production script ID. Create a **new empty, disposable standalone
    diagnostic script**, separate from production and its books.
 2. Associate the diagnostic script and your Desktop OAuth client with the same
