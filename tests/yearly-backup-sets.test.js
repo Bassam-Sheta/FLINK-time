@@ -3,11 +3,12 @@ const test=require('node:test');
 const assert=require('node:assert/strict');
 const {fixture}=require('./helpers/yearly-entry-fixture');
 const root={userId:'ROOT',role:'SUPER_ADMIN'};
+const worker={userId:'U1',role:'USER'};
 
 function populated() {
   const fx=fixture();fx.activate();
-  fx.repo.createTimeEntry('W1',fx.entry('NEW'));
-  fx.repo.createTimeEntry('W1',fx.entry('OLD','2025-12-31T23:00:00.000Z'));
+  fx.repo.createTimeEntry('W1',fx.entry('NEW'),worker);
+  fx.repo.createTimeEntry('W1',fx.entry('OLD','2025-12-31T23:00:00.000Z'),worker);
   fx.lock.tryLock();
   for(const name of ['DailyRollups','WeeklyRollups','MonthlyRollups']) {
     fx.core.getSheetByName(name).appendRow(Array.from(fx.context.WORKSPACE_SCHEMA[name],key=>key==='TotalSeconds'?7200:''));
@@ -25,6 +26,7 @@ test('workspace backup contains isolated copies of every Data file and authentic
   assert.equal(stored.dataFiles.length,2);
   assert.equal(fx.context.BackupService.validateBackup(root,'W1',backup.backupId).valid,true);
   const snapshot=fx.books.get(backup.backupFileId);
+  assert.equal(snapshot.getSheetByName('EntryStorageActivation').values[1][1],backup.backupFileId);
   for(const row of snapshot.getSheetByName('DataFileRegistry').values.slice(1)) {
     assert.equal(row[1],backup.backupFileId);
     assert.ok(stored.dataFiles.some(item=>item.fileId===row[4]));
@@ -39,10 +41,13 @@ test('restore copies the whole set and rewrites all references before switching 
   const fx=populated();const backup=fx.backup();const originalCore=fx.workspace.SpreadsheetID;
   const originalIds=fx.repo.listTimeEntries('W1').map(row=>row._rowIndex.spreadsheetId);
   const stored=JSON.parse(fx.backups[0].ChecksumMetadata);
-  fx.repo.updateTimeEntry('W1','NEW',{Description:'after snapshot'});
+  fx.repo.updateTimeEntry('W1','NEW',{Description:'after snapshot'},worker);
   const result=fx.restore(backup.backupId);
   assert.notEqual(result.restoredSpreadsheetId,originalCore);
   assert.notEqual(result.restoredSpreadsheetId,backup.backupFileId);
+  const activation=fx.books.get(result.restoredSpreadsheetId).getSheetByName('EntryStorageActivation');
+  assert.equal(activation.values[1][1],result.restoredSpreadsheetId);
+  assert.equal(activation.values[1][6],'COMPLETE');
   assert.equal(fx.repo.getEntry('W1','NEW').Description,'');
   for(const row of fx.repo.listTimeEntries('W1')) {
     assert.equal(row._rowIndex.coreSpreadsheetId,result.restoredSpreadsheetId);
@@ -127,7 +132,7 @@ test('restore completion failure rolls back the entire routing policy and preser
 
 test('restoring a legacy snapshot over yearly storage restores the legacy policy as well',()=>{
   const fx=fixture();
-  const legacy=fx.context.BackupService.createBackup(root,'W1');fx.activate();fx.repo.createTimeEntry('W1',fx.entry('LATER'));
+  const legacy=fx.context.BackupService.createBackup(root,'W1');fx.activate();fx.repo.createTimeEntry('W1',fx.entry('LATER'),worker);
   const oldData=fx.repo.getEntry('W1','LATER')._rowIndex.spreadsheetId;
   fx.context.BackupService.restoreBackup(root,'W1',legacy.backupId,'SYNTHETIC-PASSWORD');
   assert.equal(fx.workspace.PartitionPolicy,'');assert.equal(fx.repo.listTimeEntries('W1').length,0);
@@ -147,4 +152,20 @@ test('backup execution budget stops before copying or publishing incomplete resu
   const fx=populated();fx.lock.tryLock();
   assert.throws(()=>fx.context.YearlyBackupSets.create(root,fx.workspace,Date.now()-1),error=>error.code==='SERVER_BUSY');
   fx.lock.releaseLock();assert.equal(fx.controls.copies,0);assert.equal(fx.backups.length,0);
+});
+
+test('incomplete or tampered activation checkpoints cannot publish a file-set backup',()=>{
+  for(const failure of ['incomplete','tampered']) {
+    const fx=populated();
+    if(failure==='incomplete') {
+      const state=fx.context.YearlyEntryStorage.activationState(fx.core,'W1','owner@example.test');
+      fx.lock.tryLock();
+      fx.context.YearlyEntryStorage.writeActivation(fx.core,'W1','owner@example.test',state.sheet,{...state.record,State:'PREPARING'});
+      fx.lock.releaseLock();
+    } else fx.core.getSheetByName('EntryStorageActivation').values[1][1]='FOREIGN-CORE';
+    assert.throws(()=>fx.backup(),error=>error.code==='CONFLICT');
+    assert.equal(fx.controls.copies,0);assert.equal(fx.backups.length,0);
+    assert.equal(fx.workspace.SpreadsheetID,'CORE-1');
+    assert.equal(fx.controls.locked,false);
+  }
 });

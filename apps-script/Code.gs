@@ -6951,10 +6951,10 @@ var SheetRepository = (typeof global !== 'undefined' && global.SheetRepository) 
   /**
    * Appends multiple entity rows in a single batch to a workspace tab
    */
-  appendRows(workspaceId, tabName, entities) {
+  appendRows(workspaceId, tabName, entities, actorContext = null) {
     if (YearlyEntryStorage.handles(workspaceId, tabName)) {
       if (!Array.isArray(entities) || entities.length > 250) throw YearlyDataFileService._conflict('Entry batch limit exceeded.');
-      return YearlyEntryStorage.locked(() => entities.map(entity => YearlyEntryStorage.append(workspaceId, entity)));
+      return YearlyEntryStorage.locked(() => entities.map(entity => YearlyEntryStorage.append(workspaceId, entity, actorContext)));
     }
     if (!entities || !entities.length) return [];
     const ss = WorkspaceRouter.resolveSpreadsheet(workspaceId);
@@ -7230,8 +7230,8 @@ var SheetRepository = (typeof global !== 'undefined' && global.SheetRepository) 
   updateTimeEntry(workspaceId, entryId, updates, actorContext = null) {
     const entry = this.getEntryAnyStatus(workspaceId, entryId);
     if (!entry) throw new AppError(ERROR_CODES.NOT_FOUND, `Time entry ${entryId} not found.`);
-    this.updateRow(workspaceId, CONSTANTS.WORKSPACE_TABS.TIME_ENTRIES, entry._rowIndex, updates, actorContext);
-    return { ...entry, ...updates };
+    const updated = this.updateRow(workspaceId, CONSTANTS.WORKSPACE_TABS.TIME_ENTRIES, entry._rowIndex, updates, actorContext);
+    return updated || { ...entry, ...updates };
   },
 
   /* ------------------- TIMESHEETS & APPROVALS ------------------- */
@@ -7720,6 +7720,61 @@ function prepareYearlyDataFile_(workspaceId, year, tabName, additionalRows) {
 var YearlyEntryStorage = {
   policy: 'YEARLY_ENTRIES_V1',
   pendingPolicy: 'YEARLY_ENTRIES_PREPARING',
+  activationTab: 'EntryStorageActivation',
+  activationHeaders: ['WorkspaceID', 'CoreSpreadsheetID', 'OperationID', 'ActorUserID', 'BeforePolicy', 'TargetPolicy', 'State', 'CheckpointHash'],
+  activationHash(record) {
+    const values = this.activationHeaders.slice(0, -1).map(key => record[key]);
+    return Array.from(SecurityService.hmacSha256(SecurityService.getPepper() + '_FLINK_ENTRY_ACTIVATION_V1', JSON.stringify(values)))
+      .map(byte => (byte < 0 ? byte + 256 : byte).toString(16).padStart(2, '0')).join('');
+  },
+  activationState(core, workspaceId, owner, initialize = false, expectedCoreId = core.getId()) {
+    if (initialize && !LockService.getScriptLock().hasLock()) throw YearlyDataFileService._conflict('Activation initialization requires the writer lock.');
+    let sheet = core.getSheetByName(this.activationTab);
+    if (!sheet || sheet.getLastRow() === 0) {
+      if (!initialize) throw YearlyDataFileService._conflict('Activation checkpoint is missing. Owner recovery is required.');
+      if (YearlyDataFileService._allocated(core) + (sheet ? 0 : 26000) >= YearlyDataFileService.cellBoundary) {
+        throw YearlyDataFileService._conflict('Core capacity cannot accommodate the activation checkpoint.');
+      }
+      const operation = Validation.generateId('ENTSCHEMA');
+      const before = { activationTabPresent: !!sheet }, after = { coreSpreadsheetId: core.getId(), headers: this.activationHeaders };
+      YearlyDataFileService._audit(owner, workspaceId, 'ENTRY_STORAGE_ACTIVATION_SCHEMA_INTENT', before, after, operation);
+      if (!sheet) sheet = core.insertSheet(this.activationTab);
+      sheet.getRange(1, 1, 1, this.activationHeaders.length).setValues([this.activationHeaders]);
+      trimSheetToSchema_(sheet, this.activationHeaders.length, 2);
+      SpreadsheetApp.flush();
+      YearlyDataFileService._audit(owner, workspaceId, 'ENTRY_STORAGE_ACTIVATION_SCHEMA_COMPLETED', before, after, operation);
+    }
+    YearlyDataFileService._assertHeaders(sheet, this.activationHeaders, false);
+    if (sheet.getLastRow() === 1) {
+      if (!initialize) throw YearlyDataFileService._conflict('Activation checkpoint is incomplete. Owner recovery is required.');
+      trimSheetToSchema_(sheet, this.activationHeaders.length, 2);
+      return { sheet, record: null };
+    }
+    if (sheet.getLastRow() !== 2) throw YearlyDataFileService._conflict('Invalid activation checkpoint row count.');
+    const values = sheet.getRange(2, 1, 1, this.activationHeaders.length).getValues()[0];
+    const record = Object.fromEntries(this.activationHeaders.map((key, i) => [key, values[i]]));
+    if (record.WorkspaceID !== workspaceId || record.CoreSpreadsheetID !== expectedCoreId ||
+        record.ActorUserID !== owner || typeof record.OperationID !== 'string' || !/^[A-Za-z0-9._:-]{1,128}$/.test(record.OperationID) ||
+        record.BeforePolicy !== '' || record.TargetPolicy !== this.policy || !['PREPARING', 'COMPLETE'].includes(record.State) ||
+        typeof record.CheckpointHash !== 'string' || !/^[a-f0-9]{64}$/.test(record.CheckpointHash) ||
+        !SecurityService.constantTimeEquals(record.CheckpointHash, this.activationHash(record))) {
+      throw YearlyDataFileService._conflict('Activation checkpoint authentication or ownership failed.');
+    }
+    return { sheet, record };
+  },
+  writeActivation(core, workspaceId, owner, sheet, record) {
+    if (!LockService.getScriptLock().hasLock()) throw YearlyDataFileService._conflict('Activation checkpoint writes require the writer lock.');
+    const signed = { ...record, CheckpointHash: this.activationHash(record) };
+    sheet.getRange(2, 1, 1, this.activationHeaders.length).setValues([this.activationHeaders.map(key => signed[key])]);
+    SpreadsheetApp.flush();
+    const stored = this.activationState(core, workspaceId, owner).record;
+    if (stored.CheckpointHash !== signed.CheckpointHash) throw YearlyDataFileService._conflict('Activation checkpoint write could not be confirmed.');
+  },
+  assertActivationComplete(core, workspaceId, owner) {
+    const state = this.activationState(core, workspaceId, owner);
+    if (state.record.State !== 'COMPLETE') throw YearlyDataFileService._conflict('Activation completion requires owner recovery.');
+    return state;
+  },
   freshWorkspace(workspaceId) {
     if (MasterRepository._invalidateTable) MasterRepository._invalidateTable(CONSTANTS.MASTER_TABS.WORKSPACES);
     if (MasterRepository._requestCache) delete MasterRepository._requestCache['WS:' + workspaceId];
@@ -7757,6 +7812,7 @@ var YearlyEntryStorage = {
     if (ws.PartitionPolicy !== this.policy) throw YearlyDataFileService._conflict('Yearly entry routing is not active.');
     const core = SpreadsheetApp.openById(ws.SpreadsheetID), owner = this.runtimeOwner();
     YearlyDataFileService._assertPrivate(core, owner);
+    this.assertActivationComplete(core, workspaceId, owner);
     const records = YearlyDataFileService._registry(core, workspaceId).records;
     return { ws, core, owner, records };
   },
@@ -7779,7 +7835,7 @@ var YearlyEntryStorage = {
   },
   row(values, location, rowIndex) {
     const row = Object.fromEntries(WORKSPACE_SCHEMA.TimeEntries.map((key, i) => [key, values[i]]));
-    row._rowIndex = { ...location, rowIndex, entryId: row.EntryID };
+    row._rowIndex = { ...location, rowIndex, entryId: row.EntryID, rowHash: SecurityService.hashToken(JSON.stringify(values)) };
     return row;
   },
   find(workspaceId, column, value, options = {}) {
@@ -7818,11 +7874,13 @@ var YearlyEntryStorage = {
     // A union has no single writable sheet. All mutations must resolve identity.
     return { headers: WORKSPACE_SCHEMA.TimeEntries, rows, sheet: null };
   },
-  actor(entity, context = null) {
-    if (context && context.userId && context.role) return { userId: context.userId, role: context.role };
-    const userId = entity.UpdatedBy || entity.CreatedBy;
-    if (!userId || typeof userId !== 'string') throw YearlyDataFileService._conflict('Attributable entry writer is required.');
-    return { userId, role: 'ENTRY_STORAGE' };
+  actor(context) {
+    if (!context || typeof context.userId !== 'string' || !context.userId.trim() ||
+        context.userId !== context.userId.trim() || typeof context.role !== 'string' ||
+        !Object.values(CONSTANTS.ROLES).includes(context.role)) {
+      throw YearlyDataFileService._conflict('Explicit entry mutation actor is required.');
+    }
+    return { userId: context.userId, role: context.role };
   },
   append(workspaceId, entity, actorContext = null) {
     if (!entity || typeof entity.EntryID !== 'string' || !/^[A-Za-z0-9._:-]{1,128}$/.test(entity.EntryID) || !entity.UserID) {
@@ -7830,7 +7888,7 @@ var YearlyEntryStorage = {
     }
     const year = new Date(entity.StartUTC).getUTCFullYear();
     if (!Number.isSafeInteger(year) || year < 1970 || year > 9999) throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'Invalid entry year.', 400);
-    const actor = this.actor(entity, actorContext);
+    const actor = this.actor(actorContext);
     return this.locked(() => {
       const context = this.context(workspaceId);
       for (const record of context.records.filter(row => row.State === 'PREPARING')) {
@@ -7859,17 +7917,20 @@ var YearlyEntryStorage = {
     });
   },
   update(workspaceId, location, updates, actorContext = null) {
+    const actor = this.actor(actorContext);
     return this.locked(() => {
       if (!location || location.workspaceId !== workspaceId || !location.entryId) throw YearlyDataFileService._conflict('Immutable entry location required.');
       const before = this.find(workspaceId, 'EntryID', location.entryId);
       if (!before || ['workspaceId', 'coreSpreadsheetId', 'spreadsheetId', 'year', 'part'].some(key => before._rowIndex[key] !== location[key])) {
         throw YearlyDataFileService._conflict('Stale or foreign entry location.');
       }
+      if (!location.rowHash || before._rowIndex.rowHash !== location.rowHash) {
+        throw YearlyDataFileService._conflict('Entry changed while waiting for the writer lock. Refresh before retrying.');
+      }
       if ((updates.EntryID !== undefined && updates.EntryID !== before.EntryID) ||
           (updates.UserID !== undefined && updates.UserID !== before.UserID)) throw YearlyDataFileService._conflict('Entry identity is immutable.');
       const values = WORKSPACE_SCHEMA.TimeEntries.map(key => Validation.sanitizeCellValue(updates[key] === undefined ? before[key] : updates[key]));
       const after = this.row(values, before._rowIndex, before._rowIndex.rowIndex);
-      const actor = this.actor({ ...before, ...updates }, actorContext);
       const operation = Validation.generateId('ENTUPD');
       YearlyDataFileService._audit(actor, workspaceId, 'ENTRY_STORAGE_UPDATE_INTENT', before, after, operation);
       SpreadsheetApp.openById(location.spreadsheetId).getSheetByName('TimeEntries')
@@ -7889,6 +7950,7 @@ var YearlyEntryStorage = {
       YearlyDataFileService._assertHeaders(master, MASTER_SCHEMA.Workspaces, false);
       const core = SpreadsheetApp.openById(ws.SpreadsheetID);
       YearlyDataFileService._assertPrivate(core, owner);
+      const activation = this.activationState(core, workspaceId, owner, !ws.PartitionPolicy);
       const registry = YearlyDataFileService._registry(core, workspaceId, owner);
       for (const record of registry.records) {
         if (record.State !== 'READY') throw YearlyDataFileService._conflict('Finish pending file preparation before activation.');
@@ -7898,13 +7960,23 @@ var YearlyEntryStorage = {
           if (tab !== 'TimeEntries' && book.getSheetByName(tab).getLastRow() > 1) throw YearlyDataFileService._conflict('Entry-only routing cannot activate a Data file containing other records.');
         }
       }
-      const before = { coreSpreadsheetId: core.getId(), policy: ws.PartitionPolicy || '' };
+      if (activation.record && activation.record.State === 'COMPLETE') {
+        if (ws.PartitionPolicy !== this.policy) throw YearlyDataFileService._conflict('Completed activation no longer matches the workspace policy.');
+        return { coreSpreadsheetId: core.getId(), policy: this.policy };
+      }
+      const record = activation.record || { WorkspaceID: workspaceId, CoreSpreadsheetID: core.getId(),
+        OperationID: Validation.generateId('ENTENABLE'), ActorUserID: owner, BeforePolicy: '', TargetPolicy: this.policy, State: 'PREPARING' };
+      const before = { coreSpreadsheetId: core.getId(), policy: record.BeforePolicy };
       const after = { ...before, policy: this.policy };
-      YearlyDataFileService._audit(owner, workspaceId, 'ENTRY_STORAGE_ENABLE_INTENT', before, after, workspaceId);
+      YearlyDataFileService._audit(owner, workspaceId, activation.record ? 'ENTRY_STORAGE_ENABLE_RECOVERY_INTENT' : 'ENTRY_STORAGE_ENABLE_INTENT', before, after, record.OperationID);
+      this.writeActivation(core, workspaceId, owner, activation.sheet, record);
       MasterRepository.updateWorkspace(workspaceId, { PartitionPolicy: this.pendingPolicy });
       SpreadsheetApp.flush();
-      YearlyDataFileService._audit(owner, workspaceId, 'ENTRY_STORAGE_ENABLE_VERIFIED', before, after, workspaceId);
+      YearlyDataFileService._audit(owner, workspaceId, 'ENTRY_STORAGE_ENABLE_VERIFIED', before, after, record.OperationID);
       MasterRepository.updateWorkspace(workspaceId, { PartitionPolicy: this.policy });
+      SpreadsheetApp.flush();
+      YearlyDataFileService._audit(owner, workspaceId, 'ENTRY_STORAGE_ENABLE_COMPLETED', before, after, record.OperationID);
+      this.writeActivation(core, workspaceId, owner, activation.sheet, { ...record, State: 'COMPLETE' });
       SheetRepository.beginRequest(); WorkspaceRouter.clearCache();
       return after;
     });
@@ -15939,7 +16011,8 @@ var YearlyBackupSets = {
   },
   coreManifest(core, workspaceId, deadline) {
     return BackupService._buildManifest(core, 'WORKSPACE', workspaceId,
-      { ...WORKSPACE_SCHEMA, DataFileRegistry: YearlyDataFileService.registryHeaders }, deadline);
+      { ...WORKSPACE_SCHEMA, DataFileRegistry: YearlyDataFileService.registryHeaders,
+        EntryStorageActivation: YearlyEntryStorage.activationHeaders }, deadline);
   },
   dataManifest(book, workspaceId, deadline) {
     const schema = { DataFileInfo: YearlyDataFileService.infoHeaders };
@@ -15949,6 +16022,7 @@ var YearlyBackupSets = {
   manifest(core, workspaceId, deadline) {
     const owner = YearlyEntryStorage.runtimeOwner();
     YearlyDataFileService._assertPrivate(core, owner);
+    YearlyEntryStorage.assertActivationComplete(core, workspaceId, owner);
     const records = this.records(core, workspaceId);
     const base = this.coreManifest(core, workspaceId, deadline);
     const dataFiles = records.map(record => {
@@ -16027,6 +16101,9 @@ var YearlyBackupSets = {
     const routingBefore = records.map(row => YearlyDataFileService._location(row));
     const routingAfter = replacements.map(item => YearlyDataFileService._location(item.after));
     this.audit(actor, workspaceId, 'FILE_SET_REBASE_INTENT', routingBefore, routingAfter, operation);
+    const activation = YearlyEntryStorage.activationState(candidate, workspaceId, owner, false, core.getId());
+    YearlyEntryStorage.writeActivation(candidate, workspaceId, owner, activation.sheet,
+      { ...activation.record, CoreSpreadsheetID: candidate.getId() });
     const registry = candidate.getSheetByName(YearlyDataFileService.registryTab);
     for (const item of replacements) {
       item.book.getSheetByName('DataFileInfo').getRange(2, 1, 1, YearlyDataFileService.infoHeaders.length)
