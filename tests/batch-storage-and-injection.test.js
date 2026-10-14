@@ -345,104 +345,51 @@ test('MasterRepository.appendRows batches insertion with setValues and invalidat
   assert.equal(writtenValues[1][nameColIdx], 'Bob Smith');
 });
 
-test('SheetRepository.updateRow reuses _headerCache across multiple updates in a request', () => {
+test('both repositories cache headers and batch only adjacent changed cells', () => {
   cleanGlobals();
-
-  let headerReads = 0;
+  let headerReads = 0, columnReads = 0;
+  const writes = [];
+  const headers = ['ID', 'Description', 'WorkMode', 'Protected', 'DurationSeconds'];
   const mockSheet = {
-    getLastRow() { return 10; },
-    getLastColumn() { return 10; },
+    getLastColumn() { columnReads++; return headers.length; },
     getRange(row, col, numRows, numCols) {
       if (row === 1 && numRows === 1) {
         headerReads++;
-        return {
-          getValues() {
-            return [['EntryID', 'UserID', 'ProjectID', 'DurationSeconds', 'Description']];
-          }
-        };
+        return { getValues: () => [headers] };
       }
-      return {
-        setValues() {}
-      };
+      return { setValues: values => writes.push({ row, col, numRows, numCols, values }) };
     }
   };
-
   global.WorkspaceRouter = {
-    resolveSpreadsheet() {
-      return {
-        getSheetByName() { return mockSheet; }
-      };
-    }
+    resolveSpreadsheet: () => ({ getSheetByName: () => mockSheet })
   };
-
-  const backend = require(codePath);
-  const { SheetRepository } = backend;
-
-  SheetRepository.beginRequest();
-  assert.equal(headerReads, 0);
-
-  // First update reads and caches headers
-  SheetRepository.updateRow('W1', 'TimeEntries', 2, { Description: 'First' });
-  assert.equal(headerReads, 1);
-
-  // Second update reuses cached headers without re-querying row 1
-  SheetRepository.updateRow('W1', 'TimeEntries', 3, { Description: 'Second' });
-  assert.equal(headerReads, 1);
-
-  // Third update on same tab still uses cache
-  SheetRepository.updateRow('W1', 'TimeEntries', 4, { Description: 'Third' });
-  assert.equal(headerReads, 1);
-
-  // beginRequest resets cache
-  SheetRepository.beginRequest();
-  SheetRepository.updateRow('W1', 'TimeEntries', 5, { Description: 'Fourth' });
-  assert.equal(headerReads, 2);
-});
-
-test('MasterRepository.updateRow reuses _headerCache across multiple updates in a request', () => {
-  cleanGlobals();
-
-  let headerReads = 0;
-  const mockSheet = {
-    getLastRow() { return 10; },
-    getLastColumn() { return 10; },
-    getRange(row, col, numRows, numCols) {
-      if (row === 1 && numRows === 1) {
-        headerReads++;
-        return {
-          getValues() {
-            return [['UserID', 'Username', 'DisplayName', 'Email', 'Role', 'Status']];
-          }
-        };
-      }
-      return {
-        setValues() {}
-      };
-    }
-  };
-
-  const backend = require(codePath);
-  const { MasterRepository } = backend;
-
-  MasterRepository.getMasterSpreadsheet = () => ({
-    getSheetByName() { return mockSheet; }
-  });
-
-  MasterRepository.beginRequest();
-  assert.equal(headerReads, 0);
-
-  // First update reads and caches headers
-  MasterRepository.updateRow('Accounts', 2, { DisplayName: 'Alice Updated' });
-  assert.equal(headerReads, 1);
-
-  // Second update reuses cached headers
-  MasterRepository.updateRow('Accounts', 3, { DisplayName: 'Bob Updated' });
-  assert.equal(headerReads, 1);
-
-  // beginRequest resets cache
-  MasterRepository.beginRequest();
-  MasterRepository.updateRow('Accounts', 4, { DisplayName: 'Charlie Updated' });
-  assert.equal(headerReads, 2);
+  const { SheetRepository, MasterRepository } = require(codePath);
+  MasterRepository.getMasterSpreadsheet = () => ({ getSheetByName: () => mockSheet });
+  for (const [repo, args, cacheKey] of [
+    [SheetRepository, ['W1', 'TimeEntries'], 'W1::TimeEntries'],
+    [MasterRepository, ['Accounts'], 'Accounts']
+  ]) {
+    headerReads = columnReads = 0;
+    writes.length = 0;
+    repo.beginRequest();
+    repo._requestCache[cacheKey] = { stale: true };
+    repo.updateRow(...args, 2, { DurationSeconds: 60, WorkMode: 'WFH', Description: '=1+1', Unknown: 'ignored' });
+    assert.equal(headerReads, 1);
+    assert.equal(columnReads, 1);
+    assert.deepEqual(writes, [
+      { row: 2, col: 2, numRows: 1, numCols: 2, values: [["'=1+1", 'WFH']] },
+      { row: 2, col: 5, numRows: 1, numCols: 1, values: [[60]] }
+    ]);
+    assert.equal(repo._requestCache[cacheKey], undefined);
+    repo.updateRow(...args, 3, { Description: 'Second' });
+    repo.updateRow(...args, 4, { Description: 'Third' });
+    assert.equal(headerReads, 1);
+    assert.equal(columnReads, 1);
+    repo.beginRequest();
+    repo.updateRow(...args, 5, { Description: 'Fourth' });
+    assert.equal(headerReads, 2);
+    assert.equal(columnReads, 2);
+  }
 });
 
 test('SheetRepository.deleteRows executes batch row deletion and invalidates table cache', () => {
@@ -1055,6 +1002,5 @@ test('JobService.getScriptPropertiesQuotaMetrics flags WARNING and CRITICAL thre
   assert.equal(metrics90.alertStatus, 'CRITICAL');
   assert.ok(metrics90.utilizationPct >= 85);
 });
-
 
 

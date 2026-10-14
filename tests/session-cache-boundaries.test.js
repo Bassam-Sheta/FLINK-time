@@ -66,10 +66,13 @@ test('all-method session request counts remain bounded at 10 and 50,000 rows', (
   });
   assert.deepEqual(measurements[0], measurements[1]);
   // Includes metadata and finder methods, not only getValues/setValues.
-  assert.equal(measurements[0].cold.total, 41);
+  // Handle reuse removes only redundant opens: all row/finder/write calls stay.
+  assert.equal(measurements[0].cold.total, 38);
+  assert.equal(measurements[0].cold.byMethod.openById, 1);
   assert.equal(measurements[0].cold.byMethod.setValues || 0, 0);
   assert.equal(measurements[0].warm.total, 0);
-  assert.equal(measurements[0].touch.total, 63);
+  assert.equal(measurements[0].touch.total, 58);
+  assert.equal(measurements[0].touch.byMethod.openById, 1);
   assert.equal(measurements[0].touch.byMethod.setValues, 1);
 });
 

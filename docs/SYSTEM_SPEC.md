@@ -28,6 +28,15 @@ The production application intentionally has only:
 
 No other `.gs` file is required for deployment. npm, Node.js, Playwright, GitHub Actions, and repository tests are development-only.
 
+`User.html` also holds shared CSS/browser functions. The private
+`renderPortalHtml_()` expands static `FLINK_SHARED` references in the other
+two role files before HtmlService serves them; role-specific code stays separate.
+Only the three fixed portal names are permitted, and missing/duplicate sections
+fail closed. No CDN, new runtime file, security authority or public RPC is added.
+Maintain the three HTML files and `Code.gs` as one release; opening a role file
+directly without server expansion is not a supported preview. The developer
+browser server uses the same renderer. See `LEAN_SOURCE_VERIFICATION.md`.
+
 ### Developer runtime verification (WP0)
 
 Google authentication 10.5.0 is pinned in the developer lockfile; staging uses
@@ -199,8 +208,23 @@ Master/workspace schema repair also safely trims unused allocated rows/columns. 
 
 WP1 now has all-method Spreadsheet boundary instrumentation, including metadata
 and finder methods. At both 10 and 50,000 mocked rows, session validation takes
-41 boundary method calls cold, zero warm, and 63 with an activity touch (one
+38 boundary method calls cold, zero warm, and 58 with an activity touch (one
 batched write). These are regression proxies, not Google's quota consumption or
 the originally proposed six-call acceptance target. Real-deployment timing,
 complete timer/weekly-list budgets and bounded TimeEntries range reads remain;
 the growing entry scans require the later data-book/query work.
+
+The Master spreadsheet **handle**, not its rows or authorization decisions, is
+reused within a request and reset by `beginRequest()`. An explicit file-ID change
+forces reopening. Cold/touch probes now open the Master once rather than four/six
+times; all row transfers, finder calls, writes and flushes are unchanged. Shared
+private primitives also centralize header caching, formula-safe row serialization
+and adjacent-column patch batching without widening writes over untouched cells.
+
+Daily/weekly/monthly incremental rollups share one period writer; integer-cent
+rounding, exact period/user/project keys and weekly end-date refresh are preserved.
+Full reconciliation reads each rollup tab's last row once before its deletion.
+Summary reports read only grouping-required name tables (none for empty results
+or date/billable/tag-only groupings). Null-prototype maps treat inherited-property
+names as ordinary stored labels/IDs. Authorization and explicit financial DTO
+whitelists remain authoritative; growing TimeEntries transfers are still unbounded.

@@ -181,3 +181,20 @@ test('master authorization lookups bypass stale request snapshots with bounded d
   // The adapter rejects any growing-table getDataRange or multi-row transfer.
   assert.equal(single.UserID, fx.account.UserID);
 });
+
+test('master handle reuse avoids repeated opens but never caches durable security rows', () => {
+  const { sessionSheetFixture } = require('./helpers/session-sheet-fixture');
+  const fx = sessionSheetFixture(50000);
+  const repo = fx.context.MasterRepository;
+  repo.beginRequest();
+  assert.equal(repo.findAccountById('U1').Status, 'ACTIVE');
+  fx.account.Status = 'PASSIVE';
+  assert.equal(repo.findAccountById('U1').Status, 'PASSIVE');
+  assert.equal(fx.counter.snapshot().byMethod.openById, 1, 'reuse the handle, not the authorization snapshot');
+  repo.beginRequest();
+  repo.findAccountById('U1');
+  assert.equal(fx.counter.snapshot().byMethod.openById, 2, 'handle lifetime is one request');
+  repo.spreadsheetId = 'SYNTHETIC-OTHER-MASTER';
+  repo.getMasterSpreadsheet();
+  assert.equal(fx.counter.snapshot().byMethod.openById, 3, 'changed file ID cannot reuse an old handle');
+});

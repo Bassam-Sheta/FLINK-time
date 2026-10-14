@@ -39,6 +39,7 @@ function fixture(initialEntries = []) {
     ProjectRollups:[]
   };
   let clearCalls = 0;
+  const lastRowReads = {};
 
   global.AppError = AppError;
   global.ERROR_CODES = { NOT_FOUND:'NOT_FOUND' };
@@ -99,8 +100,15 @@ function fixture(initialEntries = []) {
       return {
         getSheetByName(tab) {
           return {
-            getLastRow() { return tables[tab].length + 1; },
-            deleteRows() { tables[tab].splice(0, tables[tab].length); }
+            getLastRow() {
+              lastRowReads[tab] = (lastRowReads[tab] || 0) + 1;
+              return tables[tab].length + 1;
+            },
+            deleteRows(start, count) {
+              assert.equal(start, 2);
+              assert.equal(count, tables[tab].length);
+              tables[tab].splice(0, count);
+            }
           };
         }
       };
@@ -112,6 +120,7 @@ function fixture(initialEntries = []) {
     service:require(servicePath).RollupService,
     rawEntries,
     tables,
+    lastRowReads,
     getClearCalls:() => clearCalls
   };
 }
@@ -203,10 +212,14 @@ test('safe incremental CREATE sequence equals canonical full rebuild output', ()
       CostRateSnapshot:33.33,
       StartUTC:'2026-10-02T10:00:00.000Z',
       EndUTC:'2026-10-02T10:12:13.000Z'
-    })
+    }),
+    entry('E4', { DurationSeconds:1, Billable:'TRUE', HourlyRateSnapshot:18, CostRateSnapshot:18 }),
+    entry('E5', { DurationSeconds:1, Billable:1, HourlyRateSnapshot:18, CostRateSnapshot:18 })
   ];
 
   for (const e of entries) {
+    // Existing weekly rows must refresh WeekEnd, not merely accumulate amounts.
+    if (fx.tables.WeeklyRollups[0]) fx.tables.WeeklyRollups[0].WeekEnd = 'stale';
     fx.rawEntries.push({ ...e });
     fx.service.recordTimeEntry('W1', e);
   }
@@ -214,6 +227,13 @@ test('safe incremental CREATE sequence equals canonical full rebuild output', ()
   const canonical = fx.service._buildCanonicalRollups(
     'W1', fx.rawEntries, 'IGNORED'
   );
+
+  const daily = fx.tables.DailyRollups.find(row => row.RollupDate === '2026-09-27' && row.ProjectID === 'P1');
+  assert.equal(daily.TotalSeconds, 3602);
+  assert.equal(daily.BillableSeconds, 3602);
+  assert.equal(daily.EntryCount, 3);
+  assert.equal(daily.CostAmount, 37.27, 'round each fractional-cent contribution before accumulating');
+  assert.equal(daily.BillableAmount, 123.47);
 
   assert.deepEqual(
     normalizeRows(fx.tables.DailyRollups),
@@ -247,6 +267,9 @@ test('full rebuild replaces stale rows and invalidates all rollup table caches',
   assert.equal(fx.getClearCalls(), 4);
   assert.equal(fx.tables.DailyRollups.some(r => r.UserID === 'BAD'), false);
   assert.equal(fx.tables.ProjectRollups.some(r => r.ProjectID === 'BAD'), false);
+  assert.deepEqual(fx.lastRowReads, {
+    DailyRollups:1, WeeklyRollups:1, MonthlyRollups:1, ProjectRollups:1
+  }, 'one metadata snapshot per rollup tab, not repeated service calls');
 });
 
 test('metadata-only mutation skips rebuild but rollup-relevant mutation rebuilds', () => {

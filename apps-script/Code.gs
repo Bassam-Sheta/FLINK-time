@@ -868,8 +868,7 @@ function doGet(e) {
         404
       );
     }
-    const template = HtmlService.createTemplateFromFile(fileName);
-    const output = template.evaluate();
+    const output = HtmlService.createHtmlOutput(renderPortalHtml_(fileName));
     const titles = {
       user: 'FLINK Time — Employee',
       admin: 'FLINK Time — Manager',
@@ -893,6 +892,34 @@ function doGet(e) {
       .createTextOutput('FLINK Platform Portal could not be loaded. Reference: ' + correlationId)
       .setMimeType(ContentService.MimeType.TEXT);
   }
+}
+
+/** Expand only trusted, checked-in portal sections; never a request-selected path. */
+function renderPortalHtml_(fileName) {
+  if (!['User', 'Admin', 'SuperAdmin'].includes(fileName)) {
+    throw new AppError(ERROR_CODES.NOT_FOUND, 'Unknown portal file.', 404);
+  }
+  const html = HtmlService.createHtmlOutputFromFile(fileName).getContent();
+  if (fileName === 'User') return html;
+  const shared = HtmlService.createHtmlOutputFromFile('User').getContent();
+  const style = shared.match(/<style>([\s\S]*?)<\/style>/);
+  const script = shared.match(/<script>([\s\S]*?)<\/script>/);
+  if (!style || !script) throw new AppError(ERROR_CODES.INTERNAL_ERROR, 'Shared portal sections are missing.', 500);
+  const parts = Object.create(null);
+  parts.styles = style[1];
+  const functions = Array.from(script[1].matchAll(/^    (?:async )?function ([A-Za-z0-9_]+)\(/gm));
+  functions.forEach((match, index) => {
+    if (Object.prototype.hasOwnProperty.call(parts, match[1])) {
+      throw new AppError(ERROR_CODES.INTERNAL_ERROR, 'Duplicate shared portal section.', 500);
+    }
+    parts[match[1]] = script[1].slice(match.index, index + 1 < functions.length ? functions[index + 1].index : script[1].length);
+  });
+  return html.replace(/\/\* FLINK_SHARED:([A-Za-z0-9_]+) \*\/(?:\r?\n)?/g, (_, section) => {
+    if (!Object.prototype.hasOwnProperty.call(parts, section)) {
+      throw new AppError(ERROR_CODES.INTERNAL_ERROR, 'Unknown shared portal section.', 500);
+    }
+    return parts[section];
+  });
 }
 
 function maybeRenderInstallerAuthorizationGate_(view) {
@@ -5715,6 +5742,35 @@ var TrackingPolicyService = (typeof global !== 'undefined' && global.TrackingPol
  * Employs batch reads, header indexing, and sanitization defense.
  */
 
+// Shared mechanics only. Repositories retain routing, cache invalidation and
+// security policy; callers retain mutation locks, version checks and auditing.
+function cachedSheetHeaders_(cache, key, sheet, schema) {
+  if (cache[key]) return cache[key];
+  if (!sheet || !sheet.getRange) return schema || [];
+  const columns = typeof sheet.getLastColumn === 'function' ? sheet.getLastColumn() : (schema ? schema.length : 15);
+  return (cache[key] = sheet.getRange(1, 1, 1, Math.max(1, columns)).getValues()[0].map(h => String(h).trim()));
+}
+
+function sanitizedSheetRow_(headers, entity) {
+  return headers.map(col => Validation.sanitizeCellValue(entity[col] !== undefined ? entity[col] : ''));
+}
+
+function writeSheetPatch_(sheet, headers, rowIndex, updates) {
+  const changes = Object.entries(updates)
+    .map(([colName, val]) => ({ colIdx: headers.indexOf(colName), value: Validation.sanitizeCellValue(val) }))
+    .filter(change => change.colIdx >= 0)
+    .sort((a, b) => a.colIdx - b.colIdx);
+  // Never widen a write across unchanged cells: those may contain another
+  // field's current value, a formula or security state.
+  for (let i = 0; i < changes.length;) {
+    let end = i + 1;
+    while (end < changes.length && changes[end].colIdx === changes[end - 1].colIdx + 1) end++;
+    const group = changes.slice(i, end);
+    sheet.getRange(rowIndex, group[0].colIdx + 1, 1, group.length).setValues([group.map(change => change.value)]);
+    i = end;
+  }
+}
+
 var MasterRepository = (typeof global !== 'undefined' && global.MasterRepository) || {
   spreadsheetId: null,
   _requestCache: {},
@@ -5724,6 +5780,7 @@ var MasterRepository = (typeof global !== 'undefined' && global.MasterRepository
   beginRequest() {
     this._requestCache = {};
     this._headerCache = {};
+    this._spreadsheet = null;
     if (typeof TimezoneService !== 'undefined' && TimezoneService._clearCache) {
       TimezoneService._clearCache();
     }
@@ -5731,19 +5788,7 @@ var MasterRepository = (typeof global !== 'undefined' && global.MasterRepository
 
   _getHeaders(tabName, sheet) {
     if (!this._headerCache) this._headerCache = {};
-    if (this._headerCache[tabName]) {
-      return this._headerCache[tabName];
-    }
-    if (sheet && sheet.getRange) {
-      const lastCol = typeof sheet.getLastColumn === 'function' ? sheet.getLastColumn() : (MASTER_SCHEMA[tabName] ? MASTER_SCHEMA[tabName].length : 15);
-      const headers = sheet
-        .getRange(1, 1, 1, Math.max(1, lastCol))
-        .getValues()[0]
-        .map(h => String(h).trim());
-      this._headerCache[tabName] = headers;
-      return headers;
-    }
-    return MASTER_SCHEMA[tabName] || [];
+    return cachedSheetHeaders_(this._headerCache, tabName, sheet, MASTER_SCHEMA[tabName]);
   },
 
   _userCacheKey(userId) {
@@ -5801,6 +5846,14 @@ var MasterRepository = (typeof global !== 'undefined' && global.MasterRepository
    * Resolves Master Spreadsheet. If spreadsheetId is not set, tries ScriptProperties or getActiveSpreadsheet()
    */
   getMasterSpreadsheet() {
+    if (this._spreadsheet && this._spreadsheetId === this.spreadsheetId) return this._spreadsheet;
+    const spreadsheet = this._resolveMasterSpreadsheet_();
+    this._spreadsheet = spreadsheet;
+    this._spreadsheetId = this.spreadsheetId;
+    return spreadsheet;
+  },
+
+  _resolveMasterSpreadsheet_() {
     if (this.spreadsheetId && typeof SpreadsheetApp !== 'undefined') {
       return SpreadsheetApp.openById(this.spreadsheetId);
     }
@@ -5980,10 +6033,7 @@ var MasterRepository = (typeof global !== 'undefined' && global.MasterRepository
       throw new AppError(ERROR_CODES.INTERNAL_ERROR, `Schema missing for master tab '${tabName}'.`);
     }
 
-    const rowData = schemaHeaders.map(col => {
-      const val = entity[col] !== undefined ? entity[col] : '';
-      return Validation.sanitizeCellValue(val);
-    });
+    const rowData = sanitizedSheetRow_(schemaHeaders, entity);
 
     sheet.appendRow(rowData);
     this._invalidateTable(tabName);
@@ -6006,12 +6056,7 @@ var MasterRepository = (typeof global !== 'undefined' && global.MasterRepository
       throw new AppError(ERROR_CODES.INTERNAL_ERROR, `Schema missing for master tab '${tabName}'.`);
     }
 
-    const rowsData = entities.map(entity => {
-      return schemaHeaders.map(col => {
-        const val = entity[col] !== undefined ? entity[col] : '';
-        return Validation.sanitizeCellValue(val);
-      });
-    });
+    const rowsData = entities.map(entity => sanitizedSheetRow_(schemaHeaders, entity));
 
     if (sheet.getRange) {
       const startRow = sheet.getLastRow() + 1;
@@ -6056,34 +6101,7 @@ var MasterRepository = (typeof global !== 'undefined' && global.MasterRepository
     const ss = this.getMasterSpreadsheet();
     const sheet = ss.getSheetByName(tabName);
     const headers = this._getHeaders(tabName, sheet);
-
-    const changes = Object.entries(updates)
-      .map(([colName, val]) => ({
-        colIdx: headers.indexOf(colName),
-        value: Validation.sanitizeCellValue(val)
-      }))
-      .filter(change => change.colIdx >= 0)
-      .sort((a, b) => a.colIdx - b.colIdx);
-
-    // Batch adjacent changed columns into the smallest possible setValues calls.
-    // This reduces Sheets service round-trips without overwriting unrelated columns.
-    for (let i = 0; i < changes.length;) {
-      const group = [changes[i]];
-      let j = i + 1;
-      while (
-        j < changes.length &&
-        changes[j].colIdx === group[group.length - 1].colIdx + 1
-      ) {
-        group.push(changes[j]);
-        j++;
-      }
-
-      sheet
-        .getRange(rowIndex, group[0].colIdx + 1, 1, group.length)
-        .setValues([group.map(change => change.value)]);
-      i = j;
-    }
-
+    writeSheetPatch_(sheet, headers, rowIndex, updates);
     this._invalidateTable(tabName);
   },
 
@@ -6793,20 +6811,7 @@ var SheetRepository = (typeof global !== 'undefined' && global.SheetRepository) 
 
   _getHeaders(workspaceId, tabName, sheet) {
     if (!this._headerCache) this._headerCache = {};
-    const key = this._cacheKey(workspaceId, tabName);
-    if (this._headerCache[key]) {
-      return this._headerCache[key];
-    }
-    if (sheet && sheet.getRange) {
-      const lastCol = typeof sheet.getLastColumn === 'function' ? sheet.getLastColumn() : (WORKSPACE_SCHEMA[tabName] ? WORKSPACE_SCHEMA[tabName].length : 15);
-      const headers = sheet
-        .getRange(1, 1, 1, Math.max(1, lastCol))
-        .getValues()[0]
-        .map(h => String(h).trim());
-      this._headerCache[key] = headers;
-      return headers;
-    }
-    return WORKSPACE_SCHEMA[tabName] || [];
+    return cachedSheetHeaders_(this._headerCache, this._cacheKey(workspaceId, tabName), sheet, WORKSPACE_SCHEMA[tabName]);
   },
 
   _invalidateTable(workspaceId, tabName) {
@@ -6935,10 +6940,7 @@ var SheetRepository = (typeof global !== 'undefined' && global.SheetRepository) 
       throw new AppError(ERROR_CODES.INTERNAL_ERROR, `Schema missing for workspace tab '${tabName}'.`);
     }
 
-    const rowData = schemaHeaders.map(col => {
-      const val = entity[col] !== undefined ? entity[col] : '';
-      return Validation.sanitizeCellValue(val);
-    });
+    const rowData = sanitizedSheetRow_(schemaHeaders, entity);
 
     sheet.appendRow(rowData);
     this._invalidateTable(workspaceId, tabName);
@@ -6961,12 +6963,7 @@ var SheetRepository = (typeof global !== 'undefined' && global.SheetRepository) 
       throw new AppError(ERROR_CODES.INTERNAL_ERROR, `Schema missing for workspace tab '${tabName}'.`);
     }
 
-    const rowsData = entities.map(entity => {
-      return schemaHeaders.map(col => {
-        const val = entity[col] !== undefined ? entity[col] : '';
-        return Validation.sanitizeCellValue(val);
-      });
-    });
+    const rowsData = entities.map(entity => sanitizedSheetRow_(schemaHeaders, entity));
 
     if (sheet.getRange) {
       const startRow = sheet.getLastRow() + 1;
@@ -6987,32 +6984,7 @@ var SheetRepository = (typeof global !== 'undefined' && global.SheetRepository) 
     const ss = WorkspaceRouter.resolveSpreadsheet(workspaceId);
     const sheet = ss.getSheetByName(tabName);
     const headers = this._getHeaders(workspaceId, tabName, sheet);
-
-    const changes = Object.entries(updates)
-      .map(([colName, val]) => ({
-        colIdx: headers.indexOf(colName),
-        value: Validation.sanitizeCellValue(val)
-      }))
-      .filter(change => change.colIdx >= 0)
-      .sort((a, b) => a.colIdx - b.colIdx);
-
-    for (let i = 0; i < changes.length;) {
-      const group = [changes[i]];
-      let j = i + 1;
-      while (
-        j < changes.length &&
-        changes[j].colIdx === group[group.length - 1].colIdx + 1
-      ) {
-        group.push(changes[j]);
-        j++;
-      }
-
-      sheet
-        .getRange(rowIndex, group[0].colIdx + 1, 1, group.length)
-        .setValues([group.map(change => change.value)]);
-      i = j;
-    }
-
+    writeSheetPatch_(sheet, headers, rowIndex, updates);
     this._invalidateTable(workspaceId, tabName);
   },
 
@@ -11391,18 +11363,18 @@ var ReportService = (typeof global !== 'undefined' && global.ReportService) || {
 
     const entries = SheetRepository.listTimeEntries(workspaceId, filters);
 
-    // Cache project and user names
-    const projects = SheetRepository.listProjects(workspaceId);
-    const projMap = {};
-    projects.forEach(p => { projMap[p.ProjectID] = p.ProjectName; });
-
-    const members = SheetRepository.listMembers(workspaceId);
-    const userMap = {};
-    members.forEach(m => { userMap[m.UserID] = m.DisplayName; });
-
-    const tasks = SheetRepository.listTasks(workspaceId);
-    const taskMap = {};
-    tasks.forEach(t => { taskMap[t.TaskID] = t.TaskName; });
+    // Do not transfer unrelated name tables for date/billable/tag groupings.
+    const requestedNames = new Set(groupings.filter(field => typeof field === 'string').map(field => field.toLowerCase()));
+    const loadNames = (group, method, idField, nameField) => {
+      const names = Object.create(null);
+      if (entries.length && requestedNames.has(group)) {
+        for (const row of SheetRepository[method](workspaceId)) names[row[idField]] = row[nameField];
+      }
+      return names;
+    };
+    const projMap = loadNames('project', 'listProjects', 'ProjectID', 'ProjectName');
+    const userMap = loadNames('user', 'listMembers', 'UserID', 'DisplayName');
+    const taskMap = loadNames('task', 'listTasks', 'TaskID', 'TaskName');
 
     const resolveGroupKey = (entry, groupField) => {
       switch (groupField.toLowerCase()) {
@@ -11425,7 +11397,6 @@ var ReportService = (typeof global !== 'undefined' && global.ReportService) || {
       }
     };
 
-    // Recursive grouping tree builder
     // Recursive grouping tree builder using exact integer arithmetic (seconds & cents)
     const buildGroupTree = (entryList, groupIndex) => {
       if (groupIndex >= groupings.length) {
@@ -11461,7 +11432,7 @@ var ReportService = (typeof global !== 'undefined' && global.ReportService) || {
       }
 
       const currentField = groupings[groupIndex];
-      const buckets = {};
+      const buckets = Object.create(null);
 
       for (const entry of entryList) {
         const key = resolveGroupKey(entry, currentField);
@@ -11976,184 +11947,50 @@ var RollupService = (typeof global !== 'undefined' && global.RollupService) || {
 
     const now = new Date().toISOString();
 
-    this._updateDailyRollup(workspaceId, {
-      RollupDate: c.rollupDate,
-      UserID: c.userId,
-      ProjectID: c.projectId,
+    const record = {
       TotalSeconds: c.seconds,
       BillableSeconds: c.billableSeconds,
       CostCents: c.costCents,
       RevenueCents: c.revenueCents,
-      EntryCount: 1,
       LastCalculatedAt: now
-    });
-
-    this._updateWeeklyRollup(workspaceId, {
-      WeekStart: c.weekStart,
-      WeekEnd: c.weekEnd,
-      UserID: c.userId,
-      ProjectID: c.projectId,
-      TotalSeconds: c.seconds,
-      BillableSeconds: c.billableSeconds,
-      CostCents: c.costCents,
-      RevenueCents: c.revenueCents,
-      EntryCount: 1,
-      LastCalculatedAt: now
-    });
-
-    this._updateMonthlyRollup(workspaceId, {
-      MonthKey: c.monthKey,
-      UserID: c.userId,
-      ProjectID: c.projectId,
-      TotalSeconds: c.seconds,
-      BillableSeconds: c.billableSeconds,
-      CostCents: c.costCents,
-      RevenueCents: c.revenueCents,
-      EntryCount: 1,
-      LastCalculatedAt: now
-    });
+    };
+    const periods = [
+      [CONSTANTS.WORKSPACE_TABS.DAILY_ROLLUPS, { RollupDate: c.rollupDate }],
+      [CONSTANTS.WORKSPACE_TABS.WEEKLY_ROLLUPS, { WeekStart: c.weekStart, WeekEnd: c.weekEnd }],
+      [CONSTANTS.WORKSPACE_TABS.MONTHLY_ROLLUPS, { MonthKey: c.monthKey }]
+    ];
+    for (const [tab, period] of periods) {
+      this._updatePeriodRollup(workspaceId, tab, { ...period, UserID: c.userId, ProjectID: c.projectId }, record);
+    }
 
     this._updateProjectRollup(workspaceId, c, now);
     return { ok: true, mode: 'incremental-create' };
   },
 
-  _updateDailyRollup(workspaceId, record) {
-    const { rows } = SheetRepository.getTableData(
-      workspaceId,
-      CONSTANTS.WORKSPACE_TABS.DAILY_ROLLUPS
-    );
-    const existing = rows.find(r =>
-      r.RollupDate === record.RollupDate &&
-      r.UserID === record.UserID &&
-      r.ProjectID === record.ProjectID
-    );
-
+  _updatePeriodRollup(workspaceId, tab, period, record) {
+    const { rows } = SheetRepository.getTableData(workspaceId, tab);
+    // WeekEnd is refreshed metadata, not part of the canonical weekly key.
+    const keyFields = Object.keys(period).filter(field => field !== 'WeekEnd');
+    const existing = rows.find(row => keyFields.every(field => row[field] === period[field]));
+    const costCents = existing
+      ? Math.round((parseFloat(existing.CostAmount) || 0) * 100) + record.CostCents
+      : record.CostCents;
+    const revenueCents = existing
+      ? Math.round((parseFloat(existing.BillableAmount) || 0) * 100) + record.RevenueCents
+      : record.RevenueCents;
+    const amounts = {
+      TotalSeconds: existing ? (parseInt(existing.TotalSeconds, 10) || 0) + record.TotalSeconds : record.TotalSeconds,
+      BillableSeconds: existing ? (parseInt(existing.BillableSeconds, 10) || 0) + record.BillableSeconds : record.BillableSeconds,
+      CostAmount: +(costCents / 100).toFixed(2),
+      BillableAmount: +(revenueCents / 100).toFixed(2),
+      EntryCount: (existing ? (parseInt(existing.EntryCount, 10) || 0) : 0) + 1,
+      LastCalculatedAt: record.LastCalculatedAt
+    };
     if (existing) {
-      const costCents = Math.round((parseFloat(existing.CostAmount) || 0) * 100) + record.CostCents;
-      const revenueCents = Math.round((parseFloat(existing.BillableAmount) || 0) * 100) + record.RevenueCents;
-      SheetRepository.updateRow(
-        workspaceId,
-        CONSTANTS.WORKSPACE_TABS.DAILY_ROLLUPS,
-        existing._rowIndex,
-        {
-          TotalSeconds: (parseInt(existing.TotalSeconds, 10) || 0) + record.TotalSeconds,
-          BillableSeconds: (parseInt(existing.BillableSeconds, 10) || 0) + record.BillableSeconds,
-          CostAmount: +(costCents / 100).toFixed(2),
-          BillableAmount: +(revenueCents / 100).toFixed(2),
-          EntryCount: (parseInt(existing.EntryCount, 10) || 0) + 1,
-          LastCalculatedAt: record.LastCalculatedAt
-        }
-      );
+      if (Object.prototype.hasOwnProperty.call(period, 'WeekEnd')) amounts.WeekEnd = period.WeekEnd;
+      SheetRepository.updateRow(workspaceId, tab, existing._rowIndex, amounts);
     } else {
-      SheetRepository.appendRow(
-        workspaceId,
-        CONSTANTS.WORKSPACE_TABS.DAILY_ROLLUPS,
-        {
-          RollupDate: record.RollupDate,
-          UserID: record.UserID,
-          ProjectID: record.ProjectID,
-          TotalSeconds: record.TotalSeconds,
-          BillableSeconds: record.BillableSeconds,
-          CostAmount: +(record.CostCents / 100).toFixed(2),
-          BillableAmount: +(record.RevenueCents / 100).toFixed(2),
-          EntryCount: 1,
-          LastCalculatedAt: record.LastCalculatedAt
-        }
-      );
-    }
-  },
-
-  _updateWeeklyRollup(workspaceId, record) {
-    const { rows } = SheetRepository.getTableData(
-      workspaceId,
-      CONSTANTS.WORKSPACE_TABS.WEEKLY_ROLLUPS
-    );
-    const existing = rows.find(r =>
-      r.WeekStart === record.WeekStart &&
-      r.UserID === record.UserID &&
-      r.ProjectID === record.ProjectID
-    );
-
-    if (existing) {
-      const costCents = Math.round((parseFloat(existing.CostAmount) || 0) * 100) + record.CostCents;
-      const revenueCents = Math.round((parseFloat(existing.BillableAmount) || 0) * 100) + record.RevenueCents;
-      SheetRepository.updateRow(
-        workspaceId,
-        CONSTANTS.WORKSPACE_TABS.WEEKLY_ROLLUPS,
-        existing._rowIndex,
-        {
-          WeekEnd: record.WeekEnd,
-          TotalSeconds: (parseInt(existing.TotalSeconds, 10) || 0) + record.TotalSeconds,
-          BillableSeconds: (parseInt(existing.BillableSeconds, 10) || 0) + record.BillableSeconds,
-          CostAmount: +(costCents / 100).toFixed(2),
-          BillableAmount: +(revenueCents / 100).toFixed(2),
-          EntryCount: (parseInt(existing.EntryCount, 10) || 0) + 1,
-          LastCalculatedAt: record.LastCalculatedAt
-        }
-      );
-    } else {
-      SheetRepository.appendRow(
-        workspaceId,
-        CONSTANTS.WORKSPACE_TABS.WEEKLY_ROLLUPS,
-        {
-          WeekStart: record.WeekStart,
-          WeekEnd: record.WeekEnd,
-          UserID: record.UserID,
-          ProjectID: record.ProjectID,
-          TotalSeconds: record.TotalSeconds,
-          BillableSeconds: record.BillableSeconds,
-          CostAmount: +(record.CostCents / 100).toFixed(2),
-          BillableAmount: +(record.RevenueCents / 100).toFixed(2),
-          EntryCount: 1,
-          LastCalculatedAt: record.LastCalculatedAt
-        }
-      );
-    }
-  },
-
-  _updateMonthlyRollup(workspaceId, record) {
-    const { rows } = SheetRepository.getTableData(
-      workspaceId,
-      CONSTANTS.WORKSPACE_TABS.MONTHLY_ROLLUPS
-    );
-    const existing = rows.find(r =>
-      r.MonthKey === record.MonthKey &&
-      r.UserID === record.UserID &&
-      r.ProjectID === record.ProjectID
-    );
-
-    if (existing) {
-      const costCents = Math.round((parseFloat(existing.CostAmount) || 0) * 100) + record.CostCents;
-      const revenueCents = Math.round((parseFloat(existing.BillableAmount) || 0) * 100) + record.RevenueCents;
-      SheetRepository.updateRow(
-        workspaceId,
-        CONSTANTS.WORKSPACE_TABS.MONTHLY_ROLLUPS,
-        existing._rowIndex,
-        {
-          TotalSeconds: (parseInt(existing.TotalSeconds, 10) || 0) + record.TotalSeconds,
-          BillableSeconds: (parseInt(existing.BillableSeconds, 10) || 0) + record.BillableSeconds,
-          CostAmount: +(costCents / 100).toFixed(2),
-          BillableAmount: +(revenueCents / 100).toFixed(2),
-          EntryCount: (parseInt(existing.EntryCount, 10) || 0) + 1,
-          LastCalculatedAt: record.LastCalculatedAt
-        }
-      );
-    } else {
-      SheetRepository.appendRow(
-        workspaceId,
-        CONSTANTS.WORKSPACE_TABS.MONTHLY_ROLLUPS,
-        {
-          MonthKey: record.MonthKey,
-          UserID: record.UserID,
-          ProjectID: record.ProjectID,
-          TotalSeconds: record.TotalSeconds,
-          BillableSeconds: record.BillableSeconds,
-          CostAmount: +(record.CostCents / 100).toFixed(2),
-          BillableAmount: +(record.RevenueCents / 100).toFixed(2),
-          EntryCount: 1,
-          LastCalculatedAt: record.LastCalculatedAt
-        }
-      );
+      SheetRepository.appendRow(workspaceId, tab, { ...period, ...amounts });
     }
   },
 
@@ -12295,11 +12132,12 @@ var RollupService = (typeof global !== 'undefined' && global.RollupService) || {
           404
         );
       }
-      if (sheet.getLastRow() > 1) {
+      const lastRow = sheet.getLastRow();
+      if (lastRow > 1) {
         if (SheetRepository.deleteRows) {
-          SheetRepository.deleteRows(workspaceId, tab, 2, sheet.getLastRow() - 1);
+          SheetRepository.deleteRows(workspaceId, tab, 2, lastRow - 1);
         } else {
-          sheet.deleteRows(2, sheet.getLastRow() - 1);
+          sheet.deleteRows(2, lastRow - 1);
         }
       }
       if (SheetRepository.clearTableCache) {

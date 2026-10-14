@@ -9,10 +9,8 @@ const code = fs.readFileSync(
   path.resolve(__dirname, '../apps-script/Code.gs'),
   'utf8'
 );
-const superAdmin = fs.readFileSync(
-  path.resolve(__dirname, '../apps-script/SuperAdmin.html'),
-  'utf8'
-);
+const { renderPortal } = require('./helpers/portal-renderer');
+const superAdmin = renderPortal('SuperAdmin');
 const readme = fs.readFileSync(
   path.resolve(__dirname, '../README.md'),
   'utf8'

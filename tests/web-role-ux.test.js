@@ -7,9 +7,10 @@ const path = require('node:path');
 
 const root = path.resolve(__dirname, '../apps-script');
 const code = fs.readFileSync(path.join(root, 'Code.gs'), 'utf8');
-const user = fs.readFileSync(path.join(root, 'User.html'), 'utf8');
-const admin = fs.readFileSync(path.join(root, 'Admin.html'), 'utf8');
-const superAdmin = fs.readFileSync(path.join(root, 'SuperAdmin.html'), 'utf8');
+const { renderPortal } = require('./helpers/portal-renderer');
+const user = renderPortal('User');
+const admin = renderPortal('Admin');
+const superAdmin = renderPortal('SuperAdmin');
 const manifest = JSON.parse(
   fs.readFileSync(path.join(root, 'appsscript.json'), 'utf8')
 );
@@ -132,4 +133,3 @@ test('all portals support Escape key and backdrop click to dismiss modal dialogs
     assert.match(portal, /closeModal\(\)/);
   }
 });
-
