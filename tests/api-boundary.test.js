@@ -52,7 +52,7 @@ const {
 } = base;
 
 test('permission matrix and dispatcher action inventory stay in exact parity', () => {
-  const source = fs.readFileSync(appPath, 'utf8');
+  const source = fs.readFileSync(appPath, 'utf8').replace(/\r\n?/g, '\n');
   const start = source.indexOf('function dispatchAction_(');
   const end = source.indexOf('\n/**\n * Builds ContentService JSON HTTP response', start);
   assert.ok(start >= 0 && end > start, 'dispatchAction source boundaries must exist');

@@ -334,6 +334,7 @@ test('JobService housekeeping prunes audit checkpoints older than retention days
 
   global.MasterRepository = {
     beginRequest() {},
+    _withSessionMutationLock(fn) { return fn(); },
     getTableData(tabName) {
       if (tabName === 'Sessions') return { rows: [] };
       if (tabName === 'Accounts') return { rows: [] };
@@ -530,6 +531,5 @@ test('createAuditCheckpoint prunes old checkpoints beyond MAX_AUDIT_CHECKPOINTS_
   assert.equal(deletedKeys[0], 'CP_MASTER_2026-01-01');
   assert.equal(deletedKeys[5], 'CP_MASTER_2026-01-06');
 });
-
 
 

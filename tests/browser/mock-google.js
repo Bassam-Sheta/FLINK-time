@@ -123,6 +123,7 @@
         if (payload.username !== 'employee' || payload.password !== 'demo-pass') {
           throw new Error('Invalid username or password.');
         }
+        if (window.__TEST_ENROLLMENT) return { enrollmentRequired: true, sessionToken: 'ENROLLMENT-ONLY', user: user() };
         return {
           mfaRequired: true,
           mfaChallengeToken: 'MFA_U1_demo_challenge',
@@ -137,7 +138,19 @@
         return { sessionToken: 'SESSION-1', expiresAt: nowIso(), user: user() };
 
       case 'auth.validateSession':
-        return { user: user(), role: mockRole };
+        return { user: user(), role: mockRole, enrollmentRequired: body.sessionToken === 'ENROLLMENT-ONLY' };
+
+      case 'setup.completeStep':
+        if (payload.step === 1) return { enrollmentRequired: true, sessionToken: 'ENROLLMENT-ONLY', user: user() };
+        return { ok: true };
+
+      case 'auth.enrollMfa':
+        if (payload.currentPassword !== 'demo-pass') throw new Error('Fresh password verification failed.');
+        return { secret: 'SYNTHETIC-SETUP-KEY', expiresAt: new Date(Date.now() + 600000).toISOString() };
+
+      case 'auth.confirmMfa':
+        if (payload.code !== '123456') throw new Error('Invalid authenticator verification.');
+        return { ok: true, sessionToken: 'MFA-VERIFIED', expiresAt: nowIso() };
 
       case 'auth.changePassword':
         if (payload.oldPassword !== 'demo-pass' || !payload.newPassword) {

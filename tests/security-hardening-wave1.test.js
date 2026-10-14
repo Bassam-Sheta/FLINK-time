@@ -73,12 +73,13 @@ test('temporary passwords use strong server generation and enforced expiry metad
 test('MFA changes require fresh credentials and pending enrollment is session-bound', () => {
   const source = fs.readFileSync(codePath, 'utf8');
   assert.match(source, /enrollMfa\(authContext, currentPassword, currentMfaCode = ''\)/);
-  assert.match(source, /Fresh password verification is required before changing MFA/);
+  assert.match(source, /verifyPassword\(currentPassword, initial\.cred\.PasswordHash\)/);
+  assert.match(source, /if \(!passwordValid\) return this\._recordEnrollmentFailure/);
   assert.match(source, /sessionId:\s*authContext\.session\.SessionID/);
   assert.match(source, /MFA enrollment is invalid, expired, or belongs to another session/);
   assert.match(source, /disableMfa\(superAdminContext, targetUserId, adminPassword, adminTotpCode = ''\)/);
-  assert.match(source, /Fresh Super Admin password verification is required/);
-  assert.match(source, /SessionService\.revokeAllUserSessions\(targetUserId\)/);
+  assert.match(source, /MFA is mandatory and cannot be disabled/);
+  assert.match(source, /SessionService\.revokeAllUserSessions\(authContext\.userId\)/);
 });
 
 test('Admin capacity metrics require explicit authorized workspace access', () => {

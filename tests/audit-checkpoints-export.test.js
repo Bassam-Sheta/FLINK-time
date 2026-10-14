@@ -177,6 +177,7 @@ test('housekeeping archives expired checkpoints to GlobalAudit before purging fr
   };
 
   const { JobService, auditLogs, scriptProps } = loadAuditEnvironment({ properties });
+  global.MasterRepository._withSessionMutationLock = fn => fn();
   const res = JobService.dispatchHousekeeping();
 
   assert.equal(res.ok, true);
