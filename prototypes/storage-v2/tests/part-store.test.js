@@ -3,8 +3,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
-const LogChain = require('../storage-v2/LogChain.gs');
-const PartStore = require('../storage-v2/PartStore.gs');
+const LogChain = require('../LogChain.gs');
+const PartStore = require('../PartStore.gs');
 
 const { FakeSheet, FakeSS } = require('./helpers/fake-sheets.js');
 

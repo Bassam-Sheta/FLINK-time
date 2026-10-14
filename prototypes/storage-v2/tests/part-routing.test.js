@@ -3,8 +3,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
-const PartRouting = require('../storage-v2/PartRouting.gs');
-const LogChain = require('../storage-v2/LogChain.gs');
+const PartRouting = require('../PartRouting.gs');
+const LogChain = require('../LogChain.gs');
 
 /** Fake CacheService with TTL driven by a fake clock; fake micro-lock that can be made to fail. */
 function env() {

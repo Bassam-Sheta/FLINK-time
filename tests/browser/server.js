@@ -3,6 +3,7 @@
 const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
+const { renderPortal } = require('../helpers/portal-renderer');
 
 const root = path.resolve(__dirname, '../..');
 const mockPath = path.join(__dirname, 'mock-google.js');
@@ -37,7 +38,7 @@ const routes = {
 
 function pageHtml(route) {
   const config = routes[route] || routes['/'];
-  const html = fs.readFileSync(config.file, 'utf8');
+  const html = renderPortal(path.basename(config.file, '.html'));
   const marker = '<!-- CORE FRONTEND ENGINE SCRIPT -->';
   if (!html.includes(marker)) {
     throw new Error(path.basename(config.file) + ' core script marker not found.');

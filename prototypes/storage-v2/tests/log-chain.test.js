@@ -3,7 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
-const LogChain = require('../storage-v2/LogChain.gs');
+const LogChain = require('../LogChain.gs');
 
 const sha256Hex = (s) => crypto.createHash('sha256').update(s, 'utf8').digest('hex');
 const chain = LogChain.create({ sha256Hex });

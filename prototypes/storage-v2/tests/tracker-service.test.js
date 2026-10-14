@@ -3,10 +3,10 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
-const LogChain = require('../storage-v2/LogChain.gs');
-const PartRouting = require('../storage-v2/PartRouting.gs');
-const PartStore = require('../storage-v2/PartStore.gs');
-const TrackerService = require('../storage-v2/TrackerService.gs');
+const LogChain = require('../LogChain.gs');
+const PartRouting = require('../PartRouting.gs');
+const PartStore = require('../PartStore.gs');
+const TrackerService = require('../TrackerService.gs');
 const { FakeSS } = require('./helpers/fake-sheets.js');
 
 const sha = (s) => crypto.createHash('sha256').update(s, 'utf8').digest('hex');
