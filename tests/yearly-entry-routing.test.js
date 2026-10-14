@@ -182,3 +182,13 @@ test('duplicate EntryIDs, wrong execution owner and hard deletions fail closed',
   assert.throws(()=>fx.repo.getEntry('W1','ONE'),error=>error.code==='CONFLICT');
   assert.throws(()=>fx.repo.listTimeEntries('W1'),error=>error.code==='CONFLICT');
 });
+
+test('reusing an EntryID with a changed payload cannot silently acknowledge another mutation',()=>{
+  const fx=fixture();fx.activate();const original=fx.entry('REPLAY');
+  fx.repo.createTimeEntry('W1',original);
+  for(const change of [{DurationSeconds:7200},{StartUTC:'2025-01-01T08:00:00Z'},{ProjectID:'OTHER'},{UserID:'OTHER'}]) {
+    assert.throws(()=>fx.repo.createTimeEntry('W1',{...original,...change}),error=>error.code==='CONFLICT');
+  }
+  assert.equal(fx.repo.getEntry('W1','REPLAY').DurationSeconds,3600);
+  assert.equal(fx.repo.listTimeEntries('W1').length,1);
+});

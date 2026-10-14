@@ -7839,6 +7839,10 @@ var YearlyEntryStorage = {
       const existing = this.find(workspaceId, 'EntryID', entity.EntryID);
       if (existing) {
         if (existing.UserID !== entity.UserID) throw YearlyDataFileService._conflict('Entry identity belongs to another user.');
+        if (WORKSPACE_SCHEMA.TimeEntries.some(key => {
+          const proposed = Validation.sanitizeCellValue(entity[key] === undefined ? '' : entity[key]);
+          return proposed !== existing[key];
+        })) throw YearlyDataFileService._conflict('Entry ID was already used with a different payload. Refresh before retrying.');
         YearlyDataFileService._audit(actor, workspaceId, 'ENTRY_STORAGE_REPLAY_OBSERVED', existing, existing, entity.EntryID);
         return existing;
       }

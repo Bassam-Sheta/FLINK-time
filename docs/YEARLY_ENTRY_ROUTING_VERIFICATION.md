@@ -2,7 +2,7 @@
 
 Branch: `wp10-yearly-entry-routing`. No deployment or live activation performed.
 
-Offline verification (2026-10-14): 577 unit tests and 14 existing mocked
+Offline verification (2026-10-14): 578 unit tests and 14 existing mocked
 Chromium tests pass; `git diff --check` passes. Browser tests do not exercise
 Google file creation or multi-file restore.
 
@@ -22,5 +22,11 @@ budget; partial copies are deliberately retained for owner reconciliation, not
 automatically resumed or deleted. Google quotas and permissions are unverified live.
 
 Before marking the draft PR ready, review actor attribution, interrupted activation/completion,
-retry payload conflicts, row/version races, backup audit completion and recovery
+row/version races, backup audit completion and recovery
 of partial file sets. Update the canonical specification and activation runbook.
+
+Retry conflict review: append accepts an existing EntryID only when every schema
+field matches the sanitized proposed row. A changed payload, including a retry
+after a subsequent edit, fails with CONFLICT rather than silently acknowledging
+the wrong mutation. A failing regression was reproduced before the fix; all 578
+unit tests pass afterward. Browser files were unchanged by this follow-up.
