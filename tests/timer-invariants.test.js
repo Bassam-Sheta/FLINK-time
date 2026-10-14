@@ -114,6 +114,10 @@ function fixture(options = {}) {
       timerCreates += 1;
       timers[ws] = { ...timer };
     },
+    updateActiveTimer(ws, _userId, updates) {
+      Object.assign(timers[ws], updates);
+      return { ...timers[ws] };
+    },
     deleteActiveTimer(ws) {
       if (options.failDelete) throw new Error('delete failed');
       if (!timers[ws]) return false;
@@ -135,7 +139,7 @@ function fixture(options = {}) {
       entries[ws].set(id, next);
       return next;
     },
-    logWorkspaceAudit() {}
+    logWorkspaceAudit() { return true; }
   };
 
   delete require.cache[require.resolve(servicePath)];
@@ -152,6 +156,47 @@ function fixture(options = {}) {
 }
 
 const user = { userId:'U1', role:'USER' };
+
+test('changing a running project preserves its identity and entire elapsed interval', () => {
+  const fx = fixture();
+  const started = fx.TimerService.startTimer(user, 'W1', { operationId:'project-change-start', projectId:'P1', taskId:'T1' });
+  const changed = fx.TimerService.changeProject(user, 'W1', { timerId:started.timerId, expectedProjectId:'P1', projectId:'P2' });
+  assert.equal(changed.timerId, started.timerId);
+  assert.equal(changed.startedAtUTC, started.startedAtUTC);
+  assert.equal(changed.projectId, 'P2');
+  assert.equal(changed.taskId, '');
+  assert.equal(fx.getEntryCreates(), 0);
+  fx.TimerService.stopTimer(user, 'W1', { timerId:started.timerId });
+  const entry = [...fx.entries.W1.values()][0];
+  assert.equal(entry.ProjectID, 'P2');
+  assert.equal(entry.StartUTC, started.startedAtUTC);
+  assert.equal(entry.ApprovalStatus, 'OPEN');
+  assert.equal(entry.Locked, false);
+  assert.equal(entry.TimesheetID, '');
+});
+
+test('project change refuses a replaced timer and a stale project snapshot', () => {
+  const fx = fixture();
+  const started = fx.TimerService.startTimer(user, 'W1', { operationId:'project-change-stale', projectId:'P1' });
+  for (const payload of [
+    { timerId:'old-timer', expectedProjectId:'P1', projectId:'P2' },
+    { timerId:started.timerId, expectedProjectId:'P0', projectId:'P2' }
+  ]) assert.throws(() => fx.TimerService.changeProject(user, 'W1', payload), error => error.code === 'CONFLICT');
+  assert.equal(fx.timers.W1.ProjectID, 'P1');
+});
+
+test('project change audit failure blocks mutation and flush failure is reported', () => {
+  const fx = fixture();
+  const started = fx.TimerService.startTimer(user, 'W1', { operationId:'project-audit-failure', projectId:'P1' });
+  const payload = { timerId:started.timerId, expectedProjectId:'P1', projectId:'P2' };
+  global.SheetRepository.logWorkspaceAudit = () => false;
+  assert.throws(() => fx.TimerService.changeProject(user, 'W1', payload));
+  assert.equal(fx.timers.W1.ProjectID, 'P1');
+  global.SheetRepository.logWorkspaceAudit = () => true;
+  global.SpreadsheetApp.flush = () => { throw new Error('Synthetic flush failure'); };
+  assert.throws(() => fx.TimerService.changeProject(user, 'W1', payload), /Synthetic flush failure/);
+  assert.equal(fx.timers.W1.ProjectID, 'P1');
+});
 
 test('global timer scan fails closed when an ACTIVE workspace cannot be inspected', () => {
   const fx = fixture({ failScanWorkspace:'W2' });
