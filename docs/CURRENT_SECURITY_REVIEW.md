@@ -1,5 +1,11 @@
 # Current-source review — 2026-10-06
 
+Historical review of the commit below, not current release status. Foundation
+integration is recorded in `SECURITY_FOUNDATIONS_INTEGRATION.md`; current policy
+is in `SYSTEM_SPEC.md`. The disconnected `storage-v2/` experiment was later
+removed from the checkout; its last archived source is recoverable at
+`d34e55051649b6cdbe314b0a26dbf064ffa277e4` under `prototypes/storage-v2/`.
+
 Reviewed GitHub `main` at `bf29b6b732374bfe51ffc083d260acbed16a7ed7`
 (Milestone 31), independently of the earlier offline branches based on `9e6db78`.
 This branch is the privileged-reauthentication hardening/review work package.

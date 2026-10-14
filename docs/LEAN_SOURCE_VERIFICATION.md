@@ -96,10 +96,12 @@ semantics and audit requirements have not been relaxed to reduce source size.
   repositories, adding exact write shapes, formula defense and protected gaps.
 - Browser suite: **14 mocked Chromium tests passed**. It exercises enrollment,
   recovery, unsafe markup, employee workday and role/setup screens.
-- Disconnected storage experiment plus all four tests and its exclusive fixture
-  moved together to `prototypes/storage-v2/`. **48 optional prototype tests passed**
-  with `npm run test:prototypes`; npm test/production CI no longer count them.
-  Known prototype security weaknesses remain documented; nothing is deployed.
+- The disconnected storage experiment was first separated and its **48 optional
+  checks passed**, then its ten files and optional command were removed at the
+  owner's request. They are not application coverage. Research source remains
+  recoverable at commit `d34e55051649b6cdbe314b0a26dbf064ffa277e4`; no application
+  tests or required production files were deleted. Historical security reviews
+  describe the old prototype paths, not a supported current implementation.
 - `git diff --check` passes. No dependency, OAuth scope, installer pin, production
   setting or live data is changed. Synthetic fault-injection tests still emit
   expected audit/flush/maintenance diagnostics; those are not live Google logs.

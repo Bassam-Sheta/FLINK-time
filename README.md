@@ -49,7 +49,6 @@ apps-script/       five-file production application
 installer/         separate automated deployment application
 tests/             automated regression/security/browser tests
 scripts/           developer-only staging and source-maintenance tools
-prototypes/        archived experiments with their own optional tests
 docs/              installation, architecture, and security documentation
 .github/workflows  GitHub CI
 ```
@@ -62,7 +61,6 @@ npm, Node.js, Playwright, and GitHub Actions are development/CI tools only.
 npm test
 ```
 
-Archived experiment checks are separate: `npm run test:prototypes`.
 The role portals share trusted static sections from `User.html`; see
 `docs/LEAN_SOURCE_VERIFICATION.md` for editing and verification.
 
