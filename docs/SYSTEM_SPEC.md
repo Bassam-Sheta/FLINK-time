@@ -220,3 +220,11 @@ forces reopening. Cold/touch probes now open the Master once rather than four/si
 times; all row transfers, finder calls, writes and flushes are unchanged. Shared
 private primitives also centralize header caching, formula-safe row serialization
 and adjacent-column patch batching without widening writes over untouched cells.
+
+Daily/weekly/monthly incremental rollups share one period writer; integer-cent
+rounding, exact period/user/project keys and weekly end-date refresh are preserved.
+Full reconciliation reads each rollup tab's last row once before its deletion.
+Summary reports read only grouping-required name tables (none for empty results
+or date/billable/tag-only groupings). Null-prototype maps treat inherited-property
+names as ordinary stored labels/IDs. Authorization and explicit financial DTO
+whitelists remain authoritative; growing TimeEntries transfers are still unbounded.

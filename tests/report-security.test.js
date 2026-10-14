@@ -141,6 +141,56 @@ test('USER summary ignores malicious userId filter and exposes no financial DTO 
   }
 });
 
+test('summary loads only grouping-required name tables, never metadata for an empty result', () => {
+  for (const [groupings, expected] of [
+    [undefined, { listProjects:1, listMembers:1, listTasks:0 }],
+    [['date'], { listProjects:0, listMembers:0, listTasks:0 }],
+    [['billable', 'tag'], { listProjects:0, listMembers:0, listTasks:0 }],
+    [['PROJECT', 'project'], { listProjects:1, listMembers:0, listTasks:0 }],
+    [['user'], { listProjects:0, listMembers:1, listTasks:0 }],
+    [['task'], { listProjects:0, listMembers:0, listTasks:1 }],
+    [['project', 'user', 'task'], { listProjects:1, listMembers:1, listTasks:1 }]
+  ]) {
+    const fx = fixture();
+    const calls = { listProjects:0, listMembers:0, listTasks:0 };
+    for (const method of Object.keys(calls)) {
+      const original = global.SheetRepository[method];
+      global.SheetRepository[method] = (...args) => { calls[method]++; return original(...args); };
+    }
+    const report = fx.service.getSummaryReport(user, 'W1', { groupings });
+    assert.equal(report.overall.totalSeconds, 3600);
+    assert.equal(fx.seenFilters[0].userId, 'U1');
+    assert.deepEqual(calls, expected);
+    for (const method of Object.keys(calls)) calls[method] = 0;
+    global.SheetRepository.listTimeEntries = () => [];
+    assert.equal(fx.service.getSummaryReport(user, 'W1', { groupings }).totalEntries, 0);
+    assert.deepEqual(calls, { listProjects:0, listMembers:0, listTasks:0 });
+  }
+});
+
+test('summary treats prototype-shaped labels and IDs as ordinary data without leaking USER financials', () => {
+  const labels = ['__proto__', 'constructor', 'toString', 'hasOwnProperty', '1', '2'];
+  for (const role of [user, admin]) {
+    const fx = fixture();
+    global.SheetRepository.listTimeEntries = () => labels.flatMap(Tags => Array.from({ length:2 }, () => ({
+      UserID:'U1', ProjectID:'__proto__', Tags, DurationSeconds:1,
+      Billable:true, CostRateSnapshot:18, HourlyRateSnapshot:18
+    })));
+    global.SheetRepository.listProjects = () => [{ ProjectID:'__proto__', ProjectName:'Named Project' }];
+    const result = fx.service.getSummaryReport(role, 'W1', { groupings:['project', 'tag'] });
+    assert.equal(result.tree[0].key, 'Named Project');
+    assert.equal(result.overall.totalSeconds, 12);
+    const groups = new Map(result.tree[0].groups.map(row => [row.key, row]));
+    assert.equal(groups.size, labels.length);
+    for (const label of labels) {
+      assert.equal(groups.get(label).totalSeconds, 2);
+      assert.equal(groups.get(label).entryCount, 2);
+    }
+    if (role === user) assert.equal(allKeys(result).includes('costCents'), false);
+    else assert.equal(result.overall.costCents, 12);
+  }
+});
+
 test('USER detailed report is self-scoped and whitelisted away from rate/cost fields', () => {
   const fx = fixture();
   const result = fx.service.getDetailedReport(
@@ -291,4 +341,3 @@ test('Admin getAttendanceReport gracefully skips entries lacking StartUTC withou
   assert.equal(report.attendance[0].userId, 'U1');
   assert.equal(report.attendance[0].trackedHours, 8);
 });
-

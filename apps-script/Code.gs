@@ -11363,18 +11363,18 @@ var ReportService = (typeof global !== 'undefined' && global.ReportService) || {
 
     const entries = SheetRepository.listTimeEntries(workspaceId, filters);
 
-    // Cache project and user names
-    const projects = SheetRepository.listProjects(workspaceId);
-    const projMap = {};
-    projects.forEach(p => { projMap[p.ProjectID] = p.ProjectName; });
-
-    const members = SheetRepository.listMembers(workspaceId);
-    const userMap = {};
-    members.forEach(m => { userMap[m.UserID] = m.DisplayName; });
-
-    const tasks = SheetRepository.listTasks(workspaceId);
-    const taskMap = {};
-    tasks.forEach(t => { taskMap[t.TaskID] = t.TaskName; });
+    // Do not transfer unrelated name tables for date/billable/tag groupings.
+    const requestedNames = new Set(groupings.filter(field => typeof field === 'string').map(field => field.toLowerCase()));
+    const loadNames = (group, method, idField, nameField) => {
+      const names = Object.create(null);
+      if (entries.length && requestedNames.has(group)) {
+        for (const row of SheetRepository[method](workspaceId)) names[row[idField]] = row[nameField];
+      }
+      return names;
+    };
+    const projMap = loadNames('project', 'listProjects', 'ProjectID', 'ProjectName');
+    const userMap = loadNames('user', 'listMembers', 'UserID', 'DisplayName');
+    const taskMap = loadNames('task', 'listTasks', 'TaskID', 'TaskName');
 
     const resolveGroupKey = (entry, groupField) => {
       switch (groupField.toLowerCase()) {
@@ -11397,7 +11397,6 @@ var ReportService = (typeof global !== 'undefined' && global.ReportService) || {
       }
     };
 
-    // Recursive grouping tree builder
     // Recursive grouping tree builder using exact integer arithmetic (seconds & cents)
     const buildGroupTree = (entryList, groupIndex) => {
       if (groupIndex >= groupings.length) {
@@ -11433,7 +11432,7 @@ var ReportService = (typeof global !== 'undefined' && global.ReportService) || {
       }
 
       const currentField = groupings[groupIndex];
-      const buckets = {};
+      const buckets = Object.create(null);
 
       for (const entry of entryList) {
         const key = resolveGroupKey(entry, currentField);
@@ -11948,184 +11947,50 @@ var RollupService = (typeof global !== 'undefined' && global.RollupService) || {
 
     const now = new Date().toISOString();
 
-    this._updateDailyRollup(workspaceId, {
-      RollupDate: c.rollupDate,
-      UserID: c.userId,
-      ProjectID: c.projectId,
+    const record = {
       TotalSeconds: c.seconds,
       BillableSeconds: c.billableSeconds,
       CostCents: c.costCents,
       RevenueCents: c.revenueCents,
-      EntryCount: 1,
       LastCalculatedAt: now
-    });
-
-    this._updateWeeklyRollup(workspaceId, {
-      WeekStart: c.weekStart,
-      WeekEnd: c.weekEnd,
-      UserID: c.userId,
-      ProjectID: c.projectId,
-      TotalSeconds: c.seconds,
-      BillableSeconds: c.billableSeconds,
-      CostCents: c.costCents,
-      RevenueCents: c.revenueCents,
-      EntryCount: 1,
-      LastCalculatedAt: now
-    });
-
-    this._updateMonthlyRollup(workspaceId, {
-      MonthKey: c.monthKey,
-      UserID: c.userId,
-      ProjectID: c.projectId,
-      TotalSeconds: c.seconds,
-      BillableSeconds: c.billableSeconds,
-      CostCents: c.costCents,
-      RevenueCents: c.revenueCents,
-      EntryCount: 1,
-      LastCalculatedAt: now
-    });
+    };
+    const periods = [
+      [CONSTANTS.WORKSPACE_TABS.DAILY_ROLLUPS, { RollupDate: c.rollupDate }],
+      [CONSTANTS.WORKSPACE_TABS.WEEKLY_ROLLUPS, { WeekStart: c.weekStart, WeekEnd: c.weekEnd }],
+      [CONSTANTS.WORKSPACE_TABS.MONTHLY_ROLLUPS, { MonthKey: c.monthKey }]
+    ];
+    for (const [tab, period] of periods) {
+      this._updatePeriodRollup(workspaceId, tab, { ...period, UserID: c.userId, ProjectID: c.projectId }, record);
+    }
 
     this._updateProjectRollup(workspaceId, c, now);
     return { ok: true, mode: 'incremental-create' };
   },
 
-  _updateDailyRollup(workspaceId, record) {
-    const { rows } = SheetRepository.getTableData(
-      workspaceId,
-      CONSTANTS.WORKSPACE_TABS.DAILY_ROLLUPS
-    );
-    const existing = rows.find(r =>
-      r.RollupDate === record.RollupDate &&
-      r.UserID === record.UserID &&
-      r.ProjectID === record.ProjectID
-    );
-
+  _updatePeriodRollup(workspaceId, tab, period, record) {
+    const { rows } = SheetRepository.getTableData(workspaceId, tab);
+    // WeekEnd is refreshed metadata, not part of the canonical weekly key.
+    const keyFields = Object.keys(period).filter(field => field !== 'WeekEnd');
+    const existing = rows.find(row => keyFields.every(field => row[field] === period[field]));
+    const costCents = existing
+      ? Math.round((parseFloat(existing.CostAmount) || 0) * 100) + record.CostCents
+      : record.CostCents;
+    const revenueCents = existing
+      ? Math.round((parseFloat(existing.BillableAmount) || 0) * 100) + record.RevenueCents
+      : record.RevenueCents;
+    const amounts = {
+      TotalSeconds: existing ? (parseInt(existing.TotalSeconds, 10) || 0) + record.TotalSeconds : record.TotalSeconds,
+      BillableSeconds: existing ? (parseInt(existing.BillableSeconds, 10) || 0) + record.BillableSeconds : record.BillableSeconds,
+      CostAmount: +(costCents / 100).toFixed(2),
+      BillableAmount: +(revenueCents / 100).toFixed(2),
+      EntryCount: (existing ? (parseInt(existing.EntryCount, 10) || 0) : 0) + 1,
+      LastCalculatedAt: record.LastCalculatedAt
+    };
     if (existing) {
-      const costCents = Math.round((parseFloat(existing.CostAmount) || 0) * 100) + record.CostCents;
-      const revenueCents = Math.round((parseFloat(existing.BillableAmount) || 0) * 100) + record.RevenueCents;
-      SheetRepository.updateRow(
-        workspaceId,
-        CONSTANTS.WORKSPACE_TABS.DAILY_ROLLUPS,
-        existing._rowIndex,
-        {
-          TotalSeconds: (parseInt(existing.TotalSeconds, 10) || 0) + record.TotalSeconds,
-          BillableSeconds: (parseInt(existing.BillableSeconds, 10) || 0) + record.BillableSeconds,
-          CostAmount: +(costCents / 100).toFixed(2),
-          BillableAmount: +(revenueCents / 100).toFixed(2),
-          EntryCount: (parseInt(existing.EntryCount, 10) || 0) + 1,
-          LastCalculatedAt: record.LastCalculatedAt
-        }
-      );
+      if (Object.prototype.hasOwnProperty.call(period, 'WeekEnd')) amounts.WeekEnd = period.WeekEnd;
+      SheetRepository.updateRow(workspaceId, tab, existing._rowIndex, amounts);
     } else {
-      SheetRepository.appendRow(
-        workspaceId,
-        CONSTANTS.WORKSPACE_TABS.DAILY_ROLLUPS,
-        {
-          RollupDate: record.RollupDate,
-          UserID: record.UserID,
-          ProjectID: record.ProjectID,
-          TotalSeconds: record.TotalSeconds,
-          BillableSeconds: record.BillableSeconds,
-          CostAmount: +(record.CostCents / 100).toFixed(2),
-          BillableAmount: +(record.RevenueCents / 100).toFixed(2),
-          EntryCount: 1,
-          LastCalculatedAt: record.LastCalculatedAt
-        }
-      );
-    }
-  },
-
-  _updateWeeklyRollup(workspaceId, record) {
-    const { rows } = SheetRepository.getTableData(
-      workspaceId,
-      CONSTANTS.WORKSPACE_TABS.WEEKLY_ROLLUPS
-    );
-    const existing = rows.find(r =>
-      r.WeekStart === record.WeekStart &&
-      r.UserID === record.UserID &&
-      r.ProjectID === record.ProjectID
-    );
-
-    if (existing) {
-      const costCents = Math.round((parseFloat(existing.CostAmount) || 0) * 100) + record.CostCents;
-      const revenueCents = Math.round((parseFloat(existing.BillableAmount) || 0) * 100) + record.RevenueCents;
-      SheetRepository.updateRow(
-        workspaceId,
-        CONSTANTS.WORKSPACE_TABS.WEEKLY_ROLLUPS,
-        existing._rowIndex,
-        {
-          WeekEnd: record.WeekEnd,
-          TotalSeconds: (parseInt(existing.TotalSeconds, 10) || 0) + record.TotalSeconds,
-          BillableSeconds: (parseInt(existing.BillableSeconds, 10) || 0) + record.BillableSeconds,
-          CostAmount: +(costCents / 100).toFixed(2),
-          BillableAmount: +(revenueCents / 100).toFixed(2),
-          EntryCount: (parseInt(existing.EntryCount, 10) || 0) + 1,
-          LastCalculatedAt: record.LastCalculatedAt
-        }
-      );
-    } else {
-      SheetRepository.appendRow(
-        workspaceId,
-        CONSTANTS.WORKSPACE_TABS.WEEKLY_ROLLUPS,
-        {
-          WeekStart: record.WeekStart,
-          WeekEnd: record.WeekEnd,
-          UserID: record.UserID,
-          ProjectID: record.ProjectID,
-          TotalSeconds: record.TotalSeconds,
-          BillableSeconds: record.BillableSeconds,
-          CostAmount: +(record.CostCents / 100).toFixed(2),
-          BillableAmount: +(record.RevenueCents / 100).toFixed(2),
-          EntryCount: 1,
-          LastCalculatedAt: record.LastCalculatedAt
-        }
-      );
-    }
-  },
-
-  _updateMonthlyRollup(workspaceId, record) {
-    const { rows } = SheetRepository.getTableData(
-      workspaceId,
-      CONSTANTS.WORKSPACE_TABS.MONTHLY_ROLLUPS
-    );
-    const existing = rows.find(r =>
-      r.MonthKey === record.MonthKey &&
-      r.UserID === record.UserID &&
-      r.ProjectID === record.ProjectID
-    );
-
-    if (existing) {
-      const costCents = Math.round((parseFloat(existing.CostAmount) || 0) * 100) + record.CostCents;
-      const revenueCents = Math.round((parseFloat(existing.BillableAmount) || 0) * 100) + record.RevenueCents;
-      SheetRepository.updateRow(
-        workspaceId,
-        CONSTANTS.WORKSPACE_TABS.MONTHLY_ROLLUPS,
-        existing._rowIndex,
-        {
-          TotalSeconds: (parseInt(existing.TotalSeconds, 10) || 0) + record.TotalSeconds,
-          BillableSeconds: (parseInt(existing.BillableSeconds, 10) || 0) + record.BillableSeconds,
-          CostAmount: +(costCents / 100).toFixed(2),
-          BillableAmount: +(revenueCents / 100).toFixed(2),
-          EntryCount: (parseInt(existing.EntryCount, 10) || 0) + 1,
-          LastCalculatedAt: record.LastCalculatedAt
-        }
-      );
-    } else {
-      SheetRepository.appendRow(
-        workspaceId,
-        CONSTANTS.WORKSPACE_TABS.MONTHLY_ROLLUPS,
-        {
-          MonthKey: record.MonthKey,
-          UserID: record.UserID,
-          ProjectID: record.ProjectID,
-          TotalSeconds: record.TotalSeconds,
-          BillableSeconds: record.BillableSeconds,
-          CostAmount: +(record.CostCents / 100).toFixed(2),
-          BillableAmount: +(record.RevenueCents / 100).toFixed(2),
-          EntryCount: 1,
-          LastCalculatedAt: record.LastCalculatedAt
-        }
-      );
+      SheetRepository.appendRow(workspaceId, tab, { ...period, ...amounts });
     }
   },
 
@@ -12267,11 +12132,12 @@ var RollupService = (typeof global !== 'undefined' && global.RollupService) || {
           404
         );
       }
-      if (sheet.getLastRow() > 1) {
+      const lastRow = sheet.getLastRow();
+      if (lastRow > 1) {
         if (SheetRepository.deleteRows) {
-          SheetRepository.deleteRows(workspaceId, tab, 2, sheet.getLastRow() - 1);
+          SheetRepository.deleteRows(workspaceId, tab, 2, lastRow - 1);
         } else {
-          sheet.deleteRows(2, sheet.getLastRow() - 1);
+          sheet.deleteRows(2, lastRow - 1);
         }
       }
       if (SheetRepository.clearTableCache) {

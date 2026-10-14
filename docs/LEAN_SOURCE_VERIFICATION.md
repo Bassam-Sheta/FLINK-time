@@ -1,4 +1,4 @@
-# Lean-source first pass (WP11)
+# Lean-source passes (WP11)
 
 Based on merged `main` at `cc39199a186151d22ad47b60a3e762658bc6bfe7`,
 not the unmerged yearly-routing draft #26. That package is preserved separately.
@@ -9,12 +9,12 @@ Physical lines, including comments/blanks; no minification or comment deletion:
 
 | Production file | Before | After |
 | --- | ---: | ---: |
-| Code.gs | 17,549 | 17,521 |
+| Code.gs | 17,549 | 17,387 |
 | User.html | 5,045 | 5,045 |
 | Admin.html | 4,937 | 1,113 |
 | SuperAdmin.html | 5,046 | 1,624 |
 | appsscript.json | 20 | 20 |
-| Total | 32,597 | 25,323 |
+| Total | 32,597 | 25,189 |
 
 Portal source falls from 15,028 to 7,782 lines (48.2%). Most of this is real
 duplicate source removal, not feature removal or compacted formatting. Shared
@@ -23,6 +23,21 @@ functions, state initialization, navigation, markup and setup code stay separate
 Backend primitives centralize header caching, formula-safe row serialization
 and adjacent-column writes. The renderer itself adds a small amount of backend
 code; the backend line reduction is deliberately modest.
+
+The follow-up removes another 134 backend lines (3,840 bytes) by replacing
+duplicate daily/weekly/monthly incremental writers with one period writer.
+It preserves strict period/user/project matching, weekly end-date refresh,
+per-entry integer-cent rounding, counts, timestamps and existing write order.
+Full rebuild now takes one last-row snapshot per tab, avoiding four repeated
+metadata calls when all four rollup tables contain rows. Existing rollup tests
+also check fractional cents, repeated buckets and exact deletion boundaries.
+
+Summary reports load only the name tables used by selected groupings: default
+project/user skips Tasks; date/billable/tag and empty results load none. Workspace
+authorization, forced USER self-scope and financial DTO whitelists remain intact.
+Null-prototype name maps/buckets fix reproduced crashes and incorrect names for
+prototype-shaped labels/IDs such as `__proto__` and `constructor`. These are
+lookup/metadata reductions, not a bounded growing-entry query implementation.
 
 ## Editing the five-file application
 
@@ -76,7 +91,7 @@ semantics and audit requirements have not been relaxed to reduce source size.
 ## Test/tool separation and evidence
 
 - Production remains exactly one backend, three portals and the manifest.
-- Default application suite: **505 passed**, no skips/failures. The two duplicate
+- Default application suite: **507 passed**, no skips/failures. The two duplicate
   header-cache tests are consolidated into one table-driven test for both
   repositories, adding exact write shapes, formula defense and protected gaps.
 - Browser suite: **14 mocked Chromium tests passed**. It exercises enrollment,
