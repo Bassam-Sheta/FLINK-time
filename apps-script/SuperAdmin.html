@@ -573,6 +573,20 @@
             <input type="password" id="loginPassword" required autocomplete="current-password">
           </div>
           <button type="submit" class="btn" style="width: 100%;">Sign In</button>
+          <button type="button" class="btn btn-secondary" onclick="showRecoveryForm('PASSWORD')">Forgot password?</button>
+        </form>
+        <form id="recoveryForm" class="hidden" onsubmit="handleRecovery(event)">
+          <h2 id="recoveryTitle">Account recovery</h2>
+          <p id="recoveryHelp"></p>
+          <label for="recoveryUsername">Recovery username</label>
+          <input id="recoveryUsername" autocomplete="username" required maxlength="50">
+          <div id="recoveryPasswordField"><label for="recoveryPassword">Recovery password</label><input id="recoveryPassword" type="password" autocomplete="current-password"></div>
+          <button id="emailRecoveryButton" type="button" class="btn btn-secondary" onclick="requestEmailRecovery(event)">Email a reset code</button>
+          <label for="recoveryCode">Recovery code</label>
+          <input id="recoveryCode" autocomplete="off" maxlength="80" spellcheck="false">
+          <div id="recoveryNewPasswordField"><label for="recoveryNewPassword">New recovery password</label><input id="recoveryNewPassword" type="password" autocomplete="new-password"></div>
+          <button class="btn" type="submit">Continue recovery</button>
+          <button class="btn btn-secondary" type="button" onclick="showLogin()">Back to sign in</button>
         </form>
         <form id="mfaEnrollmentForm" class="hidden" onsubmit="beginAuthenticatorEnrollment(event)">
           <h2>Set up your authenticator</h2>
@@ -609,6 +623,7 @@
           </button>
           <button type="button" class="btn btn-secondary" style="width:100%;"
             onclick="cancelMfaChallenge()">Back to Password</button>
+          <button type="button" class="btn btn-secondary" onclick="showRecoveryForm('MFA')">Use a recovery code</button>
         </form>
       </div>
     </div>
@@ -1164,6 +1179,7 @@
     });
 
     function showLogin() {
+      clearRecoveryScreen();
       document.getElementById('loginView').classList.remove('hidden');
       document.getElementById('setupWizardContainer').classList.add('hidden');
       document.getElementById('appHeader').classList.add('hidden');
@@ -1240,8 +1256,14 @@
         const res = await apiCall('auth.confirmMfa', { code: document.getElementById('enrollmentCode').value });
         state.token = res.sessionToken;
         clearEnrollmentScreen();
-        const validated = await apiCall('auth.validateSession');
-        completeBrowserLogin(Object.assign({}, validated, { sessionToken: res.sessionToken }));
+        const finish = async () => {
+          try {
+            const validated = await apiCall('auth.validateSession');
+            completeBrowserLogin(Object.assign({}, validated, { sessionToken: res.sessionToken }));
+          } catch (err) { showLogin(); showRecoveryMessage(err.message); }
+        };
+        if (Array.isArray(res.recoveryCodes)) showRecoveryCodes(res.recoveryCodes, finish);
+        else await finish();
       } catch (err) {
         const alertBox = document.getElementById('loginAlert');
         alertBox.textContent = err.message || 'Could not confirm enrollment. Sign in again to retry.';
@@ -1250,6 +1272,110 @@
         document.getElementById('enrollmentCode').value = '';
         if (button) button.disabled = false;
       }
+    }
+
+    function showRecoveryMessage(message) {
+      const box = document.getElementById('loginAlert');
+      box.textContent = message;
+      box.classList.remove('hidden');
+    }
+
+    function clearRecoveryScreen() {
+      document.getElementById('recoveryForm').classList.add('hidden');
+      for (const id of ['recoveryUsername', 'recoveryPassword', 'recoveryCode', 'recoveryNewPassword']) document.getElementById(id).value = '';
+    }
+
+    function showRecoveryForm(mode) {
+      showLogin();
+      state.token = '';
+      state.pendingMfaChallengeToken = '';
+      safeStorage.removeItem('flink_session_token');
+      state.recoveryMode = mode;
+      document.getElementById('passwordLoginForm').classList.add('hidden');
+      document.getElementById('recoveryForm').classList.remove('hidden');
+      document.getElementById('recoveryTitle').textContent = mode === 'MFA' ? 'Replace a lost authenticator' : 'Recover your password';
+      document.getElementById('recoveryHelp').textContent = mode === 'MFA'
+        ? 'Use your password and one saved recovery code. You must enroll a new authenticator before accessing FLINK.'
+        : 'When email recovery is enabled, request a code for your Google-bound account. MFA is still required after resetting your password.';
+      for (const id of ['emailRecoveryButton', 'recoveryNewPasswordField']) document.getElementById(id).classList.toggle('hidden', mode === 'MFA');
+      document.getElementById('recoveryPasswordField').classList.toggle('hidden', mode !== 'MFA');
+      document.getElementById('recoveryUsername').value = document.getElementById('loginUsername').value;
+      document.getElementById('recoveryUsername').focus();
+    }
+
+    async function requestEmailRecovery(event) {
+      const button = event.currentTarget;
+      button.disabled = true;
+      try {
+        const res = await apiCall('auth.requestPasswordRecovery', { username: document.getElementById('recoveryUsername').value });
+        showRecoveryMessage(res.message);
+      } catch (err) { showRecoveryMessage(err.message); }
+      finally { button.disabled = false; }
+    }
+
+    async function handleRecovery(event) {
+      event.preventDefault();
+      const button = event.submitter;
+      if (button) button.disabled = true;
+      try {
+        const payload = { username: document.getElementById('recoveryUsername').value, code: document.getElementById('recoveryCode').value };
+        if (state.recoveryMode === 'MFA') {
+          payload.password = document.getElementById('recoveryPassword').value;
+          completeBrowserLogin(await apiCall('auth.recoverMfa', payload));
+        } else {
+          payload.newPassword = document.getElementById('recoveryNewPassword').value;
+          const res = await apiCall('auth.completePasswordRecovery', payload);
+          showLogin();
+          showRecoveryMessage(res.message);
+        }
+      } catch (err) { showRecoveryMessage(err.message); }
+      finally {
+        for (const id of ['recoveryPassword', 'recoveryCode', 'recoveryNewPassword']) document.getElementById(id).value = '';
+        if (button) button.disabled = false;
+      }
+    }
+
+    function showRecoveryCodes(codes, afterSave = () => {}) {
+      const modal = document.getElementById('modalContainer');
+      modal.replaceChildren();
+      const backdrop = document.createElement('div');
+      backdrop.className = 'modal-backdrop';
+      const box = document.createElement('div');
+      box.className = 'modal';
+      const title = document.createElement('h3');
+      title.textContent = 'Save your recovery codes';
+      const help = document.createElement('p');
+      help.textContent = 'Shown once. Keep these codes somewhere private, separate from your authenticator. Each code works once; generating new codes replaces all previous codes.';
+      const output = document.createElement('pre');
+      output.id = 'savedRecoveryCodes';
+      output.style.cssText = 'white-space:pre-wrap;overflow-wrap:anywhere;user-select:all';
+      output.textContent = codes.join('\n');
+      const done = document.createElement('button');
+      done.className = 'btn';
+      done.textContent = 'I saved my recovery codes';
+      done.onclick = () => { modal.replaceChildren(); afterSave(); };
+      box.append(title, help, output, done);
+      backdrop.appendChild(box);
+      modal.appendChild(backdrop);
+      done.focus();
+    }
+
+    function openRecoveryCodesSettings() {
+      document.getElementById('modalContainer').innerHTML = `<div class="modal-backdrop"><div class="modal"><h3>Generate recovery codes</h3><form onsubmit="regenerateRecoveryCodes(event)"><label for="recoveryCurrentPassword">Current recovery password</label><input id="recoveryCurrentPassword" type="password" autocomplete="current-password" required><label for="recoveryCurrentTotp">Current authenticator code</label><input id="recoveryCurrentTotp" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required><button type="submit" class="btn">Generate new codes</button><button type="button" class="btn btn-secondary" onclick="closeModal()">Cancel</button></form></div></div>`;
+      document.getElementById('recoveryCurrentPassword').focus();
+    }
+
+    async function regenerateRecoveryCodes(event) {
+      event.preventDefault();
+      const button = event.submitter;
+      if (button) button.disabled = true;
+      const password = document.getElementById('recoveryCurrentPassword');
+      const code = document.getElementById('recoveryCurrentTotp');
+      try {
+        const res = await apiCall('auth.regenerateRecoveryCodes', { currentPassword: password.value, totpCode: code.value });
+        showRecoveryCodes(res.recoveryCodes);
+      } catch (err) { alert(err.message || 'Recovery code generation failed.'); }
+      finally { password.value = ''; code.value = ''; if (button) button.disabled = false; }
     }
 
     function showMfaChallenge(challengeToken) {
@@ -2123,6 +2249,11 @@
         wrap.append(label, valueEl);
         container.appendChild(wrap);
       });
+      const recovery = document.createElement('button');
+      recovery.className = 'btn btn-secondary';
+      recovery.textContent = 'Generate recovery codes';
+      recovery.onclick = openRecoveryCodesSettings;
+      container.appendChild(recovery);
     }
 
     function openPasswordChangeModal() {

@@ -27,6 +27,11 @@ const routes = {
     file: path.join(root, 'apps-script', 'SuperAdmin.html'),
     role: 'SUPER_ADMIN',
     setupInitialized: false
+  },
+  '/superadmin': {
+    file: path.join(root, 'apps-script', 'SuperAdmin.html'),
+    role: 'SUPER_ADMIN',
+    setupInitialized: true
   }
 };
 

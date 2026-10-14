@@ -12,7 +12,7 @@ function fixture() {
   Object.assign(context.SecurityService, {
     hashToken: value => crypto.createHash('sha256').update(String(value)).digest('hex'),
     generateSessionToken: () => 'SYNTHETIC-SESSION-' + (++nonce),
-    generateRandomHex: () => String(++nonce).padStart(64, '0'),
+    generateRandomHex: (bytes = 16) => String(++nonce).padStart(bytes * 2, '0'),
     generateTotpSecret: () => 'SYNTHETIC-SECRET',
     hashPassword: () => 'SYNTHETIC-NEW-HASH',
     verifyPassword: password => password === 'SYNTHETIC-PASSWORD',
@@ -151,4 +151,58 @@ test('confirmation rechecks session revocation and expiry after acquiring the lo
     assert.equal(fx.tables.Sessions.size, 1);
     assert.equal(fx.controls.locked, false);
   }
+});
+
+test('recovery composes with real durable lookups and cache-eviction failure', () => {
+  const fx = fixture();
+  const auth = fx.validate();
+  fx.context.AuthService.enrollMfa(auth, 'SYNTHETIC-PASSWORD');
+  const enrolled = fx.context.AuthService.confirmMfa(auth, '123456');
+  fx.context.SessionService.validateSession(enrolled.sessionToken);
+  fx.controls.failRemove = true;
+  const recovered = fx.context.RecoveryService.recoverMfa('user', 'SYNTHETIC-PASSWORD', enrolled.recoveryCodes[0]);
+  assert.equal(recovered.enrollmentRequired, true);
+  const restricted = fx.context.SessionService.validateSession(recovered.sessionToken);
+  assert.equal(restricted.session.AuthLevel, 'MFA_RECOVERY');
+  assert.equal(restricted.session.AccountEpoch, fx.account.SessionEpoch);
+  fx.clock.now += 60001; // existing bounded read-cache revocation window
+  assert.throws(() => fx.context.SessionService.validateSession(enrolled.sessionToken));
+  assert.throws(() => fx.context.RecoveryService.recoverMfa('user', 'SYNTHETIC-PASSWORD', enrolled.recoveryCodes[0]));
+  fx.context.AuthService.enrollMfa(restricted, 'SYNTHETIC-PASSWORD');
+  const replaced = fx.context.AuthService.confirmMfa(restricted, '123456');
+  assert.equal(fx.context.SessionService.validateSession(replaced.sessionToken).session.AuthLevel, 'MFA');
+});
+
+test('recovery bypass of the old authenticator requires the same durable session assurance', () => {
+  const fx = fixture();
+  fx.session.AuthLevel = 'MFA';
+  fx.cred.MfaEnabled = true;
+  fx.cred.TotpSecret = 'kms$v1$SYNTHETIC';
+  const auth = fx.validate();
+  const claimed = { ...auth, session: { ...auth.session, AuthLevel: 'MFA_RECOVERY' } };
+  assert.throws(() => fx.context.AuthService.enrollMfa(claimed, 'SYNTHETIC-PASSWORD'));
+  assert.equal(fx.cred.PendingTotpSecret, '');
+});
+
+test('missing RecoveryJSON header fails before returning codes even when the unused cell is blank', () => {
+  const fx = fixture();
+  const auth = fx.validate();
+  fx.context.AuthService.enrollMfa(auth, 'SYNTHETIC-PASSWORD');
+  const getBook = fx.context.MasterRepository.getMasterSpreadsheet.bind(fx.context.MasterRepository);
+  fx.context.MasterRepository.getMasterSpreadsheet = () => {
+    const book = getBook();
+    return { getSheetByName(name) {
+      const sheet = book.getSheetByName(name);
+      if (name !== 'Credentials') return sheet;
+      return { ...sheet, getLastColumn: () => fx.context.MASTER_SCHEMA.Credentials.length - 1,
+        getRange(row, ...args) {
+          const range = sheet.getRange(row, ...args);
+          if (row !== 1) return range;
+          return { ...range, getValues: () => [Array.from(fx.context.MASTER_SCHEMA.Credentials).slice(0, -1)] };
+        } };
+    } };
+  };
+  assert.throws(() => fx.context.AuthService.confirmMfa(auth, '123456'), error => error.code === 'CRYPTO_FAILURE');
+  assert.equal(fx.cred.MfaEnabled, false);
+  assert.equal(fx.tables.Sessions.size, 1);
 });

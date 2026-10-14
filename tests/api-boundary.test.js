@@ -144,7 +144,7 @@ test('public action allowlist exactly matches authRequired:false declarations', 
     .sort();
 
   assert.deepEqual([...PUBLIC_ACTIONS].sort(), declaredPublic);
-  assert.deepEqual(declaredPublic, ['auth.login', 'auth.verifyMfa', 'setup.status']);
+  assert.deepEqual(declaredPublic, ['auth.completePasswordRecovery', 'auth.login', 'auth.recoverMfa', 'auth.requestPasswordRecovery', 'auth.verifyMfa', 'setup.status']);
 });
 
 test('only setup.completeStep may use the controlled unauthenticated step-1 exception', () => {

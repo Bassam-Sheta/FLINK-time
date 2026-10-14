@@ -36,7 +36,8 @@ function loadFixture() {
     LockUntil: '',
     MfaEnabled: true,
     TotpSecret: 'SECRET',
-    LastSuccessfulTotpStep: ''
+    LastSuccessfulTotpStep: '',
+    RecoveryJSON: ''
   };
   const events = [];
   const session = { SessionID: 'S1', UserID: 'USR-1', TokenHash: 'SYNTHETIC-HASH', AuthLevel: 'MFA_ENROLLMENT',
@@ -44,6 +45,7 @@ function loadFixture() {
     ExpiresAt: new Date(Date.now() + 600000).toISOString(), AbsoluteExpiresAt: new Date(Date.now() + 600000).toISOString() };
   const accountUpdates = [];
   let sessionCount = 0;
+  let randomCounter = 0;
 
   global.AppError = AppError;
   global.ERROR_CODES = {
@@ -74,6 +76,7 @@ function loadFixture() {
     assertAccountIdentity() { return 'worker@example.com'; }
   };
   global.SecurityService = {
+    generateRandomHex(bytes = 16) { return String(++randomCounter).padStart(bytes * 2, '0'); },
     verifyPassword() { return true; },
     getPepper() { return 'pepper'; },
     hashToken(value) {
@@ -83,6 +86,7 @@ function loadFixture() {
     verifyTotpWithStep() { return { valid: true, timeStep: 123456 }; }
   };
   global.MasterRepository = {
+    assertRecoverySchema() {},
     findAccountByUsername() { return account; },
     findAccountById() { return account; },
     getCredentials() { return cred; },
@@ -104,6 +108,7 @@ function loadFixture() {
       return { sessionToken: 'SESSION-' + sessionCount, expiresAt: 'later' };
     }
   };
+  global.SpreadsheetApp = { flush() {} };
   global.LockService = {
     getScriptLock() {
       return { waitLock() {}, releaseLock() {} };

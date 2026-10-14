@@ -93,7 +93,7 @@ test('Admin capacity metrics require explicit authorized workspace access', () =
   assert.match(block, /JobService\.getCapacityMetrics\(requestedCapacityWorkspace\)/);
 });
 
-test('Apps Script manifest keeps only runtime scopes required by storage, identity, and Cloud KMS', () => {
+test('Apps Script manifest keeps only runtime scopes required by storage, identity, recovery mail and Cloud KMS', () => {
   const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
   assert.equal(manifest.dependencies, undefined);
   assert.deepEqual(
@@ -102,6 +102,7 @@ test('Apps Script manifest keeps only runtime scopes required by storage, identi
       'https://www.googleapis.com/auth/cloudkms',
       'https://www.googleapis.com/auth/drive',
       'https://www.googleapis.com/auth/script.external_request',
+      'https://www.googleapis.com/auth/script.send_mail',
       'https://www.googleapis.com/auth/spreadsheets',
       'https://www.googleapis.com/auth/userinfo.email'
     ].sort()
