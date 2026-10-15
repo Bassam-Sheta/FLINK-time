@@ -7715,6 +7715,142 @@ function prepareYearlyDataFile_(workspaceId, year, tabName, additionalRows) {
 }
 
 /* ===== YearlyEntryStorage.gs ===== */
+// One durable slot is sufficient because every routed writer holds ScriptLock.
+// Recovery repairs audit evidence only; it never replays or rolls back entry data.
+var YearlyEntryMutation = {
+  tab: 'EntryMutationCheckpoint',
+  headers: ['WorkspaceID', 'CoreSpreadsheetID', 'CheckpointJSON', 'CheckpointHash'],
+  maxPayload: 45000,
+  hash(record) {
+    const values = this.headers.slice(0, -1).map(key => record[key]);
+    return Array.from(SecurityService.hmacSha256(SecurityService.getPepper() + '_FLINK_ENTRY_MUTATION_V1', JSON.stringify(values)))
+      .map(byte => (byte < 0 ? byte + 256 : byte).toString(16).padStart(2, '0')).join('');
+  },
+  assertLock() {
+    if (!LockService.getScriptLock().hasLock()) throw YearlyDataFileService._conflict('Entry recovery requires the writer lock.');
+  },
+  read(core, workspaceId, owner, expectedCoreId = core.getId()) {
+    const sheet = core.getSheetByName(this.tab);
+    YearlyDataFileService._assertHeaders(sheet, this.headers, false);
+    if (sheet.getLastRow() !== 2) throw YearlyDataFileService._conflict('Entry mutation checkpoint is missing or ambiguous. Owner reconciliation is required.');
+    const values = sheet.getRange(2, 1, 1, this.headers.length).getValues()[0];
+    const record = Object.fromEntries(this.headers.map((key, i) => [key, values[i]]));
+    if (record.WorkspaceID !== workspaceId || record.CoreSpreadsheetID !== expectedCoreId ||
+        typeof record.CheckpointJSON !== 'string' || record.CheckpointJSON.length > this.maxPayload ||
+        typeof record.CheckpointHash !== 'string' || !/^[a-f0-9]{64}$/.test(record.CheckpointHash) ||
+        !SecurityService.constantTimeEquals(record.CheckpointHash, this.hash(record))) {
+      throw YearlyDataFileService._conflict('Entry mutation checkpoint authentication failed.');
+    }
+    let payload;
+    try { payload = JSON.parse(record.CheckpointJSON); } catch (_) { throw YearlyDataFileService._conflict('Invalid entry mutation checkpoint.'); }
+    if (!payload || payload.owner !== owner || !Object.prototype.hasOwnProperty.call(payload, 'pending')) {
+      throw YearlyDataFileService._conflict('Entry mutation checkpoint owner or state is invalid.');
+    }
+    if (payload.pending !== null) this.validate(payload.pending, workspaceId, expectedCoreId);
+    return { sheet, record, pending: payload.pending };
+  },
+  validate(pending, workspaceId, coreId) {
+    if (!pending || !['APPEND', 'UPDATE'].includes(pending.action) ||
+        typeof pending.operationId !== 'string' || !/^[A-Za-z0-9._:-]{1,128}$/.test(pending.operationId)) {
+      throw YearlyDataFileService._conflict('Invalid pending entry mutation.');
+    }
+    YearlyEntryStorage.actor(pending.actor);
+    const snapshots = pending.action === 'APPEND' ? [pending.after] : [pending.before, pending.after];
+    if (pending.action === 'APPEND' && pending.before !== null) throw YearlyDataFileService._conflict('Invalid append Before state.');
+    for (const row of snapshots) {
+      const location = row && row._rowIndex;
+      if (!row || typeof row.EntryID !== 'string' || !row.EntryID || !location || location.workspaceId !== workspaceId ||
+          location.coreSpreadsheetId !== coreId || location.entryId !== row.EntryID ||
+          typeof location.spreadsheetId !== 'string' || !location.spreadsheetId ||
+          !Number.isSafeInteger(location.rowIndex) || location.rowIndex < 2 ||
+          !Number.isSafeInteger(location.year) || !Number.isSafeInteger(location.part) ||
+          WORKSPACE_SCHEMA.TimeEntries.some(key => !Object.prototype.hasOwnProperty.call(row, key)) ||
+          location.rowHash !== SecurityService.hashToken(JSON.stringify(WORKSPACE_SCHEMA.TimeEntries.map(key => row[key])))) {
+        throw YearlyDataFileService._conflict('Pending entry snapshot is invalid.');
+      }
+    }
+    if (pending.before && (pending.before.EntryID !== pending.after.EntryID || pending.before.UserID !== pending.after.UserID ||
+        !this.sameLocation(pending.before._rowIndex, pending.after._rowIndex))) {
+      throw YearlyDataFileService._conflict('Pending entry identity or cohort changed.');
+    }
+  },
+  write(core, workspaceId, owner, pending) {
+    this.assertLock();
+    if (pending !== null) this.validate(pending, workspaceId, core.getId());
+    const record = { WorkspaceID: workspaceId, CoreSpreadsheetID: core.getId(), CheckpointJSON: JSON.stringify({ owner, pending }) };
+    if (record.CheckpointJSON.length > this.maxPayload) throw YearlyDataFileService._conflict('Entry mutation exceeds the recovery checkpoint budget.');
+    record.CheckpointHash = this.hash(record);
+    const sheet = core.getSheetByName(this.tab);
+    YearlyDataFileService._assertHeaders(sheet, this.headers, false);
+    sheet.getRange(2, 1, 1, this.headers.length).setValues([this.headers.map(key => record[key])]);
+    SpreadsheetApp.flush();
+    if (this.read(core, workspaceId, owner).record.CheckpointHash !== record.CheckpointHash) {
+      throw YearlyDataFileService._conflict('Entry mutation checkpoint persistence is uncertain.');
+    }
+  },
+  initialize(core, workspaceId, owner) {
+    this.assertLock();
+    let sheet = core.getSheetByName(this.tab);
+    if (sheet && sheet.getLastRow() >= 2) return this.read(core, workspaceId, owner);
+    if (sheet && sheet.getLastRow()) YearlyDataFileService._assertHeaders(sheet, this.headers, false);
+    if (YearlyDataFileService._allocated(core) + (sheet ? 0 : 26000) >= YearlyDataFileService.cellBoundary) {
+      throw YearlyDataFileService._conflict('Core capacity cannot accommodate the entry mutation checkpoint.');
+    }
+    const operation = Validation.generateId('ENTMUTSCHEMA');
+    const before = { checkpointPresent: !!sheet }, after = { coreSpreadsheetId: core.getId(), headers: this.headers };
+    YearlyDataFileService._audit(owner, workspaceId, 'ENTRY_MUTATION_SCHEMA_INTENT', before, after, operation);
+    if (!sheet) sheet = core.insertSheet(this.tab);
+    sheet.getRange(1, 1, 1, this.headers.length).setValues([this.headers]);
+    trimSheetToSchema_(sheet, this.headers.length, 2);
+    this.write(core, workspaceId, owner, null);
+    YearlyDataFileService._audit(owner, workspaceId, 'ENTRY_MUTATION_SCHEMA_COMPLETED', before, after, operation);
+    return this.read(core, workspaceId, owner);
+  },
+  sameLocation(a, b) {
+    return ['workspaceId', 'coreSpreadsheetId', 'spreadsheetId', 'year', 'part', 'entryId'].every(key => a[key] === b[key]);
+  },
+  matches(expected, actual) {
+    if (!expected || !actual) return expected === null && actual === null;
+    return this.sameLocation(expected._rowIndex, actual._rowIndex) &&
+      expected._rowIndex.rowHash === actual._rowIndex.rowHash;
+  },
+  recover(context, recoveryActor) {
+    this.assertLock();
+    const workspaceId = context.ws.WorkspaceID;
+    const { pending } = this.read(context.core, workspaceId, context.owner);
+    if (!pending) return { recovered: false };
+    const actual = YearlyEntryStorage.find(workspaceId, 'EntryID', pending.after.EntryID);
+    const outcome = this.matches(pending.after, actual) ? 'COMPLETED' : this.matches(pending.before, actual) ? 'NOT_APPLIED' : '';
+    if (!outcome) throw YearlyDataFileService._conflict('Pending entry matches neither signed snapshot. Owner reconciliation is required.');
+    const audit = (actor, action, before, after) => YearlyDataFileService._audit(actor, workspaceId, action, before, after, pending.operationId);
+    const recovery = { action: pending.action, mutationActor: pending.actor, outcome };
+    audit(recoveryActor, 'ENTRY_STORAGE_RECOVERY_INTENT', null, recovery);
+    // An earlier audit may have persisted despite an error. Correlated duplicates
+    // are safe; a missing original intent is not. Never infer a different actor.
+    audit(pending.actor, 'ENTRY_STORAGE_' + pending.action + '_INTENT', pending.before, pending.after);
+    audit(pending.actor, 'ENTRY_STORAGE_' + pending.action + '_' + outcome, pending.before,
+      outcome === 'COMPLETED' ? pending.after : pending.before);
+    audit(recoveryActor, 'ENTRY_STORAGE_RECOVERY_COMPLETED', null, recovery);
+    this.write(context.core, workspaceId, context.owner, null);
+    return { recovered: true, operationId: pending.operationId, outcome };
+  },
+  run(context, actor, action, before, after, apply) {
+    this.assertLock();
+    const workspaceId = context.ws.WorkspaceID;
+    if (this.read(context.core, workspaceId, context.owner).pending) throw YearlyDataFileService._conflict('Finish pending entry audit recovery before another mutation.');
+    const pending = { operationId: Validation.generateId('ENT' + action), action, actor, before, after };
+    this.write(context.core, workspaceId, context.owner, pending);
+    YearlyDataFileService._audit(actor, workspaceId, 'ENTRY_STORAGE_' + action + '_INTENT', before, after, pending.operationId);
+    apply();
+    SpreadsheetApp.flush();
+    const actual = YearlyEntryStorage.find(workspaceId, 'EntryID', after.EntryID);
+    if (!this.matches(after, actual)) throw YearlyDataFileService._conflict('Entry write could not be verified. Recovery evidence was retained.');
+    YearlyDataFileService._audit(actor, workspaceId, 'ENTRY_STORAGE_' + action + '_COMPLETED', before, after, pending.operationId);
+    this.write(context.core, workspaceId, context.owner, null);
+    return actual;
+  }
+};
+
 // Internal repository boundary. Caller authentication/resource authorization stay
 // in the existing services; execute-as-owner identity only authorizes Drive I/O.
 var YearlyEntryStorage = {
@@ -7882,6 +8018,10 @@ var YearlyEntryStorage = {
     }
     return { userId: context.userId, role: context.role };
   },
+  recoverPending(workspaceId, actorContext) {
+    if (!this.handles(workspaceId, 'TimeEntries')) return { recovered: false };
+    return YearlyEntryMutation.recover(this.context(workspaceId), this.actor(actorContext));
+  },
   append(workspaceId, entity, actorContext = null) {
     if (!entity || typeof entity.EntryID !== 'string' || !/^[A-Za-z0-9._:-]{1,128}$/.test(entity.EntryID) || !entity.UserID) {
       throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'Entry identity is required.', 400);
@@ -7891,6 +8031,7 @@ var YearlyEntryStorage = {
     const actor = this.actor(actorContext);
     return this.locked(() => {
       const context = this.context(workspaceId);
+      YearlyEntryMutation.recover(context, actor);
       for (const record of context.records.filter(row => row.State === 'PREPARING')) {
         YearlyDataFileService.prepare(workspaceId, record.Year, 'TimeEntries', 1, actor);
       }
@@ -7909,17 +8050,16 @@ var YearlyEntryStorage = {
       const rowIndex = sheet.getLastRow() + 1;
       const values = WORKSPACE_SCHEMA.TimeEntries.map(key => Validation.sanitizeCellValue(entity[key] === undefined ? '' : entity[key]));
       const after = this.row(values, location, rowIndex);
-      YearlyDataFileService._audit(actor, workspaceId, 'ENTRY_STORAGE_APPEND_INTENT', null, after, entity.EntryID);
-      sheet.getRange(rowIndex, 1, 1, values.length).setValues([values]);
-      SpreadsheetApp.flush();
-      YearlyDataFileService._audit(actor, workspaceId, 'ENTRY_STORAGE_APPEND_COMPLETED', null, after, entity.EntryID);
-      return after;
+      return YearlyEntryMutation.run(context, actor, 'APPEND', null, after,
+        () => sheet.getRange(rowIndex, 1, 1, values.length).setValues([values]));
     });
   },
   update(workspaceId, location, updates, actorContext = null) {
     const actor = this.actor(actorContext);
     return this.locked(() => {
       if (!location || location.workspaceId !== workspaceId || !location.entryId) throw YearlyDataFileService._conflict('Immutable entry location required.');
+      const context = this.context(workspaceId);
+      YearlyEntryMutation.recover(context, actor);
       const before = this.find(workspaceId, 'EntryID', location.entryId);
       if (!before || ['workspaceId', 'coreSpreadsheetId', 'spreadsheetId', 'year', 'part'].some(key => before._rowIndex[key] !== location[key])) {
         throw YearlyDataFileService._conflict('Stale or foreign entry location.');
@@ -7931,13 +8071,9 @@ var YearlyEntryStorage = {
           (updates.UserID !== undefined && updates.UserID !== before.UserID)) throw YearlyDataFileService._conflict('Entry identity is immutable.');
       const values = WORKSPACE_SCHEMA.TimeEntries.map(key => Validation.sanitizeCellValue(updates[key] === undefined ? before[key] : updates[key]));
       const after = this.row(values, before._rowIndex, before._rowIndex.rowIndex);
-      const operation = Validation.generateId('ENTUPD');
-      YearlyDataFileService._audit(actor, workspaceId, 'ENTRY_STORAGE_UPDATE_INTENT', before, after, operation);
-      SpreadsheetApp.openById(location.spreadsheetId).getSheetByName('TimeEntries')
-        .getRange(before._rowIndex.rowIndex, 1, 1, values.length).setValues([values]);
-      SpreadsheetApp.flush();
-      YearlyDataFileService._audit(actor, workspaceId, 'ENTRY_STORAGE_UPDATE_COMPLETED', before, after, operation);
-      return after;
+      return YearlyEntryMutation.run(context, actor, 'UPDATE', before, after,
+        () => SpreadsheetApp.openById(location.spreadsheetId).getSheetByName('TimeEntries')
+          .getRange(before._rowIndex.rowIndex, 1, 1, values.length).setValues([values]));
     });
   },
   enable(workspaceId) {
@@ -7950,6 +8086,8 @@ var YearlyEntryStorage = {
       YearlyDataFileService._assertHeaders(master, MASTER_SCHEMA.Workspaces, false);
       const core = SpreadsheetApp.openById(ws.SpreadsheetID);
       YearlyDataFileService._assertPrivate(core, owner);
+      if (!ws.PartitionPolicy) YearlyEntryMutation.initialize(core, workspaceId, owner);
+      else YearlyEntryMutation.read(core, workspaceId, owner);
       const activation = this.activationState(core, workspaceId, owner, !ws.PartitionPolicy);
       const registry = YearlyDataFileService._registry(core, workspaceId, owner);
       for (const record of registry.records) {
@@ -7985,6 +8123,14 @@ var YearlyEntryStorage = {
 
 function enableYearlyEntryStorage_(workspaceId) {
   return YearlyEntryStorage.enable(workspaceId);
+}
+
+function recoverYearlyEntryMutation_(workspaceId) {
+  IdentityService.assertInstallationOwner();
+  return YearlyEntryStorage.locked(() => {
+    const owner = IdentityService.assertInstallationOwner();
+    return YearlyEntryMutation.recover(YearlyEntryStorage.context(workspaceId), owner);
+  });
 }
 
 /* ===== WorkspaceService.gs ===== */
@@ -10142,6 +10288,7 @@ var TimerService = (typeof global !== 'undefined' && global.TimerService) || {
     // Repair/idempotency path: entry already exists and is active. Finish the
     // timer deletion only; do not create or roll up a duplicate entry.
     if (existingEntry && existingEntry.Status !== 'DELETED') {
+      YearlyEntryStorage.recoverPending(workspaceId, auditActorContext || ownerContext);
       const deleted = SheetRepository.deleteActiveTimer(
         workspaceId,
         ownerContext.userId
@@ -10310,6 +10457,7 @@ var TimerService = (typeof global !== 'undefined' && global.TimerService) || {
                 409
               );
             }
+            YearlyEntryStorage.recoverPending(workspaceId, authContext);
             const replayDto = TimeEntryService.toTimeEntryDTO(
               existingEntry,
               authContext.role !== CONSTANTS.ROLES.USER
@@ -16012,7 +16160,8 @@ var YearlyBackupSets = {
   coreManifest(core, workspaceId, deadline) {
     return BackupService._buildManifest(core, 'WORKSPACE', workspaceId,
       { ...WORKSPACE_SCHEMA, DataFileRegistry: YearlyDataFileService.registryHeaders,
-        EntryStorageActivation: YearlyEntryStorage.activationHeaders }, deadline);
+        EntryStorageActivation: YearlyEntryStorage.activationHeaders,
+        EntryMutationCheckpoint: YearlyEntryMutation.headers }, deadline);
   },
   dataManifest(book, workspaceId, deadline) {
     const schema = { DataFileInfo: YearlyDataFileService.infoHeaders };
@@ -16023,6 +16172,9 @@ var YearlyBackupSets = {
     const owner = YearlyEntryStorage.runtimeOwner();
     YearlyDataFileService._assertPrivate(core, owner);
     YearlyEntryStorage.assertActivationComplete(core, workspaceId, owner);
+    if (YearlyEntryMutation.read(core, workspaceId, owner).pending) {
+      throw YearlyDataFileService._conflict('Pending entry audit recovery must finish before a file-set backup.');
+    }
     const records = this.records(core, workspaceId);
     const base = this.coreManifest(core, workspaceId, deadline);
     const dataFiles = records.map(record => {
@@ -16104,6 +16256,9 @@ var YearlyBackupSets = {
     const activation = YearlyEntryStorage.activationState(candidate, workspaceId, owner, false, core.getId());
     YearlyEntryStorage.writeActivation(candidate, workspaceId, owner, activation.sheet,
       { ...activation.record, CoreSpreadsheetID: candidate.getId() });
+    const mutation = YearlyEntryMutation.read(candidate, workspaceId, owner, core.getId());
+    if (mutation.pending) throw YearlyDataFileService._conflict('Copied entry checkpoint is not idle.');
+    YearlyEntryMutation.write(candidate, workspaceId, owner, null);
     const registry = candidate.getSheetByName(YearlyDataFileService.registryTab);
     for (const item of replacements) {
       item.book.getSheetByName('DataFileInfo').getRange(2, 1, 1, YearlyDataFileService.infoHeaders.length)

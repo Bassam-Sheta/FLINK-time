@@ -1,10 +1,13 @@
 # Yearly entry routing — work in progress
 
-Branch: `wp10-yearly-entry-routing`. No deployment or live activation performed.
+Branch: `wp10-yearly-entry-routing`. No production deployment or live activation.
+The earlier `1be2712` source was deployed to the approved owner-only staging Web
+App (Version 2); only first-run rendering was observed. The entry-audit recovery
+follow-up described below has not been uploaded or deployed.
 
-Offline verification (2026-10-14): 586 unit tests and 14 existing mocked
-Chromium tests pass; `git diff --check` passes. Browser tests do not exercise
-Google file creation or multi-file restore.
+Offline verification (2026-10-15): 608 unit tests and 14 existing mocked
+Chrome tests pass; `git diff --check` passes. Browser tests do not exercise Google
+file creation or multi-file restore.
 The native npm audit reports zero known vulnerabilities. No staging configuration
 is present, so live Google acceptance, activation, release merge and installer-pin
 changes remain gated. This branch remains separate from the WP11 lean-source draft.
@@ -32,8 +35,10 @@ budget; partial copies are deliberately retained for owner reconciliation, not
 automatically resumed or deleted. Google quotas and permissions are unverified live.
 
 Before marking the draft PR ready, finish broad actor/permission freshness review,
-incomplete entry-update audit recovery, backup completion/partial-set recovery and
-bounded end-to-end reporting/jobs. The activation and row-race regressions are
+application-wide mutation audit recovery, backup completion/partial-set recovery
+and bounded end-to-end reporting/jobs. Routed entry checkpoint repair is covered
+in `ENTRY_MUTATION_RECOVERY.md`; it does not repair other tables or older operations.
+The activation, row-race and entry-recovery regressions are
 offline evidence, not live Google concurrency acceptance. The canonical
 specification now describes this draft without authorizing production activation.
 
@@ -43,6 +48,13 @@ after a subsequent edit, fails with CONFLICT rather than silently acknowledging
 the wrong mutation. A failing regression was reproduced before the fix; the earlier
 retry-only follow-up passed 578 unit tests. Current counts are at the top of this
 document. Browser files were unchanged by the backend follow-ups.
+
+Entry audit recovery follow-up: 22 new regressions exercise the fixed signed
+checkpoint, applied/unapplied outcomes, original actors/snapshots, owner-only
+repair, uncertain audit/flush/checkpoint writes, corruption, bounded metadata,
+backup/rebinding and Stop retries. Existing synthetic failure-injection notices
+remain present in full-suite output. Source, runtime state and live acceptance
+are not interchangeable evidence. See `ENTRY_MUTATION_RECOVERY.md` for limits.
 
 ## Synthetic activation and interrupted-operation runbook
 
@@ -59,7 +71,8 @@ staging/OAuth/MFA/KMS prerequisites in `STAGING_TESTS.md` have been approved.
    never delete/recreate unknown files just to obtain a passing activation.
 3. As the installation owner, invoke private `enableYearlyEntryStorage_(workspaceId)`
    in the editor. No UI setting/RPC activates routing. It retains legacy entries,
-   writes the signed one-row checkpoint, gates with YEARLY_ENTRIES_PREPARING,
+   initializes the fixed-size entry-mutation journal before writing the signed
+   activation checkpoint, gates with YEARLY_ENTRIES_PREPARING,
    verifies, flushes the active policy and completion audit, then marks COMPLETE.
 4. After an error, inspect both the durable policy and activation checkpoint without
    editing them. Once the policy transition begins, routed access/snapshots remain
@@ -75,7 +88,11 @@ staging/OAuth/MFA/KMS prerequisites in `STAGING_TESTS.md` have been approved.
    actual manager/System actor attribution. Reconcile reports/rollups to raw rows.
 7. Create/validate a complete isolated backup set; restore only to synthetic copies.
    Verify Core/Data/checkpoint bindings, entries, totals, permissions and audits.
-   Incomplete activation cannot publish a backup. Retain partial copy IDs and their
+   Incomplete activation or pending entry audit repair cannot publish a backup.
+   Resolve exact Before/After matches with the private owner recovery helper;
+   mismatches/missing checkpoints require separate reconciliation. Never initialize
+   a missing active journal or use older draft snapshots without review.
+   Retain partial copy IDs and their
    FILE_SET_COPY intent/registration audits for owner review; no resume/purge helper
    is authorized or implemented. Do not regard a retained partial set as a backup.
 
