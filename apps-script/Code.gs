@@ -2190,6 +2190,232 @@ var IdentityService = (typeof global !== 'undefined' && global.IdentityService) 
   }
 };
 
+/* BEGIN LOCAL PASSWORD KDF */
+/*
+ * SJCL password-KDF subset (BSD-2-Clause), from 1.0.8, commit
+ * 2a6ed4a22449334de2dd9b4e960af679e0e87303. See docs/LOCAL_LIBRARIES.md.
+ * Only bit arrays, UTF-8/hex codecs, SHA-256, HMAC and PBKDF2 are included.
+ * No entropy collector, cipher, external service or persistent key cache.
+ *
+ * Copyright (c) 2009-2015, Emily Stark, Mike Hamburg and Dan Boneh at
+ * Stanford University. All rights reserved.
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ * 1. Redistributions of source code must retain the above copyright notice,
+ *    this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the documentation
+ *    and/or other materials provided with the distribution.
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
+ */
+var PasswordKdf_ = (function () {
+  'use strict';
+  var sjcl = { hash: {}, codec: {}, misc: {}, exception: { invalid: Error } };
+
+  // Unused bit-array operations/codecs are omitted; retained operations are
+  // retain the pinned algorithms, with compact formatting/control-flow cleanup.
+  sjcl.bitArray = {
+    concat: function (a1, a2) {
+      if (a1.length === 0 || a2.length === 0) return a1.concat(a2);
+      var last = a1[a1.length - 1], shift = sjcl.bitArray.getPartial(last);
+      if (shift === 32) return a1.concat(a2);
+      return sjcl.bitArray._shiftRight(a2, shift, last | 0, a1.slice(0, a1.length - 1));
+    },
+    bitLength: function (a) {
+      var l = a.length, x;
+      if (l === 0) return 0;
+      x = a[l - 1];
+      return (l - 1) * 32 + sjcl.bitArray.getPartial(x);
+    },
+    clamp: function (a, len) {
+      if (a.length * 32 < len) return a;
+      a = a.slice(0, Math.ceil(len / 32));
+      var l = a.length;
+      len = len & 31;
+      if (l > 0 && len) a[l - 1] = sjcl.bitArray.partial(len, a[l - 1] & 0x80000000 >> (len - 1), 1);
+      return a;
+    },
+    partial: function (len, x, _end) {
+      if (len === 32) return x;
+      return (_end ? x | 0 : x << (32 - len)) + len * 0x10000000000;
+    },
+    getPartial: function (x) { return Math.round(x / 0x10000000000) || 32; },
+    _shiftRight: function (a, shift, carry, out) {
+      var i, last2 = 0, shift2;
+      if (out === undefined) out = [];
+      for (; shift >= 32; shift -= 32) { out.push(carry); carry = 0; }
+      if (shift === 0) return out.concat(a);
+      for (i = 0; i < a.length; i++) {
+        out.push(carry | a[i] >>> shift);
+        carry = a[i] << (32 - shift);
+      }
+      last2 = a.length ? a[a.length - 1] : 0;
+      shift2 = sjcl.bitArray.getPartial(last2);
+      out.push(sjcl.bitArray.partial(shift + shift2 & 31, (shift + shift2 > 32) ? carry : out.pop(), 1));
+      return out;
+    }
+  };
+  sjcl.codec.utf8String = {
+    toBits: function (str) {
+      str = unescape(encodeURIComponent(str));
+      var out = [], i, tmp = 0;
+      for (i = 0; i < str.length; i++) {
+        tmp = tmp << 8 | str.charCodeAt(i);
+        if ((i & 3) === 3) { out.push(tmp); tmp = 0; }
+      }
+      if (i & 3) out.push(sjcl.bitArray.partial(8 * (i & 3), tmp));
+      return out;
+    }
+  };
+  sjcl.codec.hex = {
+    fromBits: function (arr) {
+      var out = '', i;
+      for (i = 0; i < arr.length; i++) out += ((arr[i] | 0) + 0xF00000000000).toString(16).substr(4);
+      return out.substr(0, sjcl.bitArray.bitLength(arr) / 4);
+    }
+  };
+  sjcl.hash.sha256 = function (hash) {
+    if (!this._key[0]) this._precompute();
+    if (hash) {
+      this._h = hash._h.slice(0);
+      this._buffer = hash._buffer.slice(0);
+      this._length = hash._length;
+    } else { this.reset(); }
+  };
+  sjcl.hash.sha256.hash = function (data) { return (new sjcl.hash.sha256()).update(data).finalize(); };
+  sjcl.hash.sha256.prototype = {
+    blockSize: 512,
+    reset: function () {
+      this._h = this._init.slice(0);
+      this._buffer = [];
+      this._length = 0;
+      return this;
+    },
+    update: function (data) {
+      if (typeof data === 'string') data = sjcl.codec.utf8String.toBits(data);
+      var i, b = this._buffer = sjcl.bitArray.concat(this._buffer, data),
+        ol = this._length, nl = this._length = ol + sjcl.bitArray.bitLength(data);
+      if (nl > 9007199254740991) throw new sjcl.exception.invalid('Cannot hash more than 2^53 - 1 bits');
+      if (typeof Uint32Array !== 'undefined') {
+        var c = new Uint32Array(b), j = 0;
+        for (i = 512 + ol - ((512 + ol) & 511); i <= nl; i += 512) {
+          this._block(c.subarray(16 * j, 16 * (j + 1)));
+          j += 1;
+        }
+        b.splice(0, 16 * j);
+      } else {
+        for (i = 512 + ol - ((512 + ol) & 511); i <= nl; i += 512) this._block(b.splice(0, 16));
+      }
+      return this;
+    },
+    finalize: function () {
+      var i, b = this._buffer, h = this._h;
+      b = sjcl.bitArray.concat(b, [sjcl.bitArray.partial(1, 1)]);
+      for (i = b.length + 2; i & 15; i++) b.push(0);
+      b.push(Math.floor(this._length / 0x100000000));
+      b.push(this._length | 0);
+      while (b.length) this._block(b.splice(0, 16));
+      this.reset();
+      return h;
+    },
+    _init: [],
+    _key: [],
+    _precompute: function () {
+      var i = 0, prime = 2, factor, isPrime;
+      function frac(x) { return (x - Math.floor(x)) * 0x100000000 | 0; }
+      for (; i < 64; prime++) {
+        isPrime = true;
+        for (factor = 2; factor * factor <= prime; factor++) {
+          if (prime % factor === 0) { isPrime = false; break; }
+        }
+        if (isPrime) {
+          if (i < 8) this._init[i] = frac(Math.pow(prime, 1 / 2));
+          this._key[i] = frac(Math.pow(prime, 1 / 3));
+          i++;
+        }
+      }
+    },
+    _block: function (w) {
+      var i, tmp, a, b, h = this._h, k = this._key,
+        h0 = h[0], h1 = h[1], h2 = h[2], h3 = h[3], h4 = h[4], h5 = h[5], h6 = h[6], h7 = h[7];
+      for (i = 0; i < 64; i++) {
+        if (i < 16) tmp = w[i];
+        else {
+          a = w[(i + 1) & 15]; b = w[(i + 14) & 15];
+          tmp = w[i & 15] = ((a >>> 7 ^ a >>> 18 ^ a >>> 3 ^ a << 25 ^ a << 14) +
+            (b >>> 17 ^ b >>> 19 ^ b >>> 10 ^ b << 15 ^ b << 13) + w[i & 15] + w[(i + 9) & 15]) | 0;
+        }
+        tmp = tmp + h7 + (h4 >>> 6 ^ h4 >>> 11 ^ h4 >>> 25 ^ h4 << 26 ^ h4 << 21 ^ h4 << 7) + (h6 ^ h4 & (h5 ^ h6)) + k[i];
+        h7 = h6; h6 = h5; h5 = h4; h4 = h3 + tmp | 0;
+        h3 = h2; h2 = h1; h1 = h0;
+        h0 = (tmp + ((h1 & h2) ^ (h3 & (h1 ^ h2))) + (h1 >>> 2 ^ h1 >>> 13 ^ h1 >>> 22 ^ h1 << 30 ^ h1 << 19 ^ h1 << 10)) | 0;
+      }
+      h[0] = h[0] + h0 | 0; h[1] = h[1] + h1 | 0;
+      h[2] = h[2] + h2 | 0; h[3] = h[3] + h3 | 0;
+      h[4] = h[4] + h4 | 0; h[5] = h[5] + h5 | 0;
+      h[6] = h[6] + h6 | 0; h[7] = h[7] + h7 | 0;
+    }
+  };
+  sjcl.misc.hmac = function (key, Hash) {
+    this._hash = Hash = Hash || sjcl.hash.sha256;
+    var exKey = [[], []], i, bs = Hash.prototype.blockSize / 32;
+    this._baseHash = [new Hash(), new Hash()];
+    if (key.length > bs) key = Hash.hash(key);
+    for (i = 0; i < bs; i++) {
+      exKey[0][i] = key[i] ^ 0x36363636;
+      exKey[1][i] = key[i] ^ 0x5C5C5C5C;
+    }
+    this._baseHash[0].update(exKey[0]); this._baseHash[1].update(exKey[1]);
+    this._resultHash = new Hash(this._baseHash[0]);
+  };
+  sjcl.misc.hmac.prototype.encrypt = sjcl.misc.hmac.prototype.mac = function (data) {
+    if (!this._updated) { this.update(data); return this.digest(data); }
+    throw new sjcl.exception.invalid('encrypt on already updated hmac called!');
+  };
+  sjcl.misc.hmac.prototype.reset = function () {
+    this._resultHash = new this._hash(this._baseHash[0]); this._updated = false;
+  };
+  sjcl.misc.hmac.prototype.update = function (data) { this._updated = true; this._resultHash.update(data); };
+  sjcl.misc.hmac.prototype.digest = function () {
+    var w = this._resultHash.finalize(), result = new (this._hash)(this._baseHash[1]).update(w).finalize();
+    this.reset(); return result;
+  };
+  sjcl.misc.pbkdf2 = function (password, salt, count, length, Prff) {
+    count = count || 10000;
+    if (length < 0 || count < 0) throw new sjcl.exception.invalid('invalid params to pbkdf2');
+    if (typeof password === 'string') password = sjcl.codec.utf8String.toBits(password);
+    if (typeof salt === 'string') salt = sjcl.codec.utf8String.toBits(salt);
+    Prff = Prff || sjcl.misc.hmac;
+    var prf = new Prff(password), u, ui, i, j, k, out = [], b = sjcl.bitArray;
+    for (k = 1; 32 * out.length < (length || 1); k++) {
+      u = ui = prf.encrypt(b.concat(salt, [k]));
+      for (i = 1; i < count; i++) {
+        ui = prf.encrypt(ui);
+        for (j = 0; j < ui.length; j++) u[j] ^= ui[j];
+      }
+      out = out.concat(u);
+    }
+    if (length) out = b.clamp(out, length);
+    return out;
+  };
+  return Object.freeze({
+    deriveHex: function (password, salt, iterations, keyLenBytes) {
+      return sjcl.codec.hex.fromBits(sjcl.misc.pbkdf2(password, salt, iterations, keyLenBytes * 8));
+    }
+  });
+})();
+/* END LOCAL PASSWORD KDF */
+
 /* ===== SecurityService.gs ===== */
 /**
  * FLINK Time & Workforce Platform — Cryptographic Security Service
@@ -2357,41 +2583,18 @@ var SecurityService = (typeof global !== 'undefined' && global.SecurityService) 
    * Standard RFC 2898 implementation compatible with Google Apps Script runtime.
    */
   pbkdf2Sync(password, salt, iterations = 10000, keyLenBytes = 32) {
+    if (!Number.isSafeInteger(iterations) || iterations < 1 || iterations > 1000000 ||
+        !Number.isSafeInteger(keyLenBytes) || keyLenBytes < 1 || keyLenBytes > 1024) {
+      throw new AppError(ERROR_CODES.CRYPTO_FAILURE, 'Invalid password derivation parameters.', 500);
+    }
     const nodeCrypto = this._getCrypto();
     if (nodeCrypto && nodeCrypto.pbkdf2Sync) {
       return nodeCrypto.pbkdf2Sync(password, salt, iterations, keyLenBytes, 'sha256').toString('hex');
     }
 
-    const hLen = 32;
-    const blockCount = Math.ceil(keyLenBytes / hLen);
-    const finalBlockLength = keyLenBytes - (blockCount - 1) * hLen;
-    const derived = [];
-    const passwordBytes = this._utf8Bytes(password);
-    const saltBytes = this._utf8Bytes(salt);
-
-    for (let i = 1; i <= blockCount; i++) {
-      const blockIndex = [
-        (i >>> 24) & 0xff,
-        (i >>> 16) & 0xff,
-        (i >>> 8) & 0xff,
-        i & 0xff
-      ];
-
-      let u = this.hmacSha256(passwordBytes, saltBytes.concat(blockIndex));
-      const t = Array.from(u);
-
-      for (let j = 1; j < iterations; j++) {
-        u = this.hmacSha256(passwordBytes, u);
-        for (let k = 0; k < hLen; k++) {
-          t[k] ^= u[k];
-        }
-      }
-
-      const take = i === blockCount ? finalBlockLength : hLen;
-      for (let m = 0; m < take; m++) derived.push(t[m] & 0xff);
-    }
-
-    return derived.map(b => b.toString(16).padStart(2, '0')).join('');
+    // Same PBKDF2-HMAC-SHA256 output/cost; reusable HMAC pad states stay local
+    // to this derivation instead of calling Utilities for every iteration.
+    return PasswordKdf_.deriveHex(String(password), String(salt), iterations, keyLenBytes);
   },
 
   getStoredPasswordMetadata(storedHashString) {
@@ -12858,15 +13061,24 @@ var DashboardService = (typeof global !== 'undefined' && global.DashboardService
 
     for (const ws of targets) {
       try {
-        const { rows: timers } = SheetRepository.getTableData(
-          ws.WorkspaceID,
-          CONSTANTS.WORKSPACE_TABS.ACTIVE_TIMERS
-        );
-        const members = SheetRepository.listMembers(ws.WorkspaceID);
+        const selfOnly = authContext.role === CONSTANTS.ROLES.USER;
+        const ownTimer = selfOnly ? SheetRepository.getActiveTimer(ws.WorkspaceID, authContext.userId) : null;
+        const timers = selfOnly
+          ? (ownTimer && ownTimer.UserID === authContext.userId ? [ownTimer] : [])
+          : SheetRepository.getTableData(ws.WorkspaceID, CONSTANTS.WORKSPACE_TABS.ACTIVE_TIMERS).rows;
+        // Login-time self radar needs one timer, not every coworker/project.
+        if (!timers.length) continue;
+        const ownMember = selfOnly ? SheetRepository.getMember(ws.WorkspaceID, authContext.userId) : null;
+        const members = selfOnly
+          ? (ownMember && ownMember.UserID === authContext.userId ? [ownMember] : [])
+          : SheetRepository.listMembers(ws.WorkspaceID);
         const memberMap = {};
-        members.forEach(m => { memberMap[m.UserID] = m.DisplayName; });
+        members.forEach(m => { if (m.Status !== CONSTANTS.ACCOUNT_STATUS.DELETED) memberMap[m.UserID] = m.DisplayName; });
 
-        const projects = SheetRepository.listProjects(ws.WorkspaceID);
+        const ownProject = selfOnly && ownTimer.ProjectID ? SheetRepository.getProject(ws.WorkspaceID, ownTimer.ProjectID) : null;
+        const projects = selfOnly
+          ? (ownProject && ownProject.ProjectID === ownTimer.ProjectID ? [ownProject] : [])
+          : SheetRepository.listProjects(ws.WorkspaceID);
         const projectMap = {};
         projects.forEach(p => { projectMap[p.ProjectID] = p.ProjectName; });
 
