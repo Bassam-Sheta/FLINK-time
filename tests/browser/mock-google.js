@@ -162,11 +162,15 @@
 
       case 'auth.enrollMfa':
         if (payload.currentPassword !== 'demo-pass') throw new Error('Fresh password verification failed.');
-        return { secret: 'SYNTHETIC-SETUP-KEY', expiresAt: new Date(Date.now() + 600000).toISOString() };
+        return enrollmentResult('auth.enrollMfa', {
+          secret: 'JBSWY3DPEHPK3PXP',
+          otpauthUri: 'otpauth://totp/FLINK%3Asynthetic?secret=JBSWY3DPEHPK3PXP&issuer=FLINK&algorithm=SHA1&digits=6&period=30',
+          expiresAt: new Date(Date.now() + 600000).toISOString()
+        });
 
       case 'auth.confirmMfa':
         if (payload.code !== '123456') throw new Error('Invalid authenticator verification.');
-        return { ok: true, sessionToken: 'MFA-VERIFIED', expiresAt: nowIso(), recoveryCodes: recoveryCodes() };
+        return enrollmentResult('auth.confirmMfa', { ok: true, sessionToken: 'MFA-VERIFIED', expiresAt: nowIso(), recoveryCodes: recoveryCodes() });
 
       case 'auth.changePassword':
         if (payload.oldPassword !== 'demo-pass' || !payload.newPassword) {
@@ -346,6 +350,11 @@
       default:
         throw new Error('Mock backend does not implement action: ' + action);
     }
+  }
+
+  function enrollmentResult(action, result) {
+    if (window.__TEST_DEFER_ENROLLMENT_ACTION !== action) return result;
+    return new Promise(resolve => { window.__resolveEnrollmentAction = () => resolve(result); });
   }
 
   function runner(successHandler, failureHandler, userObject) {

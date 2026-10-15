@@ -17,7 +17,7 @@ for (const route of ['/user', '/admin', '/superadmin']) {
     await expect(page.locator('#appHeader')).toBeHidden();
     expect(await page.evaluate(() => sessionStorage.getItem('flink_session_token'))).toBeNull();
     await page.getByLabel('Current password', { exact: true }).fill('demo-pass');
-    await page.getByRole('button', { name: 'Generate setup key' }).click();
+    await page.getByRole('button', { name: 'Show authenticator QR code' }).click();
     await page.getByLabel('New authenticator code').fill('123456');
     await page.getByRole('button', { name: 'Confirm authenticator' }).click();
     await expect(page.locator('#savedRecoveryCodes')).toContainText(code);
