@@ -189,6 +189,8 @@ var CONSTANTS = {
     MFA_ENROLLED: 'MFA_ENROLLED',
     MFA_VERIFIED: 'MFA_VERIFIED',
     MFA_DISABLED: 'MFA_DISABLED',
+    MFA_RESET_INTENT: 'MFA_RESET_INTENT',
+    MFA_RESET_COMPLETED: 'MFA_RESET_COMPLETED',
     ACCOUNT_UNLOCKED: 'ACCOUNT_UNLOCKED',
     SETTINGS_CHANGED: 'SETTINGS_CHANGED',
     EXPORT_CREATED: 'EXPORT_CREATED',
@@ -1091,6 +1093,7 @@ const ACTION_PERMISSIONS = {
   'users.makePassive': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN], isWrite: true },
   'users.activate': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN], isWrite: true },
   'users.resetPassword': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN], isWrite: true },
+  'users.resetMfa': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN], isWrite: true },
   'users.unlock': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN], isWrite: true },
   'users.forceLogout': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN], isWrite: true },
   'users.assignWorkspace': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN, CONSTANTS.ROLES.ADMIN], isWrite: true },
@@ -1186,6 +1189,7 @@ const PRIVILEGED_STEP_UP_ACTIONS = new Set([
   'users.makePassive',
   'users.activate',
   'users.resetPassword',
+  'users.resetMfa',
   'users.unlock',
   'users.forceLogout',
   'users.assignWorkspace',
@@ -1513,6 +1517,9 @@ function dispatchAction_(action, data) {
 
     case 'users.resetPassword':
       return AuthService.resetPasswordByAdmin(authContext, payload.targetUserId, payload.temporaryPassword);
+
+    case 'users.resetMfa':
+      return AuthService.resetMfaByAdmin(authContext, payload.targetUserId, payload.reason);
 
     /* ---------------- REQUESTS ---------------- */
     case 'requests.submit':
@@ -5412,6 +5419,143 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
       };
     } finally {
       lock.releaseLock();
+    }
+  },
+
+  /**
+   * Administrative authenticator replacement.
+   *
+   * Mandatory MFA is never disabled by this operation. It clears the target's
+   * enrolled authenticator and recovery codes so the next sign-in lands in the
+   * restricted MFA_ENROLLMENT session, where the only permitted actions are
+   * validateSession / enrollMfa / confirmMfa / logout. The user therefore has to
+   * bind a new authenticator before any application data is reachable.
+   *
+   * Secrets are never written to the audit trail: only whether the account state
+   * changed. Intent is recorded before the mutation and completion after it, so an
+   * interrupted replacement is visible rather than silent.
+   */
+  resetMfaByAdmin(superAdminContext, targetUserId, reason = '') {
+    AuthorizationService.assertRole(superAdminContext, [CONSTANTS.ROLES.SUPER_ADMIN]);
+    if (typeof targetUserId !== 'string' || !targetUserId.trim()) {
+      throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'targetUserId is required.', 400);
+    }
+    const cleanTargetId = targetUserId.trim();
+    if (cleanTargetId === String(superAdminContext.userId)) {
+      throw new AppError(
+        ERROR_CODES.VALIDATION_ERROR,
+        'Replace your own authenticator from your Account page instead.',
+        400
+      );
+    }
+
+    const lock = LockService.getScriptLock();
+    lock.waitLock(10000);
+    try {
+      const targetAccount = MasterRepository.findAccountById(cleanTargetId);
+      if (!targetAccount) throw new AppError(ERROR_CODES.NOT_FOUND, 'Target account not found.');
+      if (
+        targetAccount.Status === CONSTANTS.ACCOUNT_STATUS.ARCHIVED ||
+        targetAccount.Status === CONSTANTS.ACCOUNT_STATUS.DELETED
+      ) {
+        throw new AppError(
+          ERROR_CODES.CONFLICT,
+          'Archived or deleted accounts cannot have their authenticator replaced.',
+          409
+        );
+      }
+
+      const targetCred = MasterRepository.getCredentials(cleanTargetId);
+      if (!targetCred) {
+        throw new AppError(ERROR_CODES.NOT_FOUND, 'Target credentials record not found.');
+      }
+
+      const before = {
+        mfaEnabled: targetCred.MfaEnabled === true || targetCred.MfaEnabled === 'TRUE',
+        authenticatorBound: !!targetCred.TotpSecret,
+        pendingEnrollment: !!targetCred.PendingTotpSecret,
+        recoveryCodesActive: !!targetCred.RecoveryJSON
+      };
+      const after = {
+        mfaEnabled: false,
+        authenticatorBound: false,
+        pendingEnrollment: false,
+        recoveryCodesActive: false,
+        sessionsRevoked: true,
+        reason: String(reason || '').slice(0, 500)
+      };
+
+      // Fail closed: no audit trail means no mutation.
+      this._requireAdminSecurityAudit(
+        superAdminContext,
+        CONSTANTS.AUDIT_EVENTS.MFA_RESET_INTENT,
+        cleanTargetId,
+        before,
+        after
+      );
+
+      MasterRepository.updateCredentials(cleanTargetId, {
+        MfaEnabled: false,
+        TotpSecret: '',
+        PendingTotpSecret: '',
+        LastSuccessfulTotpStep: '',
+        RecoveryJSON: ''
+      });
+
+      MasterRepository.updateAccount(cleanTargetId, {
+        Status:
+          targetAccount.Status === CONSTANTS.ACCOUNT_STATUS.LOCKED
+            ? CONSTANTS.ACCOUNT_STATUS.ACTIVE
+            : targetAccount.Status,
+        UpdatedAt: new Date().toISOString(),
+        UpdatedBy: superAdminContext.userId
+      });
+
+      // Rotates the account epoch, so every existing session is invalid at once.
+      SessionService.revokeAllUserSessions(cleanTargetId);
+      this._deleteMfaChallenge(cleanTargetId);
+
+      if (typeof SpreadsheetApp !== 'undefined' && SpreadsheetApp.flush) {
+        try { SpreadsheetApp.flush(); } catch (flushErr) {}
+      }
+
+      this._requireAdminSecurityAudit(
+        superAdminContext,
+        CONSTANTS.AUDIT_EVENTS.MFA_RESET_COMPLETED,
+        cleanTargetId,
+        before,
+        after
+      );
+
+      return {
+        ok: true,
+        message:
+          `Authenticator replaced for ${targetAccount.Username}. ` +
+          'The user must sign in and enroll a new authenticator. MFA remains mandatory.'
+      };
+    } finally {
+      lock.releaseLock();
+    }
+  },
+
+  _requireAdminSecurityAudit(actorContext, action, targetUserId, before, after) {
+    const ok = MasterRepository.logGlobalAudit({
+      ActorUserID: actorContext.userId,
+      ActorRole: actorContext.role,
+      WorkspaceID: 'MASTER',
+      EntityType: 'USER_SECURITY',
+      EntityID: targetUserId,
+      Action: action,
+      BeforeJSON: before,
+      AfterJSON: after,
+      Reason: 'Administrative authenticator replacement; secrets excluded'
+    });
+    if (!ok) {
+      throw new AppError(
+        ERROR_CODES.CRYPTO_FAILURE,
+        'Security audit is unavailable. Please retry.',
+        503
+      );
     }
   },
 

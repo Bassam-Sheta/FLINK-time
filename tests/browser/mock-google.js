@@ -347,6 +347,77 @@
         };
       }
 
+      case 'auth.stepUp':
+        return {
+          sessionToken: 'SESSION-STEPUP',
+          stepUpToken: 'STEPUP-TOKEN',
+          stepUpExpiresAt: new Date(Date.now() + 300000).toISOString()
+        };
+
+      case 'users.list':
+        return [
+          {
+            UserID: 'U0',
+            Username: 'rootadmin',
+            DisplayName: 'System Owner',
+            Role: 'SUPER_ADMIN',
+            Status: 'ACTIVE',
+            PrimaryWorkspaceID: 'W1'
+          },
+          {
+            UserID: 'U-LOCKED',
+            Username: 'locked.user',
+            DisplayName: 'Locked User',
+            Role: 'USER',
+            Status: 'LOCKED',
+            PrimaryWorkspaceID: 'W1'
+          }
+        ];
+
+      case 'users.resetMfa':
+        return {
+          ok: true,
+          message:
+            'Authenticator replaced for locked.user. The user must sign in and enroll a ' +
+            'new authenticator. MFA remains mandatory.'
+        };
+
+      case 'users.unlock':
+        return { ok: true };
+
+      case 'system.diagnostics':
+        return {
+          platformVersion: '2.0.0',
+          schemaVersion: '7',
+          masterSpreadsheetId: 'MASTER-MOCK',
+          activeSessionsCount: 3,
+          triggersHealthy: true,
+          workspaces: [{
+            name: 'Cairo Operations',
+            spreadsheetId: 'WS-MOCK-1',
+            memberCount: 2,
+            timeEntryCount: 1
+          }]
+        };
+
+      case 'audit.verifyChain':
+        return { ok: true, entriesChecked: 42, brokenAt: null };
+
+      case 'audit.listCheckpoints':
+        return [{ CheckpointID: 'CHK-1', RowCount: 42 }];
+
+      case 'clients.create':
+        return { ok: true, ClientID: 'CLI-1' };
+
+      case 'tasks.create':
+        return { ok: true, TaskID: 'TSK-1' };
+
+      case 'tags.create':
+        return { ok: true, TagID: 'TAG-1' };
+
+      case 'projects.update':
+        return { ok: true, ProjectID: payload.projectId || 'P1' };
+
       default:
         throw new Error('Mock backend does not implement action: ' + action);
     }

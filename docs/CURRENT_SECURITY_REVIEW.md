@@ -104,3 +104,37 @@ documents residual exposure in `docs/DEPENDENCY_REVIEW.md`; its audit gate still
 fails. WP2 now passes 285 unit and 7 mocked browser tests, with mandatory MFA also
 shown as enabled/read-only in the settings catalog. Migration/integration gates
 remain open.
+
+## Follow-up — 2026-10-18: GUI coverage and administrative authenticator reset
+
+The review above is a 2026-10-06 snapshot and is left in place. Two things it did not
+settle are now closed on `main`.
+
+**No administrative authenticator reset existed.** Disabling MFA stays impossible —
+`AuthService.disableMfa` always returns 403 and `MFA_REQUIRED` is a read-only global
+setting. New action `users.resetMfa` performs a *replacement* instead: a Super Admin
+clears the target's enrolled authenticator and recovery codes, which forces the next
+sign-in into the restricted `MFA_ENROLLMENT` session where the user must bind a new
+authenticator. Mandatory MFA is preserved, all sessions are revoked by rotating the
+account epoch, a stale MFA challenge is deleted, a locked account is unlocked, and the
+change is attributable through `MFA_RESET_INTENT` / `MFA_RESET_COMPLETED` audit
+records carrying before/after account state with no secrets. The mutation fails closed
+if the audit trail is unavailable, and the acting Super Admin cannot use it on their
+own account.
+
+**The GUI did not reach every server capability.** Fourteen declared actions had no
+control in the shipped page (timesheet reopen, audit chain tools, integrity audit,
+capacity, job dispatch, rollup rebuild, backup prune, setup finalize, bulk entry
+actions, client/project/task/tag writes) and the page's privileged-action list had
+drifted from the server's, so `settings.patch`, `backups.prune` and
+`jobs.dispatchBackups` were sent without the step-up token the server demands and were
+rejected with 403. All 89 declared actions now have a control, the client and server
+step-up lists are asserted identical, and `auth.disableMfa` is the single documented
+exception. The Super Admin console collects users, timesheets, projects, backups,
+security and maintenance in one page.
+
+Evidence: **665/665 unit tests** (17 new) and **31/31 mocked Chromium tests** (5 new),
+plus `node scripts/embed-local-libraries.js --check` and `git diff --check`. These
+remain offline checks against mocked Google RPC; the rows above about session-cache
+freshness, granular manager grants, bounded jobs/reports, checkpoint retention and
+live acceptance are unchanged and still open. Nothing is deployed.
