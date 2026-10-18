@@ -41,6 +41,7 @@ function fixture(initialEntries = []) {
   let clearCalls = 0;
 
   global.AppError = AppError;
+  global.MasterRepository = { getWorkspace: () => ({ WorkspaceID: 'W1', Status: 'ACTIVE', PartitionPolicy: '' }) };
   global.ERROR_CODES = { NOT_FOUND:'NOT_FOUND' };
   global.CONSTANTS = {
     WORKSPACE_TABS:{

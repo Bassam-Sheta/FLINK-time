@@ -54,13 +54,31 @@ function fixture(options = {}) {
   };
   const recorded = {
     listTimeEntriesFilters: [],
-    listTimesheetsFilters: []
+    listTimesheetsFilters: [],
+    timerLookups: [],
+    memberLookups: [],
+    projectLookups: [],
+    memberLists: 0,
+    projectLists: 0
   };
   global.MasterRepository = {
     listRequests() { return []; },
     getTableData() { return { rows:[] }; }
   };
   global.SheetRepository = {
+    getActiveTimer(ws, userId) {
+      if (options.timerError) throw new Error('timer read failed');
+      recorded.timerLookups.push([ws, userId]);
+      return (options.timers || []).find(t => t.UserID === userId) || null;
+    },
+    getMember(ws, userId) {
+      recorded.memberLookups.push([ws, userId]);
+      return { UserID: userId, DisplayName: userId === 'U1' ? 'User One' : 'User Two' };
+    },
+    getProject(ws, projectId) {
+      recorded.projectLookups.push([ws, projectId]);
+      return { ProjectID: projectId, ProjectName: 'Project One' };
+    },
     listTimeEntries(ws, filters = {}) {
       recorded.listTimeEntriesFilters.push(filters);
       if (options.entriesError) throw new Error('entry read failed');
@@ -74,12 +92,14 @@ function fixture(options = {}) {
       return { rows:[] };
     },
     listMembers() {
+      recorded.memberLists++;
       return [
         { UserID:'U1', DisplayName:'User One' },
         { UserID:'U2', DisplayName:'User Two' }
       ];
     },
     listProjects() {
+      recorded.projectLists++;
       return [{ ProjectID:'P1', ProjectName:'Project One' }];
     },
     listTimesheets(ws, filters = {}) {
@@ -122,6 +142,47 @@ test('dashboard today/week totals match raw entries and exclude historical weeks
 
   assert.equal(result.todayTrackedHours, 3);
   assert.equal(result.weekTrackedHours, 3.5);
+});
+
+test('self-scoped radar uses point lookups instead of transferring coworkers and every project', () => {
+  const dashboard = fixture({ timers: [
+    { TimerID: 'T2', UserID: 'U2', ProjectID: 'P2', StartedAtUTC: '2026-09-29T07:00:00Z' },
+    { TimerID: 'T1', UserID: 'U1', ProjectID: 'P1', StartedAtUTC: '2026-09-29T07:00:00Z' }
+  ] });
+  const result = dashboard.getLiveWorkforceRadar({ userId: 'U1', role: 'USER' }, 'W1');
+  assert.deepEqual(result.workers.map(w => [w.userId, w.userName, w.projectName]), [['U1', 'User One', 'Project One']]);
+  assert.deepEqual(dashboard._testRecorded.timerLookups, [['W1', 'U1']]);
+  assert.deepEqual(dashboard._testRecorded.memberLookups, [['W1', 'U1']]);
+  assert.deepEqual(dashboard._testRecorded.projectLookups, [['W1', 'P1']]);
+  assert.equal(dashboard._testRecorded.memberLists, 0);
+  assert.equal(dashboard._testRecorded.projectLists, 0);
+});
+
+test('idle radar does not load member/project names for either ordinary users or managers', () => {
+  for (const role of ['USER', 'ADMIN', 'SUPER_ADMIN']) {
+    const dashboard = fixture();
+    assert.equal(dashboard.getLiveWorkforceRadar({ userId: 'U1', role }, 'W1').activeCount, 0);
+    assert.equal(dashboard._testRecorded.memberLists, 0, role);
+    assert.equal(dashboard._testRecorded.projectLists, 0, role);
+    assert.equal(dashboard._testRecorded.memberLookups.length, 0, role);
+    assert.equal(dashboard._testRecorded.projectLookups.length, 0, role);
+  }
+});
+
+test('manager radar still returns all visible workers and names', () => {
+  const dashboard = fixture({ timers: [
+    { TimerID: 'T1', UserID: 'U1', ProjectID: 'P1' },
+    { TimerID: 'T2', UserID: 'U2', ProjectID: 'P1' }
+  ] });
+  const result = dashboard.getLiveWorkforceRadar({ userId: 'A1', role: 'ADMIN' }, 'W1');
+  assert.deepEqual(result.workers.map(w => w.userName), ['User One', 'User Two']);
+  assert.equal(dashboard._testRecorded.timerLookups.length, 0);
+});
+
+test('self-scoped radar still fails closed on storage errors', () => {
+  const dashboard = fixture({ timerError: true });
+  assert.throws(() => dashboard.getLiveWorkforceRadar({ userId: 'U1', role: 'USER' }, 'W1'),
+    error => error.code === 'SERVER_BUSY' && error.statusCode === 503);
 });
 
 test('USER dashboard is self-scoped even when workspace contains coworkers', () => {

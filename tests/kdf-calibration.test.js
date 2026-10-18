@@ -65,10 +65,7 @@ test('login upgrades only after a valid password and atomic credential re-read',
 });
 
 test('Super Admin health UI exposes the calibration action', () => {
-  const html = fs.readFileSync(
-    path.resolve(__dirname, '../apps-script/SuperAdmin.html'),
-    'utf8'
-  );
+  const html = require('./helpers/portal-fixture').view('superadmin');
   assert.match(html, /Calibrate Password Hashing/);
   assert.match(html, /security\.calibrateKdf/);
   assert.match(html, /recommendedIterations/);

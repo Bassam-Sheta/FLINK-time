@@ -36,3 +36,19 @@ test('untrusted entry descriptions render as text, not executable HTML', async (
   await expect(page.locator('#myTimeHistoryBody img')).toHaveCount(0);
   expect(await page.evaluate(() => window.__xssExecuted)).toBeUndefined();
 });
+
+for (const route of ['/user', '/admin', '/superadmin']) {
+  test(`${route} still clears the current session on an authoritative authentication rejection`, async ({ page }) => {
+    await page.addInitScript(() => sessionStorage.setItem('flink_session_token', 'SESSION-EXISTING'));
+    await page.goto(route);
+    await expect(page.locator('#appHeader')).toBeVisible();
+    await page.evaluate(async () => {
+      window.rawApiCall = async () => { throw { code: 'AUTH_REQUIRED', message: 'Synthetic expired session' }; };
+      try { await apiCall('auth.validateSession'); } catch (err) { /* Expected rejection. */ }
+    });
+    await expect(page.locator('#appHeader')).toBeHidden();
+    await expect(page.locator('#passwordLoginForm')).toBeVisible();
+    await expect(page.locator('#loginAlert')).toContainText('session has expired');
+    expect(await page.evaluate(() => sessionStorage.getItem('flink_session_token'))).toBeNull();
+  });
+}

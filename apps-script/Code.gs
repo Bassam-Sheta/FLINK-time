@@ -855,20 +855,19 @@ function doGet(e) {
 
   // Otherwise serve the Google Workspace-Native Web Application UI
   try {
-    const viewFiles = {
-      user: 'User',
-      admin: 'Admin',
-      superadmin: 'SuperAdmin'
-    };
-    const fileName = viewFiles[view];
-    if (!fileName) {
+    const portalViews = ['user', 'admin', 'superadmin'];
+    if (!portalViews.includes(view)) {
       throw new AppError(
         ERROR_CODES.NOT_FOUND,
         'Unknown portal view. Use ?view=user, ?view=admin, or ?view=superadmin.',
         404
       );
     }
-    const template = HtmlService.createTemplateFromFile(fileName);
+    // One Portal.html serves every view. The server-side template includes only the
+    // requested view's markup, so the frame-embeddable employee page never carries
+    // privileged admin/super-admin markup or handlers in its payload.
+    const template = HtmlService.createTemplateFromFile('Portal');
+    template.portalView = view;
     const output = template.evaluate();
     const titles = {
       user: 'FLINK Time — Employee',
@@ -2190,6 +2189,232 @@ var IdentityService = (typeof global !== 'undefined' && global.IdentityService) 
   }
 };
 
+/* BEGIN LOCAL PASSWORD KDF */
+/*
+ * SJCL password-KDF subset (BSD-2-Clause), from 1.0.8, commit
+ * 2a6ed4a22449334de2dd9b4e960af679e0e87303. See docs/LOCAL_LIBRARIES.md.
+ * Only bit arrays, UTF-8/hex codecs, SHA-256, HMAC and PBKDF2 are included.
+ * No entropy collector, cipher, external service or persistent key cache.
+ *
+ * Copyright (c) 2009-2015, Emily Stark, Mike Hamburg and Dan Boneh at
+ * Stanford University. All rights reserved.
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ * 1. Redistributions of source code must retain the above copyright notice,
+ *    this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the documentation
+ *    and/or other materials provided with the distribution.
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
+ */
+var PasswordKdf_ = (function () {
+  'use strict';
+  var sjcl = { hash: {}, codec: {}, misc: {}, exception: { invalid: Error } };
+
+  // Unused bit-array operations/codecs are omitted; retained operations are
+  // retain the pinned algorithms, with compact formatting/control-flow cleanup.
+  sjcl.bitArray = {
+    concat: function (a1, a2) {
+      if (a1.length === 0 || a2.length === 0) return a1.concat(a2);
+      var last = a1[a1.length - 1], shift = sjcl.bitArray.getPartial(last);
+      if (shift === 32) return a1.concat(a2);
+      return sjcl.bitArray._shiftRight(a2, shift, last | 0, a1.slice(0, a1.length - 1));
+    },
+    bitLength: function (a) {
+      var l = a.length, x;
+      if (l === 0) return 0;
+      x = a[l - 1];
+      return (l - 1) * 32 + sjcl.bitArray.getPartial(x);
+    },
+    clamp: function (a, len) {
+      if (a.length * 32 < len) return a;
+      a = a.slice(0, Math.ceil(len / 32));
+      var l = a.length;
+      len = len & 31;
+      if (l > 0 && len) a[l - 1] = sjcl.bitArray.partial(len, a[l - 1] & 0x80000000 >> (len - 1), 1);
+      return a;
+    },
+    partial: function (len, x, _end) {
+      if (len === 32) return x;
+      return (_end ? x | 0 : x << (32 - len)) + len * 0x10000000000;
+    },
+    getPartial: function (x) { return Math.round(x / 0x10000000000) || 32; },
+    _shiftRight: function (a, shift, carry, out) {
+      var i, last2 = 0, shift2;
+      if (out === undefined) out = [];
+      for (; shift >= 32; shift -= 32) { out.push(carry); carry = 0; }
+      if (shift === 0) return out.concat(a);
+      for (i = 0; i < a.length; i++) {
+        out.push(carry | a[i] >>> shift);
+        carry = a[i] << (32 - shift);
+      }
+      last2 = a.length ? a[a.length - 1] : 0;
+      shift2 = sjcl.bitArray.getPartial(last2);
+      out.push(sjcl.bitArray.partial(shift + shift2 & 31, (shift + shift2 > 32) ? carry : out.pop(), 1));
+      return out;
+    }
+  };
+  sjcl.codec.utf8String = {
+    toBits: function (str) {
+      str = unescape(encodeURIComponent(str));
+      var out = [], i, tmp = 0;
+      for (i = 0; i < str.length; i++) {
+        tmp = tmp << 8 | str.charCodeAt(i);
+        if ((i & 3) === 3) { out.push(tmp); tmp = 0; }
+      }
+      if (i & 3) out.push(sjcl.bitArray.partial(8 * (i & 3), tmp));
+      return out;
+    }
+  };
+  sjcl.codec.hex = {
+    fromBits: function (arr) {
+      var out = '', i;
+      for (i = 0; i < arr.length; i++) out += ((arr[i] | 0) + 0xF00000000000).toString(16).substr(4);
+      return out.substr(0, sjcl.bitArray.bitLength(arr) / 4);
+    }
+  };
+  sjcl.hash.sha256 = function (hash) {
+    if (!this._key[0]) this._precompute();
+    if (hash) {
+      this._h = hash._h.slice(0);
+      this._buffer = hash._buffer.slice(0);
+      this._length = hash._length;
+    } else { this.reset(); }
+  };
+  sjcl.hash.sha256.hash = function (data) { return (new sjcl.hash.sha256()).update(data).finalize(); };
+  sjcl.hash.sha256.prototype = {
+    blockSize: 512,
+    reset: function () {
+      this._h = this._init.slice(0);
+      this._buffer = [];
+      this._length = 0;
+      return this;
+    },
+    update: function (data) {
+      if (typeof data === 'string') data = sjcl.codec.utf8String.toBits(data);
+      var i, b = this._buffer = sjcl.bitArray.concat(this._buffer, data),
+        ol = this._length, nl = this._length = ol + sjcl.bitArray.bitLength(data);
+      if (nl > 9007199254740991) throw new sjcl.exception.invalid('Cannot hash more than 2^53 - 1 bits');
+      if (typeof Uint32Array !== 'undefined') {
+        var c = new Uint32Array(b), j = 0;
+        for (i = 512 + ol - ((512 + ol) & 511); i <= nl; i += 512) {
+          this._block(c.subarray(16 * j, 16 * (j + 1)));
+          j += 1;
+        }
+        b.splice(0, 16 * j);
+      } else {
+        for (i = 512 + ol - ((512 + ol) & 511); i <= nl; i += 512) this._block(b.splice(0, 16));
+      }
+      return this;
+    },
+    finalize: function () {
+      var i, b = this._buffer, h = this._h;
+      b = sjcl.bitArray.concat(b, [sjcl.bitArray.partial(1, 1)]);
+      for (i = b.length + 2; i & 15; i++) b.push(0);
+      b.push(Math.floor(this._length / 0x100000000));
+      b.push(this._length | 0);
+      while (b.length) this._block(b.splice(0, 16));
+      this.reset();
+      return h;
+    },
+    _init: [],
+    _key: [],
+    _precompute: function () {
+      var i = 0, prime = 2, factor, isPrime;
+      function frac(x) { return (x - Math.floor(x)) * 0x100000000 | 0; }
+      for (; i < 64; prime++) {
+        isPrime = true;
+        for (factor = 2; factor * factor <= prime; factor++) {
+          if (prime % factor === 0) { isPrime = false; break; }
+        }
+        if (isPrime) {
+          if (i < 8) this._init[i] = frac(Math.pow(prime, 1 / 2));
+          this._key[i] = frac(Math.pow(prime, 1 / 3));
+          i++;
+        }
+      }
+    },
+    _block: function (w) {
+      var i, tmp, a, b, h = this._h, k = this._key,
+        h0 = h[0], h1 = h[1], h2 = h[2], h3 = h[3], h4 = h[4], h5 = h[5], h6 = h[6], h7 = h[7];
+      for (i = 0; i < 64; i++) {
+        if (i < 16) tmp = w[i];
+        else {
+          a = w[(i + 1) & 15]; b = w[(i + 14) & 15];
+          tmp = w[i & 15] = ((a >>> 7 ^ a >>> 18 ^ a >>> 3 ^ a << 25 ^ a << 14) +
+            (b >>> 17 ^ b >>> 19 ^ b >>> 10 ^ b << 15 ^ b << 13) + w[i & 15] + w[(i + 9) & 15]) | 0;
+        }
+        tmp = tmp + h7 + (h4 >>> 6 ^ h4 >>> 11 ^ h4 >>> 25 ^ h4 << 26 ^ h4 << 21 ^ h4 << 7) + (h6 ^ h4 & (h5 ^ h6)) + k[i];
+        h7 = h6; h6 = h5; h5 = h4; h4 = h3 + tmp | 0;
+        h3 = h2; h2 = h1; h1 = h0;
+        h0 = (tmp + ((h1 & h2) ^ (h3 & (h1 ^ h2))) + (h1 >>> 2 ^ h1 >>> 13 ^ h1 >>> 22 ^ h1 << 30 ^ h1 << 19 ^ h1 << 10)) | 0;
+      }
+      h[0] = h[0] + h0 | 0; h[1] = h[1] + h1 | 0;
+      h[2] = h[2] + h2 | 0; h[3] = h[3] + h3 | 0;
+      h[4] = h[4] + h4 | 0; h[5] = h[5] + h5 | 0;
+      h[6] = h[6] + h6 | 0; h[7] = h[7] + h7 | 0;
+    }
+  };
+  sjcl.misc.hmac = function (key, Hash) {
+    this._hash = Hash = Hash || sjcl.hash.sha256;
+    var exKey = [[], []], i, bs = Hash.prototype.blockSize / 32;
+    this._baseHash = [new Hash(), new Hash()];
+    if (key.length > bs) key = Hash.hash(key);
+    for (i = 0; i < bs; i++) {
+      exKey[0][i] = key[i] ^ 0x36363636;
+      exKey[1][i] = key[i] ^ 0x5C5C5C5C;
+    }
+    this._baseHash[0].update(exKey[0]); this._baseHash[1].update(exKey[1]);
+    this._resultHash = new Hash(this._baseHash[0]);
+  };
+  sjcl.misc.hmac.prototype.encrypt = sjcl.misc.hmac.prototype.mac = function (data) {
+    if (!this._updated) { this.update(data); return this.digest(data); }
+    throw new sjcl.exception.invalid('encrypt on already updated hmac called!');
+  };
+  sjcl.misc.hmac.prototype.reset = function () {
+    this._resultHash = new this._hash(this._baseHash[0]); this._updated = false;
+  };
+  sjcl.misc.hmac.prototype.update = function (data) { this._updated = true; this._resultHash.update(data); };
+  sjcl.misc.hmac.prototype.digest = function () {
+    var w = this._resultHash.finalize(), result = new (this._hash)(this._baseHash[1]).update(w).finalize();
+    this.reset(); return result;
+  };
+  sjcl.misc.pbkdf2 = function (password, salt, count, length, Prff) {
+    count = count || 10000;
+    if (length < 0 || count < 0) throw new sjcl.exception.invalid('invalid params to pbkdf2');
+    if (typeof password === 'string') password = sjcl.codec.utf8String.toBits(password);
+    if (typeof salt === 'string') salt = sjcl.codec.utf8String.toBits(salt);
+    Prff = Prff || sjcl.misc.hmac;
+    var prf = new Prff(password), u, ui, i, j, k, out = [], b = sjcl.bitArray;
+    for (k = 1; 32 * out.length < (length || 1); k++) {
+      u = ui = prf.encrypt(b.concat(salt, [k]));
+      for (i = 1; i < count; i++) {
+        ui = prf.encrypt(ui);
+        for (j = 0; j < ui.length; j++) u[j] ^= ui[j];
+      }
+      out = out.concat(u);
+    }
+    if (length) out = b.clamp(out, length);
+    return out;
+  };
+  return Object.freeze({
+    deriveHex: function (password, salt, iterations, keyLenBytes) {
+      return sjcl.codec.hex.fromBits(sjcl.misc.pbkdf2(password, salt, iterations, keyLenBytes * 8));
+    }
+  });
+})();
+/* END LOCAL PASSWORD KDF */
+
 /* ===== SecurityService.gs ===== */
 /**
  * FLINK Time & Workforce Platform — Cryptographic Security Service
@@ -2357,41 +2582,18 @@ var SecurityService = (typeof global !== 'undefined' && global.SecurityService) 
    * Standard RFC 2898 implementation compatible with Google Apps Script runtime.
    */
   pbkdf2Sync(password, salt, iterations = 10000, keyLenBytes = 32) {
+    if (!Number.isSafeInteger(iterations) || iterations < 1 || iterations > 1000000 ||
+        !Number.isSafeInteger(keyLenBytes) || keyLenBytes < 1 || keyLenBytes > 1024) {
+      throw new AppError(ERROR_CODES.CRYPTO_FAILURE, 'Invalid password derivation parameters.', 500);
+    }
     const nodeCrypto = this._getCrypto();
     if (nodeCrypto && nodeCrypto.pbkdf2Sync) {
       return nodeCrypto.pbkdf2Sync(password, salt, iterations, keyLenBytes, 'sha256').toString('hex');
     }
 
-    const hLen = 32;
-    const blockCount = Math.ceil(keyLenBytes / hLen);
-    const finalBlockLength = keyLenBytes - (blockCount - 1) * hLen;
-    const derived = [];
-    const passwordBytes = this._utf8Bytes(password);
-    const saltBytes = this._utf8Bytes(salt);
-
-    for (let i = 1; i <= blockCount; i++) {
-      const blockIndex = [
-        (i >>> 24) & 0xff,
-        (i >>> 16) & 0xff,
-        (i >>> 8) & 0xff,
-        i & 0xff
-      ];
-
-      let u = this.hmacSha256(passwordBytes, saltBytes.concat(blockIndex));
-      const t = Array.from(u);
-
-      for (let j = 1; j < iterations; j++) {
-        u = this.hmacSha256(passwordBytes, u);
-        for (let k = 0; k < hLen; k++) {
-          t[k] ^= u[k];
-        }
-      }
-
-      const take = i === blockCount ? finalBlockLength : hLen;
-      for (let m = 0; m < take; m++) derived.push(t[m] & 0xff);
-    }
-
-    return derived.map(b => b.toString(16).padStart(2, '0')).join('');
+    // Same PBKDF2-HMAC-SHA256 output/cost; reusable HMAC pad states stay local
+    // to this derivation instead of calling Utilities for every iteration.
+    return PasswordKdf_.deriveHex(String(password), String(salt), iterations, keyLenBytes);
   },
 
   getStoredPasswordMetadata(storedHashString) {
@@ -6821,6 +7023,7 @@ var SheetRepository = (typeof global !== 'undefined' && global.SheetRepository) 
    * Helper to retrieve tab data from a specific workspace sheet
    */
   getTableData(workspaceId, tabName) {
+    if (YearlyEntryStorage.handles(workspaceId, tabName)) return YearlyEntryStorage.table(workspaceId);
     const cacheKey = this._cacheKey(workspaceId, tabName);
     if (this._requestCache[cacheKey]) {
       return this._requestCache[cacheKey];
@@ -6860,6 +7063,7 @@ var SheetRepository = (typeof global !== 'undefined' && global.SheetRepository) 
    * Finds one row in a workspace tab matching a key column without reading the whole tab
    */
   findRowByKey(workspaceId, tabName, columnName, value, options = {}) {
+    if (YearlyEntryStorage.handles(workspaceId, tabName)) return YearlyEntryStorage.find(workspaceId, columnName, value, options);
     if (value === undefined || value === null || value === '') return null;
     const cacheKey = this._cacheKey(workspaceId, tabName);
     if (this._requestCache[cacheKey]) {
@@ -6923,7 +7127,8 @@ var SheetRepository = (typeof global !== 'undefined' && global.SheetRepository) 
   /**
    * Appends an entity row to a workspace tab
    */
-  appendRow(workspaceId, tabName, entity) {
+  appendRow(workspaceId, tabName, entity, actorContext = null) {
+    if (YearlyEntryStorage.handles(workspaceId, tabName)) return YearlyEntryStorage.append(workspaceId, entity, actorContext);
     const ss = WorkspaceRouter.resolveSpreadsheet(workspaceId);
     const sheet = ss.getSheetByName(tabName);
     if (!sheet) {
@@ -6948,7 +7153,11 @@ var SheetRepository = (typeof global !== 'undefined' && global.SheetRepository) 
   /**
    * Appends multiple entity rows in a single batch to a workspace tab
    */
-  appendRows(workspaceId, tabName, entities) {
+  appendRows(workspaceId, tabName, entities, actorContext = null) {
+    if (YearlyEntryStorage.handles(workspaceId, tabName)) {
+      if (!Array.isArray(entities) || entities.length > 250) throw YearlyDataFileService._conflict('Entry batch limit exceeded.');
+      return YearlyEntryStorage.locked(() => entities.map(entity => YearlyEntryStorage.append(workspaceId, entity, actorContext)));
+    }
     if (!entities || !entities.length) return [];
     const ss = WorkspaceRouter.resolveSpreadsheet(workspaceId);
     const sheet = ss.getSheetByName(tabName);
@@ -6983,7 +7192,8 @@ var SheetRepository = (typeof global !== 'undefined' && global.SheetRepository) 
   /**
    * Updates specific columns for a row index in a workspace tab
    */
-  updateRow(workspaceId, tabName, rowIndex, updates) {
+  updateRow(workspaceId, tabName, rowIndex, updates, actorContext = null) {
+    if (YearlyEntryStorage.handles(workspaceId, tabName)) return YearlyEntryStorage.update(workspaceId, rowIndex, updates, actorContext);
     const ss = WorkspaceRouter.resolveSpreadsheet(workspaceId);
     const sheet = ss.getSheetByName(tabName);
     const headers = this._getHeaders(workspaceId, tabName, sheet);
@@ -7020,6 +7230,7 @@ var SheetRepository = (typeof global !== 'undefined' && global.SheetRepository) 
    * Deletes a row by index (e.g. stopping an ActiveTimer)
    */
   deleteRow(workspaceId, tabName, rowIndex) {
+    if (YearlyEntryStorage.handles(workspaceId, tabName)) throw YearlyDataFileService._conflict('Time entries require audited soft deletion.');
     const ss = WorkspaceRouter.resolveSpreadsheet(workspaceId);
     const sheet = ss.getSheetByName(tabName);
     sheet.deleteRow(rowIndex);
@@ -7030,6 +7241,7 @@ var SheetRepository = (typeof global !== 'undefined' && global.SheetRepository) 
    * Deletes a contiguous block of rows from a workspace tab
    */
   deleteRows(workspaceId, tabName, startRow, howMany) {
+    if (YearlyEntryStorage.handles(workspaceId, tabName)) throw YearlyDataFileService._conflict('Time entries require audited soft deletion.');
     const count = Number(howMany || 0);
     if (!Number.isInteger(startRow) || startRow < 2 || !Number.isInteger(count) || count < 1) {
       throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'Invalid batch row deletion request.', 400);
@@ -7213,15 +7425,15 @@ var SheetRepository = (typeof global !== 'undefined' && global.SheetRepository) 
     return entry && entry.Status !== 'DELETED' ? entry : null;
   },
 
-  createTimeEntry(workspaceId, entryData) {
-    return this.appendRow(workspaceId, CONSTANTS.WORKSPACE_TABS.TIME_ENTRIES, entryData);
+  createTimeEntry(workspaceId, entryData, actorContext = null) {
+    return this.appendRow(workspaceId, CONSTANTS.WORKSPACE_TABS.TIME_ENTRIES, entryData, actorContext);
   },
 
-  updateTimeEntry(workspaceId, entryId, updates) {
+  updateTimeEntry(workspaceId, entryId, updates, actorContext = null) {
     const entry = this.getEntryAnyStatus(workspaceId, entryId);
     if (!entry) throw new AppError(ERROR_CODES.NOT_FOUND, `Time entry ${entryId} not found.`);
-    this.updateRow(workspaceId, CONSTANTS.WORKSPACE_TABS.TIME_ENTRIES, entry._rowIndex, updates);
-    return { ...entry, ...updates };
+    const updated = this.updateRow(workspaceId, CONSTANTS.WORKSPACE_TABS.TIME_ENTRIES, entry._rowIndex, updates, actorContext);
+    return updated || { ...entry, ...updates };
   },
 
   /* ------------------- TIMESHEETS & APPROVALS ------------------- */
@@ -7441,7 +7653,7 @@ var WorkspaceRouter = (typeof global !== 'undefined' && global.WorkspaceRouter) 
 };
 
 /* ===== YearlyDataFileService.gs ===== */
-// Allocation foundation only. Application repositories are not routed here yet.
+// Physical file allocator shared by owner preparation and activated entry storage.
 // Registry and physical metadata, never cache, define immutable file locations.
 var YearlyDataFileService = {
   registryTab: 'DataFileRegistry',
@@ -7457,6 +7669,7 @@ var YearlyDataFileService = {
     if (typeof workspaceId !== 'string' || !/^[A-Za-z0-9_-]{1,100}$/.test(workspaceId)) {
       throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'Invalid workspace ID.', 400);
     }
+    if (MasterRepository._invalidateTable) MasterRepository._invalidateTable(CONSTANTS.MASTER_TABS.WORKSPACES);
     const ws = MasterRepository.findRowByKey(CONSTANTS.MASTER_TABS.WORKSPACES, 'WorkspaceID', workspaceId);
     if (!ws || ws.WorkspaceID !== workspaceId || ws.Status !== CONSTANTS.WORKSPACE_STATUS.ACTIVE || !ws.SpreadsheetID) {
       throw this._conflict('An ACTIVE workspace with registered Core storage is required.');
@@ -7476,10 +7689,11 @@ var YearlyDataFileService = {
     return total;
   },
   _audit(owner, workspaceId, action, before, after, operationId) {
-    if (!MasterRepository.logGlobalAudit({ ActorUserID: owner, ActorRole: 'INSTALLATION_OWNER',
+    const actor = typeof owner === 'string' ? { userId: owner, role: 'INSTALLATION_OWNER' } : owner;
+    if (!MasterRepository.logGlobalAudit({ ActorUserID: actor.userId, ActorRole: actor.role,
       WorkspaceID: workspaceId, EntityType: 'DATA_FILE', EntityID: operationId,
       Action: action, CorrelationID: operationId, BeforeJSON: before, AfterJSON: after,
-      Reason: 'Owner-only yearly Data allocation; application routing not activated' })) {
+      Reason: 'Yearly storage transition' })) {
       throw new AppError(ERROR_CODES.CRYPTO_FAILURE, 'Data-file audit unavailable.', 503);
     }
     SpreadsheetApp.flush();
@@ -7553,18 +7767,18 @@ var YearlyDataFileService = {
   _info(record) {
     return this.infoHeaders.map(header => record[header]);
   },
-  _assertPrivate(book) {
+  _assertPrivate(book, expectedEmail = '') {
     const file = DriveApp.getFileById(book.getId());
     const owner = file.getOwner();
-    const expectedOwner = IdentityService.normalizeEmail(IdentityService.assertInstallationOwner());
+    const expectedOwner = IdentityService.normalizeEmail(expectedEmail || IdentityService.assertInstallationOwner());
     if (file.isTrashed() || file.getSharingAccess() !== DriveApp.Access.PRIVATE ||
         !owner || IdentityService.normalizeEmail(owner.getEmail()) !== expectedOwner ||
         file.getEditors().length || file.getViewers().length) {
       throw new AppError(ERROR_CODES.PERMISSION_DENIED, 'Data files must remain private, unshared infrastructure. Owner review is required.', 403);
     }
   },
-  _initialize(book, record) {
-    this._assertPrivate(book);
+  _initialize(book, record, expectedEmail = '') {
+    this._assertPrivate(book, expectedEmail);
     let info = book.getSheetByName('DataFileInfo');
     if (!info) info = book.insertSheet('DataFileInfo');
     if (info.getLastRow() === 0) {
@@ -7593,7 +7807,7 @@ var YearlyDataFileService = {
     const defaultSheet = book.getSheetByName('Sheet1');
     if (defaultSheet && defaultSheet.getLastRow() === 0) book.deleteSheet(defaultSheet);
     SpreadsheetApp.flush();
-    this._verify(book, record);
+    this._verify(book, record, expectedEmail);
   },
   _verifyInfo(book, record, strictGrid = true) {
     const sheet = book.getSheetByName('DataFileInfo');
@@ -7604,8 +7818,8 @@ var YearlyDataFileService = {
       throw this._conflict('Data-file ownership/cohort metadata does not match its registry.');
     }
   },
-  _verify(book, record) {
-    this._assertPrivate(book);
+  _verify(book, record, expectedEmail = '') {
+    this._assertPrivate(book, expectedEmail);
     this._verifyInfo(book, record);
     for (const tab of this.dataTabs) this._assertHeaders(book.getSheetByName(tab), WORKSPACE_SCHEMA[tab]);
   },
@@ -7613,17 +7827,21 @@ var YearlyDataFileService = {
     return { workspaceId: record.WorkspaceID, coreSpreadsheetId: record.CoreSpreadsheetID,
       year: record.Year, part: record.Part, spreadsheetId: record.SpreadsheetID };
   },
-  prepare(workspaceId, year, tab, additionalRows) {
-    const owner = IdentityService.assertInstallationOwner();
+  prepare(workspaceId, year, tab, additionalRows, runtimeActor = null) {
+    const expectedEmail = runtimeActor ? YearlyEntryStorage.runtimeOwner() : IdentityService.assertInstallationOwner();
+    const owner = runtimeActor || expectedEmail;
     if (!Number.isSafeInteger(year) || year < 1970 || year > 9999 || !this.dataTabs.includes(tab) ||
         !Number.isSafeInteger(additionalRows) || additionalRows < 1 || additionalRows > 250) {
       throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'A valid year, Data tab and 1-250 pending rows are required.', 400);
     }
     const lock = LockService.getScriptLock();
-    if (!lock.tryLock(1000)) throw new AppError(ERROR_CODES.SERVER_BUSY, 'Data allocation is busy. Retry.', 503);
+    const acquired = !lock.hasLock();
+    if (runtimeActor && acquired) throw this._conflict('Entry allocation requires the writer lock.');
+    if (acquired && !lock.tryLock(1000)) throw new AppError(ERROR_CODES.SERVER_BUSY, 'Data allocation is busy. Retry.', 503);
     try {
-      IdentityService.assertInstallationOwner();
+      if (!runtimeActor) IdentityService.assertInstallationOwner();
       const ws = this._workspace(workspaceId);
+      if (runtimeActor && ws.PartitionPolicy !== YearlyEntryStorage.policy) throw this._conflict('Yearly entry routing is not active.');
       const core = SpreadsheetApp.openById(ws.SpreadsheetID);
       const registry = this._registry(core, workspaceId, owner);
       let record = registry.records.filter(row => row.Year === year).sort((a, b) => b.Part - a.Part)[0];
@@ -7631,10 +7849,10 @@ var YearlyDataFileService = {
       if (record && record.State === 'PREPARING') {
         if (!record.SpreadsheetID) throw this._conflict('Uncertain file creation. Inspect the recorded operation before retrying; no file will be recreated automatically.');
         book = SpreadsheetApp.openById(record.SpreadsheetID);
-        this._initialize(book, record);
+        this._initialize(book, record, expectedEmail);
       } else if (record) {
         book = SpreadsheetApp.openById(record.SpreadsheetID);
-        this._verify(book, record);
+        this._verify(book, record, expectedEmail);
         const sheet = book.getSheetByName(tab);
         const growth = Math.max(0, sheet.getLastRow() + additionalRows - sheet.getMaxRows());
         if (this._allocated(book) + growth * sheet.getMaxColumns() >= this.cellBoundary) book = null;
@@ -7654,7 +7872,7 @@ var YearlyDataFileService = {
         record.SpreadsheetID = book.getId();
         if (!record.SpreadsheetID || record.SpreadsheetID === core.getId()) throw this._conflict('Unexpected created file identity.');
         this._writeRegistry(core, registry.sheet, record);
-        this._initialize(book, record);
+        this._initialize(book, record, expectedEmail);
       }
       if (record.State !== 'READY') {
         const readyAfter = { ...this._location(record), state: 'READY' };
@@ -7676,7 +7894,7 @@ var YearlyDataFileService = {
       this._audit(owner, workspaceId, 'DATA_FILE_ALLOCATION_COMPLETED', before, after, allocationId);
       return this._location(record);
     } finally {
-      try { SpreadsheetApp.flush(); } finally { lock.releaseLock(); }
+      try { SpreadsheetApp.flush(); } finally { if (acquired) lock.releaseLock(); }
     }
   },
   resolve(location) {
@@ -7696,6 +7914,425 @@ var YearlyDataFileService = {
 /** Owner/editor-only preparation; does not migrate or reroute application data. */
 function prepareYearlyDataFile_(workspaceId, year, tabName, additionalRows) {
   return YearlyDataFileService.prepare(workspaceId, year, tabName, additionalRows);
+}
+
+/* ===== YearlyEntryStorage.gs ===== */
+// One durable slot is sufficient because every routed writer holds ScriptLock.
+// Recovery repairs audit evidence only; it never replays or rolls back entry data.
+var YearlyEntryMutation = {
+  tab: 'EntryMutationCheckpoint',
+  headers: ['WorkspaceID', 'CoreSpreadsheetID', 'CheckpointJSON', 'CheckpointHash'],
+  maxPayload: 45000,
+  hash(record) {
+    const values = this.headers.slice(0, -1).map(key => record[key]);
+    return Array.from(SecurityService.hmacSha256(SecurityService.getPepper() + '_FLINK_ENTRY_MUTATION_V1', JSON.stringify(values)))
+      .map(byte => (byte < 0 ? byte + 256 : byte).toString(16).padStart(2, '0')).join('');
+  },
+  assertLock() {
+    if (!LockService.getScriptLock().hasLock()) throw YearlyDataFileService._conflict('Entry recovery requires the writer lock.');
+  },
+  read(core, workspaceId, owner, expectedCoreId = core.getId()) {
+    const sheet = core.getSheetByName(this.tab);
+    YearlyDataFileService._assertHeaders(sheet, this.headers, false);
+    if (sheet.getLastRow() !== 2) throw YearlyDataFileService._conflict('Entry mutation checkpoint is missing or ambiguous. Owner reconciliation is required.');
+    const values = sheet.getRange(2, 1, 1, this.headers.length).getValues()[0];
+    const record = Object.fromEntries(this.headers.map((key, i) => [key, values[i]]));
+    if (record.WorkspaceID !== workspaceId || record.CoreSpreadsheetID !== expectedCoreId ||
+        typeof record.CheckpointJSON !== 'string' || record.CheckpointJSON.length > this.maxPayload ||
+        typeof record.CheckpointHash !== 'string' || !/^[a-f0-9]{64}$/.test(record.CheckpointHash) ||
+        !SecurityService.constantTimeEquals(record.CheckpointHash, this.hash(record))) {
+      throw YearlyDataFileService._conflict('Entry mutation checkpoint authentication failed.');
+    }
+    let payload;
+    try { payload = JSON.parse(record.CheckpointJSON); } catch (_) { throw YearlyDataFileService._conflict('Invalid entry mutation checkpoint.'); }
+    if (!payload || payload.owner !== owner || !Object.prototype.hasOwnProperty.call(payload, 'pending')) {
+      throw YearlyDataFileService._conflict('Entry mutation checkpoint owner or state is invalid.');
+    }
+    if (payload.pending !== null) this.validate(payload.pending, workspaceId, expectedCoreId);
+    return { sheet, record, pending: payload.pending };
+  },
+  validate(pending, workspaceId, coreId) {
+    if (!pending || !['APPEND', 'UPDATE'].includes(pending.action) ||
+        typeof pending.operationId !== 'string' || !/^[A-Za-z0-9._:-]{1,128}$/.test(pending.operationId)) {
+      throw YearlyDataFileService._conflict('Invalid pending entry mutation.');
+    }
+    YearlyEntryStorage.actor(pending.actor);
+    const snapshots = pending.action === 'APPEND' ? [pending.after] : [pending.before, pending.after];
+    if (pending.action === 'APPEND' && pending.before !== null) throw YearlyDataFileService._conflict('Invalid append Before state.');
+    for (const row of snapshots) {
+      const location = row && row._rowIndex;
+      if (!row || typeof row.EntryID !== 'string' || !row.EntryID || !location || location.workspaceId !== workspaceId ||
+          location.coreSpreadsheetId !== coreId || location.entryId !== row.EntryID ||
+          typeof location.spreadsheetId !== 'string' || !location.spreadsheetId ||
+          !Number.isSafeInteger(location.rowIndex) || location.rowIndex < 2 ||
+          !Number.isSafeInteger(location.year) || !Number.isSafeInteger(location.part) ||
+          WORKSPACE_SCHEMA.TimeEntries.some(key => !Object.prototype.hasOwnProperty.call(row, key)) ||
+          location.rowHash !== SecurityService.hashToken(JSON.stringify(WORKSPACE_SCHEMA.TimeEntries.map(key => row[key])))) {
+        throw YearlyDataFileService._conflict('Pending entry snapshot is invalid.');
+      }
+    }
+    if (pending.before && (pending.before.EntryID !== pending.after.EntryID || pending.before.UserID !== pending.after.UserID ||
+        !this.sameLocation(pending.before._rowIndex, pending.after._rowIndex))) {
+      throw YearlyDataFileService._conflict('Pending entry identity or cohort changed.');
+    }
+  },
+  write(core, workspaceId, owner, pending) {
+    this.assertLock();
+    if (pending !== null) this.validate(pending, workspaceId, core.getId());
+    const record = { WorkspaceID: workspaceId, CoreSpreadsheetID: core.getId(), CheckpointJSON: JSON.stringify({ owner, pending }) };
+    if (record.CheckpointJSON.length > this.maxPayload) throw YearlyDataFileService._conflict('Entry mutation exceeds the recovery checkpoint budget.');
+    record.CheckpointHash = this.hash(record);
+    const sheet = core.getSheetByName(this.tab);
+    YearlyDataFileService._assertHeaders(sheet, this.headers, false);
+    sheet.getRange(2, 1, 1, this.headers.length).setValues([this.headers.map(key => record[key])]);
+    SpreadsheetApp.flush();
+    if (this.read(core, workspaceId, owner).record.CheckpointHash !== record.CheckpointHash) {
+      throw YearlyDataFileService._conflict('Entry mutation checkpoint persistence is uncertain.');
+    }
+  },
+  initialize(core, workspaceId, owner) {
+    this.assertLock();
+    let sheet = core.getSheetByName(this.tab);
+    if (sheet && sheet.getLastRow() >= 2) return this.read(core, workspaceId, owner);
+    if (sheet && sheet.getLastRow()) YearlyDataFileService._assertHeaders(sheet, this.headers, false);
+    if (YearlyDataFileService._allocated(core) + (sheet ? 0 : 26000) >= YearlyDataFileService.cellBoundary) {
+      throw YearlyDataFileService._conflict('Core capacity cannot accommodate the entry mutation checkpoint.');
+    }
+    const operation = Validation.generateId('ENTMUTSCHEMA');
+    const before = { checkpointPresent: !!sheet }, after = { coreSpreadsheetId: core.getId(), headers: this.headers };
+    YearlyDataFileService._audit(owner, workspaceId, 'ENTRY_MUTATION_SCHEMA_INTENT', before, after, operation);
+    if (!sheet) sheet = core.insertSheet(this.tab);
+    sheet.getRange(1, 1, 1, this.headers.length).setValues([this.headers]);
+    trimSheetToSchema_(sheet, this.headers.length, 2);
+    this.write(core, workspaceId, owner, null);
+    YearlyDataFileService._audit(owner, workspaceId, 'ENTRY_MUTATION_SCHEMA_COMPLETED', before, after, operation);
+    return this.read(core, workspaceId, owner);
+  },
+  sameLocation(a, b) {
+    return ['workspaceId', 'coreSpreadsheetId', 'spreadsheetId', 'year', 'part', 'entryId'].every(key => a[key] === b[key]);
+  },
+  matches(expected, actual) {
+    if (!expected || !actual) return expected === null && actual === null;
+    return this.sameLocation(expected._rowIndex, actual._rowIndex) &&
+      expected._rowIndex.rowHash === actual._rowIndex.rowHash;
+  },
+  recover(context, recoveryActor) {
+    this.assertLock();
+    const workspaceId = context.ws.WorkspaceID;
+    const { pending } = this.read(context.core, workspaceId, context.owner);
+    if (!pending) return { recovered: false };
+    const actual = YearlyEntryStorage.find(workspaceId, 'EntryID', pending.after.EntryID);
+    const outcome = this.matches(pending.after, actual) ? 'COMPLETED' : this.matches(pending.before, actual) ? 'NOT_APPLIED' : '';
+    if (!outcome) throw YearlyDataFileService._conflict('Pending entry matches neither signed snapshot. Owner reconciliation is required.');
+    const audit = (actor, action, before, after) => YearlyDataFileService._audit(actor, workspaceId, action, before, after, pending.operationId);
+    const recovery = { action: pending.action, mutationActor: pending.actor, outcome };
+    audit(recoveryActor, 'ENTRY_STORAGE_RECOVERY_INTENT', null, recovery);
+    // An earlier audit may have persisted despite an error. Correlated duplicates
+    // are safe; a missing original intent is not. Never infer a different actor.
+    audit(pending.actor, 'ENTRY_STORAGE_' + pending.action + '_INTENT', pending.before, pending.after);
+    audit(pending.actor, 'ENTRY_STORAGE_' + pending.action + '_' + outcome, pending.before,
+      outcome === 'COMPLETED' ? pending.after : pending.before);
+    audit(recoveryActor, 'ENTRY_STORAGE_RECOVERY_COMPLETED', null, recovery);
+    this.write(context.core, workspaceId, context.owner, null);
+    return { recovered: true, operationId: pending.operationId, outcome };
+  },
+  run(context, actor, action, before, after, apply) {
+    this.assertLock();
+    const workspaceId = context.ws.WorkspaceID;
+    if (this.read(context.core, workspaceId, context.owner).pending) throw YearlyDataFileService._conflict('Finish pending entry audit recovery before another mutation.');
+    const pending = { operationId: Validation.generateId('ENT' + action), action, actor, before, after };
+    this.write(context.core, workspaceId, context.owner, pending);
+    YearlyDataFileService._audit(actor, workspaceId, 'ENTRY_STORAGE_' + action + '_INTENT', before, after, pending.operationId);
+    apply();
+    SpreadsheetApp.flush();
+    const actual = YearlyEntryStorage.find(workspaceId, 'EntryID', after.EntryID);
+    if (!this.matches(after, actual)) throw YearlyDataFileService._conflict('Entry write could not be verified. Recovery evidence was retained.');
+    YearlyDataFileService._audit(actor, workspaceId, 'ENTRY_STORAGE_' + action + '_COMPLETED', before, after, pending.operationId);
+    this.write(context.core, workspaceId, context.owner, null);
+    return actual;
+  }
+};
+
+// Internal repository boundary. Caller authentication/resource authorization stay
+// in the existing services; execute-as-owner identity only authorizes Drive I/O.
+var YearlyEntryStorage = {
+  policy: 'YEARLY_ENTRIES_V1',
+  pendingPolicy: 'YEARLY_ENTRIES_PREPARING',
+  activationTab: 'EntryStorageActivation',
+  activationHeaders: ['WorkspaceID', 'CoreSpreadsheetID', 'OperationID', 'ActorUserID', 'BeforePolicy', 'TargetPolicy', 'State', 'CheckpointHash'],
+  activationHash(record) {
+    const values = this.activationHeaders.slice(0, -1).map(key => record[key]);
+    return Array.from(SecurityService.hmacSha256(SecurityService.getPepper() + '_FLINK_ENTRY_ACTIVATION_V1', JSON.stringify(values)))
+      .map(byte => (byte < 0 ? byte + 256 : byte).toString(16).padStart(2, '0')).join('');
+  },
+  activationState(core, workspaceId, owner, initialize = false, expectedCoreId = core.getId()) {
+    if (initialize && !LockService.getScriptLock().hasLock()) throw YearlyDataFileService._conflict('Activation initialization requires the writer lock.');
+    let sheet = core.getSheetByName(this.activationTab);
+    if (!sheet || sheet.getLastRow() === 0) {
+      if (!initialize) throw YearlyDataFileService._conflict('Activation checkpoint is missing. Owner recovery is required.');
+      if (YearlyDataFileService._allocated(core) + (sheet ? 0 : 26000) >= YearlyDataFileService.cellBoundary) {
+        throw YearlyDataFileService._conflict('Core capacity cannot accommodate the activation checkpoint.');
+      }
+      const operation = Validation.generateId('ENTSCHEMA');
+      const before = { activationTabPresent: !!sheet }, after = { coreSpreadsheetId: core.getId(), headers: this.activationHeaders };
+      YearlyDataFileService._audit(owner, workspaceId, 'ENTRY_STORAGE_ACTIVATION_SCHEMA_INTENT', before, after, operation);
+      if (!sheet) sheet = core.insertSheet(this.activationTab);
+      sheet.getRange(1, 1, 1, this.activationHeaders.length).setValues([this.activationHeaders]);
+      trimSheetToSchema_(sheet, this.activationHeaders.length, 2);
+      SpreadsheetApp.flush();
+      YearlyDataFileService._audit(owner, workspaceId, 'ENTRY_STORAGE_ACTIVATION_SCHEMA_COMPLETED', before, after, operation);
+    }
+    YearlyDataFileService._assertHeaders(sheet, this.activationHeaders, false);
+    if (sheet.getLastRow() === 1) {
+      if (!initialize) throw YearlyDataFileService._conflict('Activation checkpoint is incomplete. Owner recovery is required.');
+      trimSheetToSchema_(sheet, this.activationHeaders.length, 2);
+      return { sheet, record: null };
+    }
+    if (sheet.getLastRow() !== 2) throw YearlyDataFileService._conflict('Invalid activation checkpoint row count.');
+    const values = sheet.getRange(2, 1, 1, this.activationHeaders.length).getValues()[0];
+    const record = Object.fromEntries(this.activationHeaders.map((key, i) => [key, values[i]]));
+    if (record.WorkspaceID !== workspaceId || record.CoreSpreadsheetID !== expectedCoreId ||
+        record.ActorUserID !== owner || typeof record.OperationID !== 'string' || !/^[A-Za-z0-9._:-]{1,128}$/.test(record.OperationID) ||
+        record.BeforePolicy !== '' || record.TargetPolicy !== this.policy || !['PREPARING', 'COMPLETE'].includes(record.State) ||
+        typeof record.CheckpointHash !== 'string' || !/^[a-f0-9]{64}$/.test(record.CheckpointHash) ||
+        !SecurityService.constantTimeEquals(record.CheckpointHash, this.activationHash(record))) {
+      throw YearlyDataFileService._conflict('Activation checkpoint authentication or ownership failed.');
+    }
+    return { sheet, record };
+  },
+  writeActivation(core, workspaceId, owner, sheet, record) {
+    if (!LockService.getScriptLock().hasLock()) throw YearlyDataFileService._conflict('Activation checkpoint writes require the writer lock.');
+    const signed = { ...record, CheckpointHash: this.activationHash(record) };
+    sheet.getRange(2, 1, 1, this.activationHeaders.length).setValues([this.activationHeaders.map(key => signed[key])]);
+    SpreadsheetApp.flush();
+    const stored = this.activationState(core, workspaceId, owner).record;
+    if (stored.CheckpointHash !== signed.CheckpointHash) throw YearlyDataFileService._conflict('Activation checkpoint write could not be confirmed.');
+  },
+  assertActivationComplete(core, workspaceId, owner) {
+    const state = this.activationState(core, workspaceId, owner);
+    if (state.record.State !== 'COMPLETE') throw YearlyDataFileService._conflict('Activation completion requires owner recovery.');
+    return state;
+  },
+  freshWorkspace(workspaceId) {
+    if (MasterRepository._invalidateTable) MasterRepository._invalidateTable(CONSTANTS.MASTER_TABS.WORKSPACES);
+    if (MasterRepository._requestCache) delete MasterRepository._requestCache['WS:' + workspaceId];
+    return MasterRepository.getWorkspace(workspaceId);
+  },
+  handles(workspaceId, tab) {
+    if (tab !== 'TimeEntries' || typeof MasterRepository.getWorkspace !== 'function') return false;
+    const ws = this.freshWorkspace(workspaceId);
+    if (ws && ws.PartitionPolicy === this.pendingPolicy) throw YearlyDataFileService._conflict('Entry storage activation requires owner recovery.');
+    return !!ws && ws.PartitionPolicy === this.policy;
+  },
+  runtimeOwner() {
+    const owner = IdentityService.normalizeEmail(PropertiesService.getScriptProperties().getProperty('FLINK_INSTALL_OWNER_EMAIL'));
+    if (!owner || IdentityService.getEffectiveGoogleEmail(true) !== owner) {
+      throw new AppError(ERROR_CODES.PERMISSION_DENIED, 'Storage execution owner does not match the installation.', 403);
+    }
+    return owner;
+  },
+  locked(callback) {
+    const lock = LockService.getScriptLock(), acquired = !lock.hasLock();
+    if (acquired && !lock.tryLock(1000)) throw new AppError(ERROR_CODES.SERVER_BUSY, 'Entry storage is busy. Retry.', 503);
+    try {
+      // No cache read before waiting may authorize a write or choose its route.
+      if (MasterRepository._invalidateTable) MasterRepository._invalidateTable(CONSTANTS.MASTER_TABS.WORKSPACES);
+      if (MasterRepository._requestCache) {
+        for (const key of Object.keys(MasterRepository._requestCache)) if (key.indexOf('WS:') === 0) delete MasterRepository._requestCache[key];
+      }
+      return callback();
+    } finally {
+      try { SpreadsheetApp.flush(); } finally { if (acquired) lock.releaseLock(); }
+    }
+  },
+  context(workspaceId) {
+    const ws = YearlyDataFileService._workspace(workspaceId);
+    if (ws.PartitionPolicy !== this.policy) throw YearlyDataFileService._conflict('Yearly entry routing is not active.');
+    const core = SpreadsheetApp.openById(ws.SpreadsheetID), owner = this.runtimeOwner();
+    YearlyDataFileService._assertPrivate(core, owner);
+    this.assertActivationComplete(core, workspaceId, owner);
+    const records = YearlyDataFileService._registry(core, workspaceId).records;
+    return { ws, core, owner, records };
+  },
+  sources(context) {
+    const { ws, core, owner, records } = context;
+    const result = [{ book: core, location: { workspaceId: ws.WorkspaceID, coreSpreadsheetId: core.getId(),
+      spreadsheetId: core.getId(), year: 0, part: 0 } }];
+    for (const record of records) {
+      if (record.State !== 'READY') throw YearlyDataFileService._conflict('Incomplete Data-file creation requires recovery before reading entries.');
+      const book = SpreadsheetApp.openById(record.SpreadsheetID);
+      YearlyDataFileService._assertPrivate(book, owner);
+      YearlyDataFileService._verifyInfo(book, record);
+      result.push({ book, location: YearlyDataFileService._location(record) });
+    }
+    for (const source of result) {
+      source.sheet = source.book.getSheetByName('TimeEntries');
+      YearlyDataFileService._assertHeaders(source.sheet, WORKSPACE_SCHEMA.TimeEntries, false);
+    }
+    return result;
+  },
+  row(values, location, rowIndex) {
+    const row = Object.fromEntries(WORKSPACE_SCHEMA.TimeEntries.map((key, i) => [key, values[i]]));
+    row._rowIndex = { ...location, rowIndex, entryId: row.EntryID, rowHash: SecurityService.hashToken(JSON.stringify(values)) };
+    return row;
+  },
+  find(workspaceId, column, value, options = {}) {
+    if (value === undefined || value === null || value === '') return null;
+    const index = WORKSPACE_SCHEMA.TimeEntries.indexOf(column);
+    if (index < 0) throw YearlyDataFileService._conflict('Unknown entry search column.');
+    let found = null;
+    for (const source of this.sources(this.context(workspaceId))) {
+      const count = source.sheet.getLastRow() - 1;
+      if (!count) continue;
+      const finder = source.sheet.getRange(2, index + 1, count, 1).createTextFinder(String(value))
+        .matchEntireCell(true).matchCase(options.matchCase !== false).useRegularExpression(false);
+      const cell = finder.findNext();
+      if (!cell) continue;
+      if (column === 'EntryID') {
+        const next = finder.findNext();
+        if (found || (next && next.getRow() !== cell.getRow())) throw YearlyDataFileService._conflict('Duplicate immutable entry identity.');
+      } else if (found) continue;
+      found = this.row(source.sheet.getRange(cell.getRow(), 1, 1, WORKSPACE_SCHEMA.TimeEntries.length).getValues()[0], source.location, cell.getRow());
+    }
+    return found;
+  },
+  table(workspaceId) {
+    const rows = [], seen = new Set();
+    for (const source of this.sources(this.context(workspaceId))) {
+      const count = source.sheet.getLastRow() - 1;
+      for (let offset = 0; offset < count; offset += 250) {
+        const values = source.sheet.getRange(2 + offset, 1, Math.min(250, count - offset), WORKSPACE_SCHEMA.TimeEntries.length).getValues();
+        values.forEach((values, i) => {
+          const row = this.row(values, source.location, 2 + offset + i);
+          if (!row.EntryID || seen.has(row.EntryID)) throw YearlyDataFileService._conflict('Missing or duplicate entry identity.');
+          seen.add(row.EntryID); rows.push(row);
+        });
+      }
+    }
+    // A union has no single writable sheet. All mutations must resolve identity.
+    return { headers: WORKSPACE_SCHEMA.TimeEntries, rows, sheet: null };
+  },
+  actor(context) {
+    if (!context || typeof context.userId !== 'string' || !context.userId.trim() ||
+        context.userId !== context.userId.trim() || typeof context.role !== 'string' ||
+        !Object.values(CONSTANTS.ROLES).includes(context.role)) {
+      throw YearlyDataFileService._conflict('Explicit entry mutation actor is required.');
+    }
+    return { userId: context.userId, role: context.role };
+  },
+  recoverPending(workspaceId, actorContext) {
+    if (!this.handles(workspaceId, 'TimeEntries')) return { recovered: false };
+    return YearlyEntryMutation.recover(this.context(workspaceId), this.actor(actorContext));
+  },
+  append(workspaceId, entity, actorContext = null) {
+    if (!entity || typeof entity.EntryID !== 'string' || !/^[A-Za-z0-9._:-]{1,128}$/.test(entity.EntryID) || !entity.UserID) {
+      throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'Entry identity is required.', 400);
+    }
+    const year = new Date(entity.StartUTC).getUTCFullYear();
+    if (!Number.isSafeInteger(year) || year < 1970 || year > 9999) throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'Invalid entry year.', 400);
+    const actor = this.actor(actorContext);
+    return this.locked(() => {
+      const context = this.context(workspaceId);
+      YearlyEntryMutation.recover(context, actor);
+      for (const record of context.records.filter(row => row.State === 'PREPARING')) {
+        YearlyDataFileService.prepare(workspaceId, record.Year, 'TimeEntries', 1, actor);
+      }
+      const existing = this.find(workspaceId, 'EntryID', entity.EntryID);
+      if (existing) {
+        if (existing.UserID !== entity.UserID) throw YearlyDataFileService._conflict('Entry identity belongs to another user.');
+        if (WORKSPACE_SCHEMA.TimeEntries.some(key => {
+          const proposed = Validation.sanitizeCellValue(entity[key] === undefined ? '' : entity[key]);
+          return proposed !== existing[key];
+        })) throw YearlyDataFileService._conflict('Entry ID was already used with a different payload. Refresh before retrying.');
+        YearlyDataFileService._audit(actor, workspaceId, 'ENTRY_STORAGE_REPLAY_OBSERVED', existing, existing, entity.EntryID);
+        return existing;
+      }
+      const location = YearlyDataFileService.prepare(workspaceId, year, 'TimeEntries', 1, actor);
+      const sheet = SpreadsheetApp.openById(location.spreadsheetId).getSheetByName('TimeEntries');
+      const rowIndex = sheet.getLastRow() + 1;
+      const values = WORKSPACE_SCHEMA.TimeEntries.map(key => Validation.sanitizeCellValue(entity[key] === undefined ? '' : entity[key]));
+      const after = this.row(values, location, rowIndex);
+      return YearlyEntryMutation.run(context, actor, 'APPEND', null, after,
+        () => sheet.getRange(rowIndex, 1, 1, values.length).setValues([values]));
+    });
+  },
+  update(workspaceId, location, updates, actorContext = null) {
+    const actor = this.actor(actorContext);
+    return this.locked(() => {
+      if (!location || location.workspaceId !== workspaceId || !location.entryId) throw YearlyDataFileService._conflict('Immutable entry location required.');
+      const context = this.context(workspaceId);
+      YearlyEntryMutation.recover(context, actor);
+      const before = this.find(workspaceId, 'EntryID', location.entryId);
+      if (!before || ['workspaceId', 'coreSpreadsheetId', 'spreadsheetId', 'year', 'part'].some(key => before._rowIndex[key] !== location[key])) {
+        throw YearlyDataFileService._conflict('Stale or foreign entry location.');
+      }
+      if (!location.rowHash || before._rowIndex.rowHash !== location.rowHash) {
+        throw YearlyDataFileService._conflict('Entry changed while waiting for the writer lock. Refresh before retrying.');
+      }
+      if ((updates.EntryID !== undefined && updates.EntryID !== before.EntryID) ||
+          (updates.UserID !== undefined && updates.UserID !== before.UserID)) throw YearlyDataFileService._conflict('Entry identity is immutable.');
+      const values = WORKSPACE_SCHEMA.TimeEntries.map(key => Validation.sanitizeCellValue(updates[key] === undefined ? before[key] : updates[key]));
+      const after = this.row(values, before._rowIndex, before._rowIndex.rowIndex);
+      return YearlyEntryMutation.run(context, actor, 'UPDATE', before, after,
+        () => SpreadsheetApp.openById(location.spreadsheetId).getSheetByName('TimeEntries')
+          .getRange(before._rowIndex.rowIndex, 1, 1, values.length).setValues([values]));
+    });
+  },
+  enable(workspaceId) {
+    const owner = IdentityService.assertInstallationOwner();
+    return this.locked(() => {
+      IdentityService.assertInstallationOwner();
+      const ws = YearlyDataFileService._workspace(workspaceId);
+      if (ws.PartitionPolicy && ![this.policy, this.pendingPolicy].includes(ws.PartitionPolicy)) throw YearlyDataFileService._conflict('Existing partition policy requires migration.');
+      const master = MasterRepository.getMasterSpreadsheet().getSheetByName(CONSTANTS.MASTER_TABS.WORKSPACES);
+      YearlyDataFileService._assertHeaders(master, MASTER_SCHEMA.Workspaces, false);
+      const core = SpreadsheetApp.openById(ws.SpreadsheetID);
+      YearlyDataFileService._assertPrivate(core, owner);
+      if (!ws.PartitionPolicy) YearlyEntryMutation.initialize(core, workspaceId, owner);
+      else YearlyEntryMutation.read(core, workspaceId, owner);
+      const activation = this.activationState(core, workspaceId, owner, !ws.PartitionPolicy);
+      const registry = YearlyDataFileService._registry(core, workspaceId, owner);
+      for (const record of registry.records) {
+        if (record.State !== 'READY') throw YearlyDataFileService._conflict('Finish pending file preparation before activation.');
+        const book = SpreadsheetApp.openById(record.SpreadsheetID);
+        YearlyDataFileService._verify(book, record, owner);
+        for (const tab of YearlyDataFileService.dataTabs) {
+          if (tab !== 'TimeEntries' && book.getSheetByName(tab).getLastRow() > 1) throw YearlyDataFileService._conflict('Entry-only routing cannot activate a Data file containing other records.');
+        }
+      }
+      if (activation.record && activation.record.State === 'COMPLETE') {
+        if (ws.PartitionPolicy !== this.policy) throw YearlyDataFileService._conflict('Completed activation no longer matches the workspace policy.');
+        return { coreSpreadsheetId: core.getId(), policy: this.policy };
+      }
+      const record = activation.record || { WorkspaceID: workspaceId, CoreSpreadsheetID: core.getId(),
+        OperationID: Validation.generateId('ENTENABLE'), ActorUserID: owner, BeforePolicy: '', TargetPolicy: this.policy, State: 'PREPARING' };
+      const before = { coreSpreadsheetId: core.getId(), policy: record.BeforePolicy };
+      const after = { ...before, policy: this.policy };
+      YearlyDataFileService._audit(owner, workspaceId, activation.record ? 'ENTRY_STORAGE_ENABLE_RECOVERY_INTENT' : 'ENTRY_STORAGE_ENABLE_INTENT', before, after, record.OperationID);
+      this.writeActivation(core, workspaceId, owner, activation.sheet, record);
+      MasterRepository.updateWorkspace(workspaceId, { PartitionPolicy: this.pendingPolicy });
+      SpreadsheetApp.flush();
+      YearlyDataFileService._audit(owner, workspaceId, 'ENTRY_STORAGE_ENABLE_VERIFIED', before, after, record.OperationID);
+      MasterRepository.updateWorkspace(workspaceId, { PartitionPolicy: this.policy });
+      SpreadsheetApp.flush();
+      YearlyDataFileService._audit(owner, workspaceId, 'ENTRY_STORAGE_ENABLE_COMPLETED', before, after, record.OperationID);
+      this.writeActivation(core, workspaceId, owner, activation.sheet, { ...record, State: 'COMPLETE' });
+      SheetRepository.beginRequest(); WorkspaceRouter.clearCache();
+      return after;
+    });
+  }
+};
+
+function enableYearlyEntryStorage_(workspaceId) {
+  return YearlyEntryStorage.enable(workspaceId);
+}
+
+function recoverYearlyEntryMutation_(workspaceId) {
+  IdentityService.assertInstallationOwner();
+  return YearlyEntryStorage.locked(() => {
+    const owner = IdentityService.assertInstallationOwner();
+    return YearlyEntryMutation.recover(YearlyEntryStorage.context(workspaceId), owner);
+  });
 }
 
 /* ===== WorkspaceService.gs ===== */
@@ -8832,7 +9469,7 @@ var TimeEntryService = (typeof global !== 'undefined' && global.TimeEntryService
         WorkMode: payload.workMode === 'WFH' ? 'WFH' : 'OFFICE'
       };
 
-      SheetRepository.createTimeEntry(workspaceId, timeEntry);
+      SheetRepository.createTimeEntry(workspaceId, timeEntry, authContext);
 
       if (typeof SpreadsheetApp !== 'undefined' && SpreadsheetApp.flush) {
         SpreadsheetApp.flush();
@@ -9014,7 +9651,7 @@ var TimeEntryService = (typeof global !== 'undefined' && global.TimeEntryService
       allowed.UpdatedBy = authContext.userId;
       allowed.Version = (parseInt(entry.Version, 10) || 1) + 1;
 
-      const updated = SheetRepository.updateTimeEntry(workspaceId, entryId, allowed);
+      const updated = SheetRepository.updateTimeEntry(workspaceId, entryId, allowed, authContext);
 
       // Explicit flush in Google Apps Script to guarantee write persistence before reconciliation.
       if (typeof SpreadsheetApp !== 'undefined' && SpreadsheetApp.flush) {
@@ -9142,7 +9779,7 @@ var TimeEntryService = (typeof global !== 'undefined' && global.TimeEntryService
         UpdatedAt: now,
         UpdatedBy: authContext.userId,
         Version: (parseInt(entry.Version, 10) || 1) + 1
-      });
+      }, authContext);
 
       if (typeof SpreadsheetApp !== 'undefined' && SpreadsheetApp.flush) {
         try { SpreadsheetApp.flush(); } catch (fErr) {}
@@ -9400,7 +10037,7 @@ var TimeEntryService = (typeof global !== 'undefined' && global.TimeEntryService
       const changedPlans = [];
       try {
         for (const plan of plans) {
-          SheetRepository.updateTimeEntry(workspaceId, plan.entry.EntryID, plan.updates);
+          SheetRepository.updateTimeEntry(workspaceId, plan.entry.EntryID, plan.updates, authContext);
           changedPlans.push(plan);
         }
       } catch (mutationErr) {
@@ -9420,7 +10057,7 @@ var TimeEntryService = (typeof global !== 'undefined' && global.TimeEntryService
               UpdatedAt: before.UpdatedAt || '',
               UpdatedBy: before.UpdatedBy || '',
               Version: parseInt(before.Version, 10) || 1
-            });
+            }, authContext);
           } catch (rollbackErr) {
             console.error(`Bulk action rollback failed for entry ${before.EntryID}: ${rollbackErr.message}`);
           }
@@ -9853,6 +10490,7 @@ var TimerService = (typeof global !== 'undefined' && global.TimerService) || {
     // Repair/idempotency path: entry already exists and is active. Finish the
     // timer deletion only; do not create or roll up a duplicate entry.
     if (existingEntry && existingEntry.Status !== 'DELETED') {
+      YearlyEntryStorage.recoverPending(workspaceId, auditActorContext || ownerContext);
       const deleted = SheetRepository.deleteActiveTimer(
         workspaceId,
         ownerContext.userId
@@ -9906,9 +10544,9 @@ var TimerService = (typeof global !== 'undefined' && global.TimerService) || {
     let entryMutated = false;
     try {
       if (existingEntry) {
-        SheetRepository.updateTimeEntry(workspaceId, entryId, timeEntry);
+        SheetRepository.updateTimeEntry(workspaceId, entryId, timeEntry, auditActorContext || ownerContext);
       } else {
-        SheetRepository.createTimeEntry(workspaceId, timeEntry);
+        SheetRepository.createTimeEntry(workspaceId, timeEntry, auditActorContext || ownerContext);
       }
       entryMutated = true;
 
@@ -9937,7 +10575,7 @@ var TimerService = (typeof global !== 'undefined' && global.TimerService) || {
             Version: existingEntry
               ? (parseInt(existingEntry.Version, 10) || 1)
               : timeEntry.Version
-          });
+          }, auditActorContext || ownerContext);
         } catch (rollbackErr) {
           console.error(
             `Timer finalization rollback failed for entry ${entryId}: ${rollbackErr.message}`
@@ -10021,6 +10659,7 @@ var TimerService = (typeof global !== 'undefined' && global.TimerService) || {
                 409
               );
             }
+            YearlyEntryStorage.recoverPending(workspaceId, authContext);
             const replayDto = TimeEntryService.toTimeEntryDTO(
               existingEntry,
               authContext.role !== CONSTANTS.ROLES.USER
@@ -10622,7 +11261,7 @@ var TimesheetService = (typeof global !== 'undefined' && global.TimesheetService
             Version: previousState.Version + 1,
             UpdatedAt: now,
             UpdatedBy: authContext.userId
-          });
+          }, authContext);
         }
 
         headerAttempted = true;
@@ -10650,7 +11289,7 @@ var TimesheetService = (typeof global !== 'undefined' && global.TimesheetService
               ApprovalStatus: prior.ApprovalStatus,
               Locked: prior.Locked,
               Version: prior.Version
-            });
+            }, authContext);
           } catch (rollbackErr) {
             console.error(`Submission rollback failed for entry ${prior.entryId}: ${rollbackErr.message}`);
           }
@@ -10907,7 +11546,7 @@ var ApprovalService = (typeof global !== 'undefined' && global.ApprovalService) 
             TimesheetID: timesheetId,
             ApprovalStatus: CONSTANTS.TIMESHEET_STATUS.APPROVED,
             Locked: true
-          });
+          }, authContext);
         }
 
         headerAttempted = true;
@@ -10934,7 +11573,7 @@ var ApprovalService = (typeof global !== 'undefined' && global.ApprovalService) 
               Version: prior.Version,
               UpdatedAt: prior.UpdatedAt,
               UpdatedBy: prior.UpdatedBy
-            });
+            }, authContext);
           } catch (rollbackErr) {
             console.error(`Approval rollback failed for entry ${prior.entryId}: ${rollbackErr.message}`);
           }
@@ -11054,7 +11693,7 @@ var ApprovalService = (typeof global !== 'undefined' && global.ApprovalService) 
             Version: previousVersion + 1,
             UpdatedAt: now,
             UpdatedBy: authContext.userId
-          });
+          }, authContext);
         }
 
         headerAttempted = true;
@@ -11082,7 +11721,7 @@ var ApprovalService = (typeof global !== 'undefined' && global.ApprovalService) 
               Version: prior.Version,
               UpdatedAt: prior.UpdatedAt,
               UpdatedBy: prior.UpdatedBy
-            });
+            }, authContext);
           } catch (rollbackErr) {
             console.error(`Rejection rollback failed for entry ${prior.entryId}: ${rollbackErr.message}`);
           }
@@ -11196,7 +11835,7 @@ var ApprovalService = (typeof global !== 'undefined' && global.ApprovalService) 
             Version: previousVersion + 1,
             UpdatedAt: now,
             UpdatedBy: superAdminContext.userId
-          });
+          }, superAdminContext);
         }
 
         headerAttempted = true;
@@ -11224,7 +11863,7 @@ var ApprovalService = (typeof global !== 'undefined' && global.ApprovalService) 
               Version: prior.Version,
               UpdatedAt: prior.UpdatedAt,
               UpdatedBy: prior.UpdatedBy
-            });
+            }, superAdminContext);
           } catch (rollbackErr) {
             console.error(`Reopen rollback failed for entry ${prior.entryId}: ${rollbackErr.message}`);
           }
@@ -12270,6 +12909,9 @@ var RollupService = (typeof global !== 'undefined' && global.RollupService) || {
    * Full source-of-truth reconciliation from raw active TimeEntries.
    */
   rebuildRollups(workspaceId) {
+    if (YearlyEntryStorage.handles(workspaceId, 'TimeEntries') && !LockService.getScriptLock().hasLock()) {
+      return YearlyEntryStorage.locked(() => this.rebuildRollups(workspaceId));
+    }
     const rawEntries = SheetRepository.listTimeEntries(workspaceId, {});
     const calculatedAt = new Date().toISOString();
     const canonical = this._buildCanonicalRollups(
@@ -12418,15 +13060,24 @@ var DashboardService = (typeof global !== 'undefined' && global.DashboardService
 
     for (const ws of targets) {
       try {
-        const { rows: timers } = SheetRepository.getTableData(
-          ws.WorkspaceID,
-          CONSTANTS.WORKSPACE_TABS.ACTIVE_TIMERS
-        );
-        const members = SheetRepository.listMembers(ws.WorkspaceID);
+        const selfOnly = authContext.role === CONSTANTS.ROLES.USER;
+        const ownTimer = selfOnly ? SheetRepository.getActiveTimer(ws.WorkspaceID, authContext.userId) : null;
+        const timers = selfOnly
+          ? (ownTimer && ownTimer.UserID === authContext.userId ? [ownTimer] : [])
+          : SheetRepository.getTableData(ws.WorkspaceID, CONSTANTS.WORKSPACE_TABS.ACTIVE_TIMERS).rows;
+        // Login-time self radar needs one timer, not every coworker/project.
+        if (!timers.length) continue;
+        const ownMember = selfOnly ? SheetRepository.getMember(ws.WorkspaceID, authContext.userId) : null;
+        const members = selfOnly
+          ? (ownMember && ownMember.UserID === authContext.userId ? [ownMember] : [])
+          : SheetRepository.listMembers(ws.WorkspaceID);
         const memberMap = {};
-        members.forEach(m => { memberMap[m.UserID] = m.DisplayName; });
+        members.forEach(m => { if (m.Status !== CONSTANTS.ACCOUNT_STATUS.DELETED) memberMap[m.UserID] = m.DisplayName; });
 
-        const projects = SheetRepository.listProjects(ws.WorkspaceID);
+        const ownProject = selfOnly && ownTimer.ProjectID ? SheetRepository.getProject(ws.WorkspaceID, ownTimer.ProjectID) : null;
+        const projects = selfOnly
+          ? (ownProject && ownProject.ProjectID === ownTimer.ProjectID ? [ownProject] : [])
+          : SheetRepository.listProjects(ws.WorkspaceID);
         const projectMap = {};
         projects.forEach(p => { projectMap[p.ProjectID] = p.ProjectName; });
 
@@ -13518,25 +14169,6 @@ var SetupService = (typeof global !== 'undefined' && global.SetupService) || {
   getSetupStatus() {
     let superAdminExists = false;
     let workspaceCount = 0;
-    let adminCount = 0;
-    let userCount = 0;
-    let isSetupComplete = false;
-
-    try {
-      const { rows: accounts } = MasterRepository.getTableData(CONSTANTS.MASTER_TABS.ACCOUNTS);
-      superAdminExists = accounts.some(a => a.Role === CONSTANTS.ROLES.SUPER_ADMIN && a.Status !== CONSTANTS.ACCOUNT_STATUS.DELETED);
-      adminCount = accounts.filter(a => a.Role === CONSTANTS.ROLES.ADMIN && a.Status !== CONSTANTS.ACCOUNT_STATUS.DELETED).length;
-      userCount = accounts.filter(a => a.Role === CONSTANTS.ROLES.USER && a.Status !== CONSTANTS.ACCOUNT_STATUS.DELETED).length;
-    } catch (e) {
-      superAdminExists = false;
-    }
-
-    try {
-      const workspaces = MasterRepository.listWorkspaces();
-      workspaceCount = workspaces.filter(w => w.Status !== CONSTANTS.WORKSPACE_STATUS.ARCHIVED).length;
-    } catch (e) {
-      workspaceCount = 0;
-    }
 
     let setupFlag = 'false';
     try {
@@ -13544,7 +14176,47 @@ var SetupService = (typeof global !== 'undefined' && global.SetupService) || {
     } catch (e) {
       setupFlag = 'false';
     }
-    isSetupComplete = (setupFlag === 'true' || setupFlag === true) && superAdminExists && workspaceCount > 0;
+
+    // Public endpoint: every portal load calls this, so read the completion flag
+    // first. A finished installation is answered from that flag plus bounded
+    // lookups; it must never scan the growing Accounts/Workspaces tables just to
+    // repeat two booleans.
+    if (setupFlag !== 'true' && setupFlag !== true) {
+      return {
+        initialized: false,
+        setupComplete: false,
+        setupRequired: true
+      };
+    }
+
+    try {
+      const superAdmins = MasterRepository.findRowsByKey(
+        CONSTANTS.MASTER_TABS.ACCOUNTS,
+        'Role',
+        CONSTANTS.ROLES.SUPER_ADMIN
+      );
+      superAdminExists = superAdmins.some(a => a.Status !== CONSTANTS.ACCOUNT_STATUS.DELETED);
+    } catch (e) {
+      superAdminExists = false;
+    }
+
+    try {
+      // A workspace is counted unless it is archived, so probe the three live
+      // states with bounded finder lookups instead of transferring the table.
+      const liveStatuses = [
+        CONSTANTS.WORKSPACE_STATUS.ACTIVE,
+        CONSTANTS.WORKSPACE_STATUS.SUSPENDED,
+        CONSTANTS.WORKSPACE_STATUS.MAINTENANCE
+      ];
+      const hasWorkspace = liveStatuses.some(status =>
+        MasterRepository.findRowsByKey(CONSTANTS.MASTER_TABS.WORKSPACES, 'Status', status).length > 0
+      );
+      workspaceCount = hasWorkspace ? 1 : 0;
+    } catch (e) {
+      workspaceCount = 0;
+    }
+
+    const isSetupComplete = superAdminExists && workspaceCount > 0;
 
     // Once initialization is complete, the public setup-status endpoint only needs
     // to tell the login page that setup is finished. Do not expose company settings,
@@ -14339,8 +15011,10 @@ var SetupService = (typeof global !== 'undefined' && global.SetupService) || {
         sheetOk = !!wss;
         const memSheet = wss.getSheetByName(CONSTANTS.WORKSPACE_TABS.MEMBERS);
         if (memSheet) totalMembers = Math.max(0, memSheet.getLastRow() - 1);
-        const entriesSheet = wss.getSheetByName(CONSTANTS.WORKSPACE_TABS.TIME_ENTRIES);
-        if (entriesSheet) totalEntries = Math.max(0, entriesSheet.getLastRow() - 1);
+        const entrySources = YearlyEntryStorage.handles(w.WorkspaceID, 'TimeEntries')
+          ? YearlyEntryStorage.sources(YearlyEntryStorage.context(w.WorkspaceID)).map(source => source.sheet)
+          : [wss.getSheetByName(CONSTANTS.WORKSPACE_TABS.TIME_ENTRIES)];
+        totalEntries = entrySources.reduce((sum, sheet) => sum + (sheet ? Math.max(0, sheet.getLastRow() - 1) : 0), 0);
       } catch (e) {}
 
       return {
@@ -15505,9 +16179,15 @@ var JobService = (typeof global !== 'undefined' && global.JobService) || {
     let totalRows = 0;
     let totalColumns = 0;
     const tabBreakdown = [];
+    const files = workspaceId && YearlyEntryStorage.handles(workspaceId, 'TimeEntries')
+      ? YearlyEntryStorage.sources(YearlyEntryStorage.context(workspaceId)).map(source => ({ book: source.book, year: source.location.year, part: source.location.part }))
+      : [{ book: targetSs, year: 0, part: 0 }];
+    let largestFileCells = 0;
 
-    if (targetSs && targetSs.getSheets) {
-      const sheets = targetSs.getSheets();
+    for (const file of files) {
+      if (!file.book || !file.book.getSheets) continue;
+      let fileCells = 0;
+      const sheets = file.book.getSheets();
       for (const sheet of sheets) {
         const rows = typeof sheet.getLastRow === 'function' ? sheet.getLastRow() : 0;
         const cols = typeof sheet.getLastColumn === 'function' ? sheet.getLastColumn() : 0;
@@ -15518,11 +16198,13 @@ var JobService = (typeof global !== 'undefined' && global.JobService) || {
         const cells = Math.max(dataCells, allocatedCells);
 
         totalCells += cells;
+        fileCells += cells;
         totalRows += rows;
         totalColumns = Math.max(totalColumns, cols);
 
         tabBreakdown.push({
           tabName: typeof sheet.getName === 'function' ? sheet.getName() : 'Unknown',
+          year: file.year, part: file.part,
           rows,
           columns: cols,
           allocatedRows: maxRows,
@@ -15530,10 +16212,13 @@ var JobService = (typeof global !== 'undefined' && global.JobService) || {
           cells
         });
       }
+      file.allocatedCells = fileCells;
+      largestFileCells = Math.max(largestFileCells, fileCells);
     }
 
-    const maxLimit = CONSTANTS.CAPACITY.MAX_CELLS_PER_SHEET;
-    const utilizationPct = (totalCells / maxLimit) * 100;
+    const perFileLimit = CONSTANTS.CAPACITY.MAX_CELLS_PER_SHEET;
+    const maxLimit = perFileLimit * files.length;
+    const utilizationPct = (largestFileCells / perFileLimit) * 100;
 
     let alertStatus = 'HEALTHY';
     let recommendation = 'Capacity within normal operating thresholds.';
@@ -15554,6 +16239,9 @@ var JobService = (typeof global !== 'undefined' && global.JobService) || {
       workspaceId: workspaceId || 'MASTER',
       totalCells,
       maxLimit,
+      perFileLimit,
+      fileCount: files.length,
+      files: files.map(file => ({ year: file.year, part: file.part, allocatedCells: file.allocatedCells || 0 })),
       utilizationPct: parseFloat(utilizationPct.toFixed(2)),
       alertStatus,
       recommendation,
@@ -15686,6 +16374,196 @@ function scheduledBackups_() {
  * Automated Drive snapshot backups, disaster recovery validation, and immutable audit logs.
  */
 
+var YearlyBackupSets = {
+  maxFiles: 64,
+  checkDeadline(deadline) {
+    if (deadline && Date.now() >= deadline) throw new AppError(ERROR_CODES.SERVER_BUSY, 'File-set verification reached its execution budget. Retained copies require owner review.', 503);
+  },
+  audit(actor, workspaceId, action, before, after, operation) {
+    YearlyDataFileService._audit(actor, workspaceId, action, before, after, operation);
+  },
+  records(core, workspaceId) {
+    const records = YearlyDataFileService._registry(core, workspaceId).records;
+    if (records.length > this.maxFiles || records.some(row => row.State !== 'READY')) {
+      throw YearlyDataFileService._conflict('File set exceeds the synchronous backup limit or contains incomplete files.');
+    }
+    return records;
+  },
+  coreManifest(core, workspaceId, deadline) {
+    return BackupService._buildManifest(core, 'WORKSPACE', workspaceId,
+      { ...WORKSPACE_SCHEMA, DataFileRegistry: YearlyDataFileService.registryHeaders,
+        EntryStorageActivation: YearlyEntryStorage.activationHeaders,
+        EntryMutationCheckpoint: YearlyEntryMutation.headers }, deadline);
+  },
+  dataManifest(book, workspaceId, deadline) {
+    const schema = { DataFileInfo: YearlyDataFileService.infoHeaders };
+    for (const tab of YearlyDataFileService.dataTabs) schema[tab] = WORKSPACE_SCHEMA[tab];
+    return BackupService._buildManifest(book, 'DATA', workspaceId, schema, deadline);
+  },
+  manifest(core, workspaceId, deadline) {
+    const owner = YearlyEntryStorage.runtimeOwner();
+    YearlyDataFileService._assertPrivate(core, owner);
+    YearlyEntryStorage.assertActivationComplete(core, workspaceId, owner);
+    if (YearlyEntryMutation.read(core, workspaceId, owner).pending) {
+      throw YearlyDataFileService._conflict('Pending entry audit recovery must finish before a file-set backup.');
+    }
+    const records = this.records(core, workspaceId);
+    const base = this.coreManifest(core, workspaceId, deadline);
+    const dataFiles = records.map(record => {
+      this.checkDeadline(deadline);
+      const book = BackupService._openBackupSpreadsheet(record.SpreadsheetID);
+      YearlyDataFileService._verify(book, record, owner);
+      return { fileId: record.SpreadsheetID, year: record.Year, part: record.Part,
+        manifestHash: this.dataManifest(book, workspaceId, deadline).manifestHash };
+    });
+    const payload = { format: YearlyEntryStorage.policy, scope: 'WORKSPACE', workspaceId,
+      schemaVersion: CONSTANTS.SCHEMA_VERSION, coreFileId: core.getId(), coreHash: base.manifestHash,
+      sheets: base.sheets, dataFiles };
+    const manifest = { ...payload, manifestHash: BackupService._manifestHmac(payload) };
+    if (JSON.stringify(manifest).length > 45000) throw YearlyDataFileService._conflict('Backup manifest exceeds the registry cell budget.');
+    return manifest;
+  },
+  authenticated(record) {
+    const manifest = BackupService._parseStoredManifest(record);
+    const { manifestHash, ...payload } = manifest;
+    if (manifest.format !== YearlyEntryStorage.policy || manifest.scope !== 'WORKSPACE' ||
+        manifest.workspaceId !== record.WorkspaceID || manifest.coreFileId !== record.BackupFileID ||
+        !Array.isArray(manifest.dataFiles) || manifest.dataFiles.length > this.maxFiles ||
+        !SecurityService.constantTimeEquals(manifestHash, BackupService._manifestHmac(payload))) {
+      throw new AppError(ERROR_CODES.CRYPTO_FAILURE, 'Backup file-set manifest authentication failed.', 409);
+    }
+    const ids = [manifest.coreFileId, ...manifest.dataFiles.map(file => file.fileId)];
+    if (ids.some(id => typeof id !== 'string' || !id) || new Set(ids).size !== ids.length || ids.includes(record.SourceFileID)) {
+      throw YearlyDataFileService._conflict('Backup set contains invalid or live file identities.');
+    }
+    return manifest;
+  },
+  validate(record, deadline) {
+    const stored = this.authenticated(record);
+    const core = BackupService._openBackupSpreadsheet(stored.coreFileId);
+    const actual = this.manifest(core, record.WorkspaceID, deadline);
+    if (!SecurityService.constantTimeEquals(stored.manifestHash, actual.manifestHash)) {
+      throw new AppError(ERROR_CODES.CRYPTO_FAILURE, 'Backup file-set content differs from its registered manifest.', 409);
+    }
+    return actual;
+  },
+  copy(core, workspaceId, actor, operation, name, deadline) {
+    if (!LockService.getScriptLock().hasLock()) throw YearlyDataFileService._conflict('Snapshot requires the writer lock.');
+    const owner = YearlyEntryStorage.runtimeOwner();
+    const records = this.records(core, workspaceId);
+    const sourceManifest = this.manifest(core, workspaceId, deadline);
+    const copied = [];
+    const copyOne = (sourceId, suffix) => {
+      this.checkDeadline(deadline);
+      this.audit(actor, workspaceId, 'FILE_SET_COPY_INTENT', { sourceId }, { operation, suffix }, operation);
+      const file = DriveApp.getFileById(sourceId).makeCopy(name + '_' + suffix + '_' + operation);
+      const fileId = file.getId();
+      if (!fileId || fileId === core.getId() || records.some(row => row.SpreadsheetID === fileId) || copied.includes(fileId)) {
+        throw YearlyDataFileService._conflict('Snapshot copy identity is not isolated.');
+      }
+      copied.push(fileId);
+      this.audit(actor, workspaceId, 'FILE_SET_COPY_REGISTERED', { sourceId }, { fileId }, operation);
+      const book = BackupService._openBackupSpreadsheet(fileId);
+      YearlyDataFileService._assertPrivate(book, owner);
+      return book;
+    };
+    // Retain every partial copy on failure: uncertain copy/audit writes must not
+    // destroy an artifact that an owner may need to reconcile.
+    const candidate = copyOne(core.getId(), 'CORE');
+    if (this.coreManifest(candidate, workspaceId, deadline).manifestHash !== sourceManifest.coreHash) {
+      throw new AppError(ERROR_CODES.CRYPTO_FAILURE, 'Core snapshot differs from its source.', 409);
+    }
+    const replacements = [];
+    for (let i = 0; i < records.length; i++) {
+      const record = records[i];
+      const book = copyOne(record.SpreadsheetID, record.Year + '_' + record.Part);
+      if (this.dataManifest(book, workspaceId, deadline).manifestHash !== sourceManifest.dataFiles[i].manifestHash) {
+        throw new AppError(ERROR_CODES.CRYPTO_FAILURE, 'Data snapshot differs from its source.', 409);
+      }
+      replacements.push({ book, before: record, after: { ...record, CoreSpreadsheetID: candidate.getId(), SpreadsheetID: book.getId() } });
+    }
+    const routingBefore = records.map(row => YearlyDataFileService._location(row));
+    const routingAfter = replacements.map(item => YearlyDataFileService._location(item.after));
+    this.audit(actor, workspaceId, 'FILE_SET_REBASE_INTENT', routingBefore, routingAfter, operation);
+    const activation = YearlyEntryStorage.activationState(candidate, workspaceId, owner, false, core.getId());
+    YearlyEntryStorage.writeActivation(candidate, workspaceId, owner, activation.sheet,
+      { ...activation.record, CoreSpreadsheetID: candidate.getId() });
+    const mutation = YearlyEntryMutation.read(candidate, workspaceId, owner, core.getId());
+    if (mutation.pending) throw YearlyDataFileService._conflict('Copied entry checkpoint is not idle.');
+    YearlyEntryMutation.write(candidate, workspaceId, owner, null);
+    const registry = candidate.getSheetByName(YearlyDataFileService.registryTab);
+    for (const item of replacements) {
+      item.book.getSheetByName('DataFileInfo').getRange(2, 1, 1, YearlyDataFileService.infoHeaders.length)
+        .setValues([YearlyDataFileService._info(item.after)]);
+      registry.getRange(item.after._rowIndex, 1, 1, YearlyDataFileService.registryHeaders.length)
+        .setValues([YearlyDataFileService.registryHeaders.map(key => item.after[key])]);
+    }
+    SpreadsheetApp.flush();
+    const manifest = this.manifest(candidate, workspaceId, deadline);
+    this.audit(actor, workspaceId, 'FILE_SET_REBASE_COMPLETED', routingBefore, routingAfter, operation);
+    return { core: candidate, manifest, fileIds: copied };
+  },
+  create(actor, ws, deadline = Date.now() + 240000) {
+    const backupId = Validation.generateId('BKP');
+    const snapshot = this.copy(SpreadsheetApp.openById(ws.SpreadsheetID), ws.WorkspaceID, actor, backupId, 'BACKUP', deadline);
+    const record = { BackupID: backupId, Scope: 'WORKSPACE', WorkspaceID: ws.WorkspaceID,
+      SourceFileID: ws.SpreadsheetID, BackupFileID: snapshot.core.getId(), CreatedAt: new Date().toISOString(),
+      Status: 'PREPARING', Verified: false, ChecksumMetadata: JSON.stringify(snapshot.manifest) };
+    this.audit(actor, ws.WorkspaceID, 'BACKUP_SET_REGISTER_INTENT', null, record, backupId);
+    MasterRepository.appendRow(CONSTANTS.MASTER_TABS.BACKUP_REGISTRY, record);
+    SpreadsheetApp.flush();
+    this.audit(actor, ws.WorkspaceID, 'BACKUP_SET_VERIFIED', { status: 'PREPARING' },
+      { status: 'AVAILABLE', manifestHash: snapshot.manifest.manifestHash, files: snapshot.fileIds }, backupId);
+    MasterRepository._invalidateTable(CONSTANTS.MASTER_TABS.BACKUP_REGISTRY);
+    const registered = BackupService._getRegistryRecord(backupId);
+    MasterRepository.updateRow(CONSTANTS.MASTER_TABS.BACKUP_REGISTRY, registered._rowIndex, { Status: 'AVAILABLE', Verified: true });
+    SpreadsheetApp.flush();
+    return { ok: true, backupId, backupFileId: record.BackupFileID, backupFileName: 'BACKUP_' + backupId,
+      scope: 'WORKSPACE', workspaceId: ws.WorkspaceID, verified: true, manifestHash: snapshot.manifest.manifestHash };
+  },
+  validateAudit(core, workspaceId, deadline) {
+    const sheet = core.getSheetByName('AuditLog'), headers = WORKSPACE_SCHEMA.AuditLog;
+    let previous = '0'.repeat(64);
+    for (let row = 2; row <= sheet.getLastRow(); row += 250) {
+      this.checkDeadline(deadline);
+      const values = sheet.getRange(row, 1, Math.min(250, sheet.getLastRow() - row + 1), headers.length).getValues();
+      for (const valuesRow of values) {
+        const record = Object.fromEntries(headers.map((key, i) => [key, valuesRow[i]]));
+        if (!record.AuditID || !record.TimestampUTC || record.PreviousHash !== previous) throw new AppError(ERROR_CODES.CRYPTO_FAILURE, 'Restore audit chain is incomplete.', 409);
+        const expected = String(record.RecordHash).startsWith('v2:')
+          ? SecurityService.computeAuditRecordHashV2(previous, record, workspaceId)
+          : SecurityService.computeAuditHash(previous, { auditId: record.AuditID, timestamp: record.TimestampUTC,
+            actor: record.ActorUserID || '', action: record.Action, entityType: record.EntityType,
+            entityId: record.EntityID, after: record.AfterJSON || '' });
+        if (!SecurityService.constantTimeEquals(expected, record.RecordHash)) throw new AppError(ERROR_CODES.CRYPTO_FAILURE, 'Restore audit record authentication failed.', 409);
+        previous = record.RecordHash;
+      }
+    }
+  },
+  prune(actor, record) {
+    const manifest = this.authenticated(record);
+    // Only authenticated, isolated snapshot IDs are eligible. Never follow an
+    // unsigned directory or delete files referenced by any live Core.
+    const ids = [manifest.coreFileId, ...manifest.dataFiles.map(file => file.fileId)];
+    YearlyEntryStorage.freshWorkspace(record.WorkspaceID);
+    const workspaces = MasterRepository.listWorkspaces();
+    if (!workspaces.some(ws => ws.WorkspaceID === record.WorkspaceID)) throw YearlyDataFileService._conflict('Backup workspace identity is unavailable.');
+    for (const ws of workspaces) {
+      if (ids.includes(ws.SpreadsheetID)) throw YearlyDataFileService._conflict('Cannot prune a referenced snapshot.');
+      if (ws.PartitionPolicy === YearlyEntryStorage.policy || ws.PartitionPolicy === YearlyEntryStorage.pendingPolicy) {
+        const live = YearlyDataFileService._registry(SpreadsheetApp.openById(ws.SpreadsheetID), ws.WorkspaceID).records;
+        if (live.some(row => ids.includes(row.SpreadsheetID))) throw YearlyDataFileService._conflict('Cannot prune a live Data file.');
+      }
+    }
+    this.audit(actor, record.WorkspaceID, 'BACKUP_SET_PRUNE_INTENT', { fileIds: ids, status: record.Status }, { status: 'PURGED' }, record.BackupID);
+    for (const id of ids) {
+      const file = DriveApp.getFileById(id);
+      if (!file.isTrashed()) file.setTrashed(true);
+    }
+    this.audit(actor, record.WorkspaceID, 'BACKUP_SET_PRUNE_COMPLETED', { fileIds: ids, status: record.Status }, { status: 'PURGED' }, record.BackupID);
+  }
+};
+
 var BackupService = (typeof global !== 'undefined' && global.BackupService) || {
   _manifestHmac(payload) {
     const key = SecurityService.getPepper() + '_FLINK_BACKUP_MANIFEST';
@@ -15699,15 +16577,16 @@ var BackupService = (typeof global !== 'undefined' && global.BackupService) || {
     return scope === 'MASTER' ? MASTER_SCHEMA : WORKSPACE_SCHEMA;
   },
 
-  _buildManifest(spreadsheet, scope, workspaceId = '') {
+  _buildManifest(spreadsheet, scope, workspaceId = '', schemaOverride = null, deadline = 0) {
     if (!spreadsheet) {
       throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'Backup spreadsheet could not be opened.', 400);
     }
 
-    const expectedSchema = this._expectedSchema(scope);
+    const expectedSchema = schemaOverride || this._expectedSchema(scope);
     const sheetSummaries = [];
 
     for (const [tabName, expectedHeaders] of Object.entries(expectedSchema)) {
+      YearlyBackupSets.checkDeadline(deadline);
       const sheet = spreadsheet.getSheetByName(tabName);
       if (!sheet) {
         throw new AppError(ERROR_CODES.VALIDATION_ERROR, `Backup is missing required tab '${tabName}'.`, 400);
@@ -15737,6 +16616,7 @@ var BackupService = (typeof global !== 'undefined' && global.BackupService) || {
       // Hash data in bounded chunks to avoid building one huge in-memory JSON string.
       const chunkSize = 250;
       for (let offset = 0; offset < rowCount; offset += chunkSize) {
+        YearlyBackupSets.checkDeadline(deadline);
         const count = Math.min(chunkSize, rowCount - offset);
         const values = sheet
           .getRange(2 + offset, 1, count, expectedHeaders.length)
@@ -15776,7 +16656,7 @@ var BackupService = (typeof global !== 'undefined' && global.BackupService) || {
 
     const manifest = {
       scope,
-      workspaceId: scope === 'WORKSPACE' ? workspaceId : 'MASTER',
+      workspaceId: scope === 'MASTER' ? 'MASTER' : workspaceId,
       schemaVersion: CONSTANTS.SCHEMA_VERSION,
       sheetCount: sheetSummaries.length,
       sheets: sheetSummaries
@@ -15788,7 +16668,7 @@ var BackupService = (typeof global !== 'undefined' && global.BackupService) || {
     };
   },
 
-  _validateWorkspaceRollupTotals(spreadsheet) {
+  _validateWorkspaceRollupTotals(spreadsheet, dataBooks = [], deadline = 0) {
     if (!spreadsheet) {
       throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'Restore candidate spreadsheet is unavailable.', 400);
     }
@@ -15799,18 +16679,23 @@ var BackupService = (typeof global !== 'undefined' && global.BackupService) || {
     }
 
     const entryHeaders = WORKSPACE_SCHEMA.TimeEntries;
-    const entryRows = Math.max(0, entriesSheet.getLastRow() - 1);
     let rawSeconds = 0;
-
-    if (entryRows > 0) {
-      const values = entriesSheet
-        .getRange(2, 1, entryRows, entryHeaders.length)
-        .getValues();
+    const seen = new Set();
+    for (const book of [spreadsheet, ...dataBooks]) {
+      const sheet = book.getSheetByName(CONSTANTS.WORKSPACE_TABS.TIME_ENTRIES);
+      const entryRows = Math.max(0, sheet.getLastRow() - 1);
+      for (let offset = 0; offset < entryRows; offset += 250) {
+      YearlyBackupSets.checkDeadline(deadline);
+      const values = sheet.getRange(2 + offset, 1, Math.min(250, entryRows - offset), entryHeaders.length).getValues();
       const statusIdx = entryHeaders.indexOf('Status');
       const durationIdx = entryHeaders.indexOf('DurationSeconds');
       for (const row of values) {
+        const id = row[entryHeaders.indexOf('EntryID')];
+        if (dataBooks.length && (!id || seen.has(id))) throw new AppError(ERROR_CODES.CONFLICT, 'Restore entry identity is missing or duplicated.', 409);
+        seen.add(id);
         if (String(row[statusIdx] || '') === 'DELETED') continue;
         rawSeconds += parseInt(row[durationIdx], 10) || 0;
+      }
       }
     }
 
@@ -15828,8 +16713,9 @@ var BackupService = (typeof global !== 'undefined' && global.BackupService) || {
 
       const rowCount = Math.max(0, sheet.getLastRow() - 1);
       let total = 0;
-      if (rowCount > 0) {
-        const values = sheet.getRange(2, 1, rowCount, headers.length).getValues();
+      for (let offset = 0; offset < rowCount; offset += 250) {
+        YearlyBackupSets.checkDeadline(deadline);
+        const values = sheet.getRange(2 + offset, 1, Math.min(250, rowCount - offset), headers.length).getValues();
         const totalIdx = headers.indexOf('TotalSeconds');
         for (const row of values) total += parseInt(row[totalIdx], 10) || 0;
       }
@@ -15924,7 +16810,7 @@ var BackupService = (typeof global !== 'undefined' && global.BackupService) || {
    * Internal snapshot implementation for callers that already own ScriptLock
    * (notably restore safety-backup creation).
    */
-  _createBackupUnlocked(superAdminContext, workspaceId = null) {
+  _createBackupUnlocked(superAdminContext, workspaceId = null, deadline = Date.now() + 240000) {
     AuthorizationService.assertRole(superAdminContext, [CONSTANTS.ROLES.SUPER_ADMIN]);
 
     const scope = workspaceId ? 'WORKSPACE' : 'MASTER';
@@ -15934,11 +16820,13 @@ var BackupService = (typeof global !== 'undefined' && global.BackupService) || {
     let backupPrefix = '';
 
     if (workspaceId) {
-      const ws = MasterRepository.getWorkspace(workspaceId);
+      const ws = YearlyEntryStorage.freshWorkspace(workspaceId);
       if (!ws) throw new AppError(ERROR_CODES.NOT_FOUND, `Workspace ${workspaceId} not found.`, 404);
       if (ws.Status !== CONSTANTS.WORKSPACE_STATUS.ACTIVE) {
         throw new AppError(ERROR_CODES.WORKSPACE_DENIED, 'Only an active workspace can be backed up.', 403);
       }
+      if (ws.PartitionPolicy === YearlyEntryStorage.pendingPolicy) throw YearlyDataFileService._conflict('Finish entry storage activation before backup.');
+      if (ws.PartitionPolicy === YearlyEntryStorage.policy) return YearlyBackupSets.create(superAdminContext, ws, deadline);
       sourceSpreadsheetId = ws.SpreadsheetID;
       backupPrefix = `${ws.WorkspaceID}_${String(ws.WorkspaceName || 'Workspace').replace(/[^A-Za-z0-9_-]+/g, '_')}`;
     } else {
@@ -16101,7 +16989,10 @@ var BackupService = (typeof global !== 'undefined' && global.BackupService) || {
           const exceedsCount = i >= maxRetained;
 
           if (exceedsAge || exceedsCount) {
-            if (typeof DriveApp !== 'undefined' && DriveApp.getFileById && candidate.BackupFileID) {
+            const isFileSet = candidate.ChecksumMetadata && this._parseStoredManifest(candidate).format === YearlyEntryStorage.policy;
+            if (isFileSet) {
+              YearlyBackupSets.prune(superAdminContext || { userId: 'SYSTEM', role: 'SYSTEM' }, candidate);
+            } else if (typeof DriveApp !== 'undefined' && DriveApp.getFileById && candidate.BackupFileID) {
               try {
                 const file = DriveApp.getFileById(candidate.BackupFileID);
                 if (!file.isTrashed || !file.isTrashed()) {
@@ -16116,6 +17007,7 @@ var BackupService = (typeof global !== 'undefined' && global.BackupService) || {
               Status: 'PURGED',
               Verified: false
             });
+            if (isFileSet) SpreadsheetApp.flush();
 
             try {
               MasterRepository.logGlobalAudit({
@@ -16159,7 +17051,7 @@ var BackupService = (typeof global !== 'undefined' && global.BackupService) || {
   /**
    * Reopens and fully verifies a registered backup. Arbitrary Drive file IDs are rejected.
    */
-  validateBackup(superAdminContext, workspaceId, backupId) {
+  validateBackup(superAdminContext, workspaceId, backupId, deadline = Date.now() + 240000) {
     AuthorizationService.assertRole(superAdminContext, [CONSTANTS.ROLES.SUPER_ADMIN]);
     if (!workspaceId) {
       throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'workspaceId is required for workspace restore validation.', 400);
@@ -16177,6 +17069,12 @@ var BackupService = (typeof global !== 'undefined' && global.BackupService) || {
     }
 
     const storedManifest = this._parseStoredManifest(record);
+    if (storedManifest.format === YearlyEntryStorage.policy) {
+      const manifest = YearlyBackupSets.validate(record, deadline);
+      return { ok: true, valid: true, backupId, backupFileId: record.BackupFileID, workspaceId,
+        schemaVersion: manifest.schemaVersion, manifestHash: manifest.manifestHash, createdAt: record.CreatedAt,
+        storagePolicy: YearlyEntryStorage.policy };
+    }
     const spreadsheet = this._openBackupSpreadsheet(record.BackupFileID);
     const currentManifest = this._buildManifest(spreadsheet, 'WORKSPACE', workspaceId);
 
@@ -16232,7 +17130,10 @@ var BackupService = (typeof global !== 'undefined' && global.BackupService) || {
     }
 
     let previousSpreadsheetId = '';
+    let previousPartitionPolicy = '';
     let candidateFileId = '';
+    let candidateFileSet = null;
+    const deadline = Date.now() + 240000;
     let safetyBackupId = '';
     let workspaceMutationAttempted = false;
     let pointerSwitchAttempted = false;
@@ -16251,35 +17152,46 @@ var BackupService = (typeof global !== 'undefined' && global.BackupService) || {
         throw new AppError(ERROR_CODES.WORKSPACE_DENIED, `Workspace must be ACTIVE before restore; current status is ${ws.Status}.`, 403);
       }
       previousSpreadsheetId = ws.SpreadsheetID;
+      previousPartitionPolicy = ws.PartitionPolicy || '';
       if (!previousSpreadsheetId || ws.WorkspaceID !== workspaceId) {
         throw new AppError(ERROR_CODES.CONFLICT, 'Workspace storage identity could not be verified.', 409);
       }
 
-      const validation = this.validateBackup(superAdminContext, workspaceId, backupId);
+      const validation = this.validateBackup(superAdminContext, workspaceId, backupId, deadline);
       const record = this._getRegistryRecord(backupId);
 
       // Safety snapshot of the currently live workspace before any pointer change.
-      const safetyBackup = this._createBackupUnlocked(superAdminContext, workspaceId);
+      const safetyBackup = this._createBackupUnlocked(superAdminContext, workspaceId, deadline);
       safetyBackupId = safetyBackup.backupId;
 
-      const backupFile = DriveApp.getFileById(record.BackupFileID);
       const candidateName = `RESTORE_${workspaceId}_${new Date().toISOString().replace(/[:.]/g, '-')}`;
-      const candidateFile = backupFile.makeCopy(candidateName);
-      candidateFileId = candidateFile.getId();
+      if (validation.storagePolicy === YearlyEntryStorage.policy) {
+        candidateFileSet = YearlyBackupSets.copy(this._openBackupSpreadsheet(record.BackupFileID), workspaceId,
+          superAdminContext, Validation.generateId('RESTORE'), candidateName, deadline);
+        candidateFileId = candidateFileSet.core.getId();
+      } else {
+        const candidateFile = DriveApp.getFileById(record.BackupFileID).makeCopy(candidateName);
+        candidateFileId = candidateFile.getId();
+      }
       ownsCandidate = !!candidateFileId && candidateFileId !== previousSpreadsheetId && candidateFileId !== record.BackupFileID;
       if (!ownsCandidate) {
         throw new AppError(ERROR_CODES.CONFLICT, 'Restore working-copy identity could not be verified.', 409);
       }
 
       const candidateSpreadsheet = this._openBackupSpreadsheet(candidateFileId);
-      const candidateManifest = this._buildManifest(candidateSpreadsheet, 'WORKSPACE', workspaceId);
-      if (!SecurityService.constantTimeEquals(validation.manifestHash, candidateManifest.manifestHash)) {
-        throw new AppError(ERROR_CODES.CRYPTO_FAILURE, 'Restore working copy failed integrity verification.', 409);
+      if (!candidateFileSet) {
+        const candidateManifest = this._buildManifest(candidateSpreadsheet, 'WORKSPACE', workspaceId);
+        if (!SecurityService.constantTimeEquals(validation.manifestHash, candidateManifest.manifestHash)) {
+          throw new AppError(ERROR_CODES.CRYPTO_FAILURE, 'Restore working copy failed integrity verification.', 409);
+        }
+      } else {
+        YearlyBackupSets.validateAudit(candidateSpreadsheet, workspaceId, deadline);
       }
 
       // Validate aggregate consistency while the candidate is still isolated.
       // A stale/corrupt rollup set is rejected rather than exposed live.
-      const candidateRollupValidation = this._validateWorkspaceRollupTotals(candidateSpreadsheet);
+      const candidateRollupValidation = this._validateWorkspaceRollupTotals(candidateSpreadsheet,
+        candidateFileSet ? candidateFileSet.manifest.dataFiles.map(file => this._openBackupSpreadsheet(file.fileId)) : [], deadline);
 
       const intentOk = MasterRepository.logGlobalAudit({
         ActorUserID: superAdminContext.userId,
@@ -16287,8 +17199,9 @@ var BackupService = (typeof global !== 'undefined' && global.BackupService) || {
         WorkspaceID: workspaceId,
         EntityType: 'WORKSPACE', EntityID: workspaceId, Action: 'RESTORE_INTENT',
         CorrelationID: candidateFileId,
-        BeforeJSON: { spreadsheetId: previousSpreadsheetId, status: ws.Status },
+        BeforeJSON: { spreadsheetId: previousSpreadsheetId, status: ws.Status, partitionPolicy: previousPartitionPolicy },
         AfterJSON: { spreadsheetId: candidateFileId, status: CONSTANTS.WORKSPACE_STATUS.ACTIVE,
+          partitionPolicy: validation.storagePolicy || '', dataFiles: candidateFileSet ? candidateFileSet.fileIds : [],
           restoredBackupId: backupId, safetyBackupId, rollbackSpreadsheetId: previousSpreadsheetId },
         Reason: 'Proposed isolated-copy restore; failures must restore the prior pointer or preserve the candidate'
       });
@@ -16312,6 +17225,7 @@ var BackupService = (typeof global !== 'undefined' && global.BackupService) || {
       pointerSwitchAttempted = true;
       MasterRepository.updateWorkspace(workspaceId, {
         SpreadsheetID: candidateFileId,
+        PartitionPolicy: validation.storagePolicy || '',
         Status: CONSTANTS.WORKSPACE_STATUS.MAINTENANCE,
         UpdatedAt: new Date().toISOString()
       });
@@ -16347,9 +17261,11 @@ var BackupService = (typeof global !== 'undefined' && global.BackupService) || {
         EntityID: workspaceId,
         Action: 'RESTORE_COMPLETED',
         CorrelationID: candidateFileId,
-        BeforeJSON: { spreadsheetId: previousSpreadsheetId, status: CONSTANTS.WORKSPACE_STATUS.ACTIVE },
+        BeforeJSON: { spreadsheetId: previousSpreadsheetId, status: CONSTANTS.WORKSPACE_STATUS.ACTIVE, partitionPolicy: previousPartitionPolicy },
         AfterJSON: {
           spreadsheetId: candidateFileId,
+          partitionPolicy: validation.storagePolicy || '',
+          dataFiles: candidateFileSet ? candidateFileSet.fileIds : [],
           status: CONSTANTS.WORKSPACE_STATUS.ACTIVE,
           restoredBackupId: backupId,
           safetyBackupId: safetyBackup.backupId,
@@ -16378,13 +17294,15 @@ var BackupService = (typeof global !== 'undefined' && global.BackupService) || {
           readFreshWorkspace();
           MasterRepository.updateWorkspace(workspaceId, {
             SpreadsheetID: previousSpreadsheetId,
+            PartitionPolicy: previousPartitionPolicy,
             Status: CONSTANTS.WORKSPACE_STATUS.ACTIVE,
             UpdatedAt: new Date().toISOString()
           });
           if (typeof SpreadsheetApp !== 'undefined' && SpreadsheetApp.flush) SpreadsheetApp.flush();
           observedWorkspace = readFreshWorkspace();
           if (observedWorkspace && observedWorkspace.WorkspaceID === workspaceId &&
-              observedWorkspace.SpreadsheetID === previousSpreadsheetId &&
+               observedWorkspace.SpreadsheetID === previousSpreadsheetId &&
+               (observedWorkspace.PartitionPolicy || '') === previousPartitionPolicy &&
               observedWorkspace.Status === CONSTANTS.WORKSPACE_STATUS.ACTIVE) {
             rollbackState = 'CONFIRMED';
           }
@@ -16412,7 +17330,7 @@ var BackupService = (typeof global !== 'undefined' && global.BackupService) || {
       // A successful update call alone does not prove detachment. A candidate
       // ever offered as a live pointer is retained unless rollback was flushed
       // and freshly read back under this same lock.
-      if (ownsCandidate && rollbackState !== 'UNCONFIRMED' &&
+      if (ownsCandidate && !candidateFileSet && rollbackState !== 'UNCONFIRMED' &&
           (!pointerSwitchAttempted || rollbackState === 'CONFIRMED')) {
         try {
           const cleanupOk = MasterRepository.logGlobalAudit({

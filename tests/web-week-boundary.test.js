@@ -5,10 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const html = fs.readFileSync(
-  path.resolve(__dirname, '../apps-script/User.html'),
-  'utf8'
-);
+const html = require('./helpers/portal-fixture').view('user');
 
 test('weekly timesheet asks server to resolve workspace week from an absolute instant', () => {
   assert.match(

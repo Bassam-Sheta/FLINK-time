@@ -8,13 +8,11 @@ const vm = require('node:vm');
 
 const appDir = path.resolve(__dirname, '../apps-script');
 
-test('deployable Apps Script layout is exactly one backend plus three portals and manifest', () => {
+test('deployable Apps Script layout is exactly one backend, one portal and the manifest', () => {
   const files = fs.readdirSync(appDir).sort();
   assert.deepEqual(files, [
-    'Admin.html',
     'Code.gs',
-    'SuperAdmin.html',
-    'User.html',
+    'Portal.html',
     'appsscript.json'
   ]);
 });
@@ -68,11 +66,11 @@ test('the single Code.gs backend parses and loads in an Apps Script-like global 
   assert.deepEqual(missing, []);
 });
 
-test('Code.gs routes the three Google Sites embed views explicitly', () => {
+test('Code.gs serves the three Google Sites embed views from one gated portal template', () => {
   const source = fs.readFileSync(path.join(appDir, 'Code.gs'), 'utf8');
-  assert.match(source, /user:\s*'User'/);
-  assert.match(source, /admin:\s*'Admin'/);
-  assert.match(source, /superadmin:\s*'SuperAdmin'/);
+  assert.match(source, /portalViews = \['user', 'admin', 'superadmin'\]/);
+  assert.match(source, /createTemplateFromFile\('Portal'\)/);
+  assert.match(source, /template\.portalView = view;/);
   assert.match(source, /Unknown portal view/);
 });
 

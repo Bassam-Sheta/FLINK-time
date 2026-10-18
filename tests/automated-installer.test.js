@@ -46,23 +46,21 @@ test('automated installer is isolated from the five-file production app', () => 
   assert.equal(productionScopes.has('https://www.googleapis.com/auth/cloudkms'), true);
 });
 
-test('installer release source is pinned to an immutable commit and five allowlisted files', () => {
+test('installer release source is pinned to an immutable commit and allowlisted files', () => {
   const commitMatch = code.match(/commit:\s*'([0-9a-f]{40})'/);
   assert.ok(commitMatch, 'installer must pin a full 40-character commit SHA');
   assert.doesNotMatch(code, /raw\.githubusercontent\.com\/[^'"]+\/main\//);
 
   for (const pathName of [
     'apps-script/Code.gs',
-    'apps-script/User.html',
-    'apps-script/Admin.html',
-    'apps-script/SuperAdmin.html',
+    'apps-script/Portal.html',
     'apps-script/appsscript.json'
   ]) {
     assert.equal(code.includes(pathName), true, pathName);
   }
 
   const fileEntries = [...code.matchAll(/\{ path: 'apps-script\//g)];
-  assert.equal(fileEntries.length, 5);
+  assert.equal(fileEntries.length, 3);
 });
 
 test('installer performs official API lifecycle in safe order', () => {

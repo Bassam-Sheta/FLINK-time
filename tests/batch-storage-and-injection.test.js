@@ -213,6 +213,7 @@ test('ExportService.exportDetailedCsv neutralizes formula injection in CSV cells
 
 test('SheetRepository.appendRows batches insertion with setValues and sanitizes all cells', () => {
   cleanGlobals();
+  global.MasterRepository = { getWorkspace: () => ({ WorkspaceID: 'W1', Status: 'ACTIVE', PartitionPolicy: '' }) };
 
   let writtenRange = null;
   let writtenValues = null;
@@ -347,6 +348,7 @@ test('MasterRepository.appendRows batches insertion with setValues and invalidat
 
 test('SheetRepository.updateRow reuses _headerCache across multiple updates in a request', () => {
   cleanGlobals();
+  global.MasterRepository = { getWorkspace: () => ({ WorkspaceID: 'W1', Status: 'ACTIVE', PartitionPolicy: '' }) };
 
   let headerReads = 0;
   const mockSheet = {
@@ -1055,6 +1057,5 @@ test('JobService.getScriptPropertiesQuotaMetrics flags WARNING and CRITICAL thre
   assert.equal(metrics90.alertStatus, 'CRITICAL');
   assert.ok(metrics90.utilizationPct >= 85);
 });
-
 
 

@@ -6,9 +6,10 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const codePath = path.resolve(__dirname, '../apps-script/Code.gs');
-const userPath = path.resolve(__dirname, '../apps-script/User.html');
-const adminPath = path.resolve(__dirname, '../apps-script/Admin.html');
-const superAdminPath = path.resolve(__dirname, '../apps-script/SuperAdmin.html');
+const portalFixture = require('./helpers/portal-fixture');
+const userPath = portalFixture.view('user');
+const adminPath = portalFixture.view('admin');
+const superAdminPath = portalFixture.view('superadmin');
 
 function source() {
   return fs.readFileSync(codePath, 'utf8');
@@ -64,8 +65,7 @@ test('Super Admin-only mutations are step-up protected except bootstrap and MFA-
 });
 
 test('all browser portals obtain and attach privileged step-up grants', () => {
-  for (const file of [userPath, adminPath, superAdminPath]) {
-    const html = fs.readFileSync(file, 'utf8');
+  for (const html of [userPath, adminPath, superAdminPath]) {
     assert.match(html, /async function ensurePrivilegedStepUp\(\)/);
     assert.match(html, /rawApiCall\('auth\.stepUp'/);
     assert.match(html, /(safeStorage|sessionStorage)\.setItem\('flink_session_token', state\.token\)/);

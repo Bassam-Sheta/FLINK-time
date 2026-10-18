@@ -1,7 +1,7 @@
 # MFA and password recovery — 2026-10-07
 
 Branch: `wp6-mfa-recovery`, based on `fix-staging-audit-dependency` at `2fef319`.
-This package adds recovery within the five-file Google-only application.
+This package adds recovery within the three-file Google-only application.
 
 ## Security contract
 
