@@ -21,10 +21,8 @@ Google Sites / Direct Web App Access
 
 The production application intentionally has only:
 1. `Code.gs` — backend/API/security/data/business/admin logic plus the bound-Sheet installer menu.
-2. `User.html` — employee portal; Google Sites embedding is allowed.
-3. `Admin.html` — Admin/Manager portal; direct Web App access only.
-4. `SuperAdmin.html` — Super Admin portal and first-run wizard; direct Web App access only.
-5. `appsscript.json` — Apps Script manifest.
+2. `Portal.html` — the single portal template for all three role views. `doGet` reads `?view=user|admin|superadmin` and renders only the requested view's server-gated regions; the employee view is served with `ALLOWALL` framing for Google Sites embedding, while the admin and Super Admin views are frame-blocked.
+3. `appsscript.json` — Apps Script manifest.
 
 No other `.gs` file is required for deployment. npm, Node.js, Playwright, GitHub Actions, and repository tests are development-only.
 
@@ -35,23 +33,25 @@ fixed Apps Script REST calls. `npm run staging` prepares and
 verifies an isolated, owner-approved diagnostic bundle; it rejects the declared
 production script ID and requires explicit confirmation before upload/execution.
 Its extra private diagnostics and owner-only API-executable manifest are staging
-only, never part of the five-file production contract. See `STAGING_TESTS.md` for
+only, never part of the three-file production contract. See `STAGING_TESTS.md` for
 authorization, scope, quota sources and the distinction between mocked tests,
 runtime-primitives measurements and live application acceptance. Production
 deployment, MFA and storage behavior have not changed in this package.
 
 ## Role surfaces
 
-### USER portal
+One `Portal.html` template renders all three views. The server gates each role-specific region with `portalView`, so the shared core is written once.
+
+### USER view (`?view=user`)
 Timer, My Time, self-scoped Reports, Account.
 
-### ADMIN portal
+### ADMIN view (`?view=admin`)
 Personal Timer and My Time, Manager workspace, assigned-workspace Reports, Account.
 
-### SUPER_ADMIN portal
+### SUPER_ADMIN view (`?view=superadmin`)
 Personal Timer and My Time, Super Admin control center, Manager workspace, Reports, Account, first-run setup.
 
-Client-side portal separation is a usability layer only. Server-side `ACTION_PERMISSIONS`, session validation, workspace ACLs, and role checks remain the security authority.
+Client-side view separation is a usability layer only. Server-side `ACTION_PERMISSIONS`, session validation, workspace ACLs, and role checks remain the security authority. Note that the three pre-merge portals already shipped the shared privileged client code to every view and relied on navigation gating plus server authorization; the merge preserves that model exactly and does not widen it.
 
 ## Authentication
 - `handleClientRequest` is the application RPC bridge. `onOpen` is the only additional public simple-trigger function and only adds the harmless FLINK Time menu to the bound Sheet; every installer menu handler ends in `_` and is unavailable through `google.script.run`.
@@ -91,7 +91,7 @@ Client-side portal separation is a usability layer only. Server-side `ACTION_PER
 - The Master Control Sheet, workspace Sheets, backup files, and Apps Script project are privileged infrastructure.
 - Ordinary users must not receive direct Editor access to those resources; direct edit access bypasses application RBAC.
 - Production should use a dedicated deployment/automation identity where possible.
-- Admin and Super Admin portals are direct Web App pages and are not framed with ALLOWALL.
+- The Admin and Super Admin views are direct Web App pages and are not framed with ALLOWALL.
 
 ### Yearly Data-file allocation foundation (WP9)
 
@@ -136,9 +136,9 @@ FLINK Time has two distribution paths.
 
 ### Automated installer
 
-The preferred normal-user path is a separate standalone Apps Script installer. It runs as the user accessing it and has its own script-management scopes. Those broader scopes are not present in the five-file FLINK Time runtime.
+The preferred normal-user path is a separate standalone Apps Script installer. It runs as the user accessing it and has its own script-management scopes. Those broader scopes are not present in the three-file FLINK Time runtime.
 
-The installer uses the official Apps Script API to create a bound project, upload the five production files from an immutable pinned release, create a version, create the Web App deployment, and return the deployment URL. It injects only the dedicated Master Sheet ID and installation-owner bootstrap sentinels.
+The installer uses the official Apps Script API to create a bound project, upload the three production files from an immutable pinned release, create a version, create the Web App deployment, and return the deployment URL. It injects only the dedicated Master Sheet ID and installation-owner bootstrap sentinels.
 
 API-installed copies have a first-run self-authorization gate. Before serving the normal portal, the gate activates only while an injected installation owner exists and durable installation-owner state is still absent. It verifies the signed-in owner and uses `ScriptApp.getAuthorizationInfo(ScriptApp.AuthMode.FULL)` to show Google's authorization URL if required. No production OAuth scope is added for this gate.
 

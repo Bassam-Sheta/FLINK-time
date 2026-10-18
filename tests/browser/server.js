@@ -6,30 +6,32 @@ const path = require('node:path');
 
 const root = path.resolve(__dirname, '../..');
 const mockPath = path.join(__dirname, 'mock-google.js');
+const portalPath = path.join(root, 'apps-script', 'Portal.html');
+const { renderPortal } = require('../helpers/portal-template');
 
 const routes = {
   '/': {
-    file: path.join(root, 'apps-script', 'User.html'),
+    view: 'user',
     role: 'USER',
     setupInitialized: true
   },
   '/user': {
-    file: path.join(root, 'apps-script', 'User.html'),
+    view: 'user',
     role: 'USER',
     setupInitialized: true
   },
   '/admin': {
-    file: path.join(root, 'apps-script', 'Admin.html'),
+    view: 'admin',
     role: 'ADMIN',
     setupInitialized: true
   },
   '/superadmin-setup': {
-    file: path.join(root, 'apps-script', 'SuperAdmin.html'),
+    view: 'superadmin',
     role: 'SUPER_ADMIN',
     setupInitialized: false
   },
   '/superadmin': {
-    file: path.join(root, 'apps-script', 'SuperAdmin.html'),
+    view: 'superadmin',
     role: 'SUPER_ADMIN',
     setupInitialized: true
   }
@@ -37,10 +39,10 @@ const routes = {
 
 function pageHtml(route) {
   const config = routes[route] || routes['/'];
-  const html = fs.readFileSync(config.file, 'utf8');
+  const html = renderPortal(fs.readFileSync(portalPath, 'utf8'), { portalView: config.view });
   const marker = '<!-- CORE FRONTEND ENGINE SCRIPT -->';
   if (!html.includes(marker)) {
-    throw new Error(path.basename(config.file) + ' core script marker not found.');
+    throw new Error('Portal.html core script marker not found.');
   }
 
   const bootstrap = [

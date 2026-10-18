@@ -5,10 +5,9 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const html = fs.readFileSync(
-  path.resolve(__dirname, '../apps-script/User.html'),
-  'utf8'
-);
+const { view, VIEWS } = require('./helpers/portal-fixture');
+
+const html = view('user');
 
 test('web timer sends operationId on start and timerId on stop', () => {
   assert.match(html, /apiCall\('timer\.start',[\s\S]{0,500}operationId/);
@@ -18,12 +17,8 @@ test('web timer sends operationId on start and timerId on stop', () => {
 });
 
 test('all three browser portals bind visibilitychange to restore active timer clock on tab focus', () => {
-  const portals = ['User.html', 'Admin.html', 'SuperAdmin.html'];
-  for (const portal of portals) {
-    const portalHtml = fs.readFileSync(
-      path.resolve(__dirname, '../apps-script', portal),
-      'utf8'
-    );
+  for (const portal of VIEWS) {
+    const portalHtml = view(portal);
     assert.match(
       portalHtml,
       /document\.addEventListener\(['"]visibilitychange['"]/,
@@ -38,12 +33,8 @@ test('all three browser portals bind visibilitychange to restore active timer cl
 });
 
 test('all three browser portals bind pagehide to clean up running timer interval on page unload', () => {
-  const portals = ['User.html', 'Admin.html', 'SuperAdmin.html'];
-  for (const portal of portals) {
-    const portalHtml = fs.readFileSync(
-      path.resolve(__dirname, '../apps-script', portal),
-      'utf8'
-    );
+  for (const portal of VIEWS) {
+    const portalHtml = view(portal);
     assert.match(
       portalHtml,
       /window\.addEventListener\(['"]pagehide['"]/,

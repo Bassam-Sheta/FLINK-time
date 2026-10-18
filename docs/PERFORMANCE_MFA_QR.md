@@ -52,18 +52,24 @@ this evidence describes the healthy TextFinder path, not a fault-path bound.
 
 ## Payload cost and behavior
 
-No shared-template expansion exists on this branch: the deployable HTML text
-is the rendered application HTML before Google's own host wrapper. UTF-8 byte
-counts are uncompressed; they exclude the Google wrapper/network overhead.
+The deployable HTML is an Apps Script HTML template: `<? ?>` gates render
+server-side, so a view's payload is the rendered application HTML for that view
+before Google's own host wrapper. UTF-8 byte counts are uncompressed; they
+exclude the Google wrapper/network overhead.
 
-| File | Before bytes | After bytes |
-| --- | ---: | ---: |
-| `Code.gs` | 718,301 | 728,601 |
-| `User.html` | 205,083 | 227,506 |
-| `Admin.html` | 200,969 | 223,392 |
-| `SuperAdmin.html` | 204,925 | 227,348 |
+| File | Before bytes | After bytes | Current single-portal bytes |
+| --- | ---: | ---: | ---: |
+| `Code.gs` | 718,301 | 728,601 | 729,269 |
+| `Portal.html` (was `User.html`) | 205,083 | 227,506 | see below |
+| `Admin.html` (now gated in `Portal.html`) | 200,969 | 223,392 | — |
+| `SuperAdmin.html` (now gated in `Portal.html`) | 204,925 | 227,348 | — |
 
-The private encoder and safer UI add about 22.4 KB per portal. This is an explicit
+The three near-identical portals were then consolidated into one
+`Portal.html` (245,063 bytes) served by `?view=user|admin|superadmin`. That
+replaces 678,246 bytes of duplicated HTML on the previous branch with a single
+template, while each view still renders byte-for-byte identical output to the
+file it replaced. The private encoder and safer UI still add about 22.4 KB
+relative to the original employee payload. This is an explicit
 feature/security payload cost, **not payload slimming**. QR work runs only on
 enrollment; no external image/script/CDN or new deployable file is introduced.
 The independent WP11 shared-source draft is not merged or overwritten here;

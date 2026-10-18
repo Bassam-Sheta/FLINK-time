@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const codePath = path.resolve(__dirname, '../apps-script/Code.gs');
-const superAdminPath = path.resolve(__dirname, '../apps-script/SuperAdmin.html');
+const superAdminPath = require('./helpers/portal-fixture').view('superadmin');
 const source = fs.readFileSync(codePath, 'utf8');
 const mod = require(codePath);
 
@@ -128,7 +128,7 @@ test('settings catalog API is Super Admin controlled and patch requires step-up'
 });
 
 test('Super Admin settings UI is generated from the catalog', () => {
-  const html = fs.readFileSync(superAdminPath, 'utf8');
+  const html = superAdminPath;
   assert.match(html, /settings\.getCatalog/);
   assert.match(html, /settings\.patch/);
   assert.match(html, /dataset\.settingKey/);

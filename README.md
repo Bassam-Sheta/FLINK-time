@@ -13,7 +13,7 @@ The separate application under `installer/` automates the deployment work:
 1. Open your organization's **FLINK Time Installer**.
 2. Open Google's Apps Script settings and enable **Google Apps Script API** access once.
 3. Return to the installer and click **INSTALL FLINK TIME**.
-4. The installer creates the Master Sheet, creates the bound Apps Script project, uploads the five production files, creates a version, creates the Web App deployment, and opens the Super Admin URL.
+4. The installer creates the Master Sheet, creates the bound Apps Script project, uploads the three production files, creates a version, creates the Web App deployment, and opens the Super Admin URL.
 5. If the newly created FLINK Time project still needs its own Drive/Sheets consent, its first-run page shows **AUTHORIZE FLINK TIME** using Google's authorization URL.
 6. Complete the guided Super Admin setup.
 
@@ -28,24 +28,24 @@ The installed FLINK Time runtime is still only:
 ```
 apps-script/
   Code.gs
-  User.html
-  Admin.html
-  SuperAdmin.html
+  Portal.html
   appsscript.json
 ```
 
-The separate `installer/` project is only a distribution tool. Its script-management scopes are **not** added to the five-file FLINK Time runtime.
+One `Portal.html` template serves all three role views. `doGet` reads `?view=user|admin|superadmin` and the server renders only that view's regions, so the frame-embeddable employee page never receives the privileged role markup.
+
+The separate `installer/` project is only a distribution tool. Its script-management scopes are **not** added to the three-file FLINK Time runtime.
 
 Portal rule:
 
-- **Employee:** may be embedded in Google Sites.
-- **Admin:** direct Web App access.
-- **Super Admin:** direct Web App access.
+- **Employee** (`?view=user`): may be embedded in Google Sites; served with `ALLOWALL` framing.
+- **Admin** (`?view=admin`): direct Web App access; frame-blocked.
+- **Super Admin** (`?view=superadmin`): direct Web App access; frame-blocked.
 
 ## Repository folders
 
 ```
-apps-script/       five-file production application
+apps-script/       three-file production application
 installer/         separate automated deployment application
 tests/             automated regression/security/browser tests
 docs/              installation, architecture, and security documentation

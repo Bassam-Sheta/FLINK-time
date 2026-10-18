@@ -2,9 +2,10 @@
 
 These are application source, not new npm dependencies or remote integrations.
 `node scripts/embed-local-libraries.js` embeds the checked-in inputs into the
-existing five-file Google deployment. `--check` verifies exact source equality
-offline; `tests/local-libraries.test.js` enforces it and identical enrollment
-handlers across the portals. Do not edit generated blocks independently.
+existing three-file Google deployment (`Code.gs` and `Portal.html`). `--check`
+verifies exact source equality offline; `tests/local-libraries.test.js` enforces
+it and identical enrollment handlers across the rendered portal views. Do not
+edit generated blocks independently.
 
 ## Password KDF
 

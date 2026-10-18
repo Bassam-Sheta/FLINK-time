@@ -25,26 +25,26 @@ test('QR implementation is the exact pinned TypeScript compiler output', () => {
   assert.equal(crypto.createHash('sha256').update(body).digest('hex'), 'eed4a1cc7f7d6a5bd52b60539afe7a4ad786a7f7bd71559b780c9a7d59981244');
 });
 
-test('QR enrollment handling stays identical across all three portals', () => {
-  const blocks = ['User', 'Admin', 'SuperAdmin'].map(name => {
-    const html = fs.readFileSync(path.join(__dirname, `../apps-script/${name}.html`), 'utf8');
-    const from = html.indexOf('    let enrollmentScreenVersion = 0;');
-    const to = html.indexOf('    function showRecoveryMessage(', from);
-    assert.ok(from > 0 && to > from, name);
-    return html.slice(from, to);
+const { view, VIEWS } = require('./helpers/portal-fixture');
+
+function sharedBlock(from, to) {
+  return VIEWS.map(name => {
+    const html = view(name);
+    const start = html.indexOf(from);
+    const end = html.indexOf(to, start);
+    assert.ok(start > 0 && end > start, name);
+    return html.slice(start, end);
   });
+}
+
+test('QR enrollment handling stays identical across all three portals', () => {
+  const blocks = sharedBlock('    let enrollmentScreenVersion = 0;', '    function showRecoveryMessage(');
   assert.equal(blocks[0], blocks[1]);
   assert.equal(blocks[0], blocks[2]);
 });
 
 test('late-response authentication guard stays identical across all three portals', () => {
-  const blocks = ['User', 'Admin', 'SuperAdmin'].map(name => {
-    const html = fs.readFileSync(path.join(__dirname, `../apps-script/${name}.html`), 'utf8');
-    const from = html.indexOf('    async function apiCall(');
-    const to = html.indexOf('    // App Initialization', from);
-    assert.ok(from > 0 && to > from, name);
-    return html.slice(from, to);
-  });
+  const blocks = sharedBlock('    async function apiCall(', '    // App Initialization');
   assert.equal(blocks[0], blocks[1]);
   assert.equal(blocks[0], blocks[2]);
 });

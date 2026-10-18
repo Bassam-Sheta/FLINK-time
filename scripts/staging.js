@@ -5,7 +5,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 
 const root = path.resolve(__dirname, '..');
-const runtimeFiles = ['Code.gs', 'User.html', 'Admin.html', 'SuperAdmin.html', 'appsscript.json'];
+const runtimeFiles = ['Code.gs', 'Portal.html', 'appsscript.json'];
 
 function validateConfig(config) {
   const keys = ['environment', 'scriptId', 'productionScriptId', 'projectId', 'accountEmail', 'oauthClientId'];

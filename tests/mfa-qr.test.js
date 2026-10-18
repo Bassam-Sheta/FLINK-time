@@ -15,9 +15,11 @@ function encoder() {
   return context.MfaQr_;
 }
 
+const { view, VIEWS } = require('./helpers/portal-fixture');
+
 test('all portals display a local enrollment QR and explain the confirmation code', () => {
-  for (const name of ['User', 'Admin', 'SuperAdmin']) {
-    const html = fs.readFileSync(path.join(root, `apps-script/${name}.html`), 'utf8');
+  for (const name of VIEWS) {
+    const html = view(name);
     assert.match(html, /id="enrollmentQr"/, name);
     assert.match(html, /Scan.*QR code/, name);
     assert.match(html, /six-digit code.*confirm/i, name);

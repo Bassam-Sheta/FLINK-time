@@ -7,9 +7,10 @@ const path = require('node:path');
 
 const root = path.resolve(__dirname, '../apps-script');
 const code = fs.readFileSync(path.join(root, 'Code.gs'), 'utf8');
-const user = fs.readFileSync(path.join(root, 'User.html'), 'utf8');
-const admin = fs.readFileSync(path.join(root, 'Admin.html'), 'utf8');
-const superAdmin = fs.readFileSync(path.join(root, 'SuperAdmin.html'), 'utf8');
+const { view } = require('./helpers/portal-fixture');
+const user = view('user');
+const admin = view('admin');
+const superAdmin = view('superadmin');
 const manifest = JSON.parse(
   fs.readFileSync(path.join(root, 'appsscript.json'), 'utf8')
 );
@@ -28,14 +29,17 @@ test('production manifest is domain-restricted while retaining deployer executio
   assert.match(spec, /server-observed Google Workspace email/i);
 });
 
-test('three portal files are bound to distinct embed modes', () => {
+test('one portal template serves three distinct embed modes', () => {
   assert.match(user, /const EMBED_MODE = 'USER'/);
   assert.match(admin, /const EMBED_MODE = 'ADMIN'/);
   assert.match(superAdmin, /const EMBED_MODE = 'SUPER_ADMIN'/);
 
-  assert.match(code, /user:\s*'User'/);
-  assert.match(code, /admin:\s*'Admin'/);
-  assert.match(code, /superadmin:\s*'SuperAdmin'/);
+  assert.match(code, /HtmlService\.createTemplateFromFile\('Portal'\)/);
+  assert.match(code, /template\.portalView = view;/);
+  assert.ok(
+    !/createTemplateFromFile\('(User|Admin|SuperAdmin)'\)/.test(code),
+    'doGet must render the single Portal template'
+  );
 });
 
 test('all browser portals support password + MFA challenge login', () => {

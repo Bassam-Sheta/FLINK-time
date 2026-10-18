@@ -855,20 +855,19 @@ function doGet(e) {
 
   // Otherwise serve the Google Workspace-Native Web Application UI
   try {
-    const viewFiles = {
-      user: 'User',
-      admin: 'Admin',
-      superadmin: 'SuperAdmin'
-    };
-    const fileName = viewFiles[view];
-    if (!fileName) {
+    const portalViews = ['user', 'admin', 'superadmin'];
+    if (!portalViews.includes(view)) {
       throw new AppError(
         ERROR_CODES.NOT_FOUND,
         'Unknown portal view. Use ?view=user, ?view=admin, or ?view=superadmin.',
         404
       );
     }
-    const template = HtmlService.createTemplateFromFile(fileName);
+    // One Portal.html serves every view. The server-side template includes only the
+    // requested view's markup, so the frame-embeddable employee page never carries
+    // privileged admin/super-admin markup or handlers in its payload.
+    const template = HtmlService.createTemplateFromFile('Portal');
+    template.portalView = view;
     const output = template.evaluate();
     const titles = {
       user: 'FLINK Time — Employee',
@@ -14170,25 +14169,6 @@ var SetupService = (typeof global !== 'undefined' && global.SetupService) || {
   getSetupStatus() {
     let superAdminExists = false;
     let workspaceCount = 0;
-    let adminCount = 0;
-    let userCount = 0;
-    let isSetupComplete = false;
-
-    try {
-      const { rows: accounts } = MasterRepository.getTableData(CONSTANTS.MASTER_TABS.ACCOUNTS);
-      superAdminExists = accounts.some(a => a.Role === CONSTANTS.ROLES.SUPER_ADMIN && a.Status !== CONSTANTS.ACCOUNT_STATUS.DELETED);
-      adminCount = accounts.filter(a => a.Role === CONSTANTS.ROLES.ADMIN && a.Status !== CONSTANTS.ACCOUNT_STATUS.DELETED).length;
-      userCount = accounts.filter(a => a.Role === CONSTANTS.ROLES.USER && a.Status !== CONSTANTS.ACCOUNT_STATUS.DELETED).length;
-    } catch (e) {
-      superAdminExists = false;
-    }
-
-    try {
-      const workspaces = MasterRepository.listWorkspaces();
-      workspaceCount = workspaces.filter(w => w.Status !== CONSTANTS.WORKSPACE_STATUS.ARCHIVED).length;
-    } catch (e) {
-      workspaceCount = 0;
-    }
 
     let setupFlag = 'false';
     try {
@@ -14196,7 +14176,47 @@ var SetupService = (typeof global !== 'undefined' && global.SetupService) || {
     } catch (e) {
       setupFlag = 'false';
     }
-    isSetupComplete = (setupFlag === 'true' || setupFlag === true) && superAdminExists && workspaceCount > 0;
+
+    // Public endpoint: every portal load calls this, so read the completion flag
+    // first. A finished installation is answered from that flag plus bounded
+    // lookups; it must never scan the growing Accounts/Workspaces tables just to
+    // repeat two booleans.
+    if (setupFlag !== 'true' && setupFlag !== true) {
+      return {
+        initialized: false,
+        setupComplete: false,
+        setupRequired: true
+      };
+    }
+
+    try {
+      const superAdmins = MasterRepository.findRowsByKey(
+        CONSTANTS.MASTER_TABS.ACCOUNTS,
+        'Role',
+        CONSTANTS.ROLES.SUPER_ADMIN
+      );
+      superAdminExists = superAdmins.some(a => a.Status !== CONSTANTS.ACCOUNT_STATUS.DELETED);
+    } catch (e) {
+      superAdminExists = false;
+    }
+
+    try {
+      // A workspace is counted unless it is archived, so probe the three live
+      // states with bounded finder lookups instead of transferring the table.
+      const liveStatuses = [
+        CONSTANTS.WORKSPACE_STATUS.ACTIVE,
+        CONSTANTS.WORKSPACE_STATUS.SUSPENDED,
+        CONSTANTS.WORKSPACE_STATUS.MAINTENANCE
+      ];
+      const hasWorkspace = liveStatuses.some(status =>
+        MasterRepository.findRowsByKey(CONSTANTS.MASTER_TABS.WORKSPACES, 'Status', status).length > 0
+      );
+      workspaceCount = hasWorkspace ? 1 : 0;
+    } catch (e) {
+      workspaceCount = 0;
+    }
+
+    const isSetupComplete = superAdminExists && workspaceCount > 0;
 
     // Once initialization is complete, the public setup-status endpoint only needs
     // to tell the login page that setup is finished. Do not expose company settings,

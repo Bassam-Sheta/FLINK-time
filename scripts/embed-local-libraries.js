@@ -1,13 +1,14 @@
 'use strict';
 
 // Deterministic, offline embedding. No package installation, fetching or
-// execution of vendor inputs. The Google deployment still has exactly 5 files.
+// execution of vendor inputs. The Google deployment has three files: Code.gs,
+// Portal.html and appsscript.json.
 const fs = require('node:fs');
 const path = require('node:path');
 const root = path.resolve(__dirname, '..');
 const libraries = [
   { name: 'PASSWORD KDF', file: 'vendor/sjcl-password-kdf.js', targets: ['Code.gs'] },
-  { name: 'MFA QR', file: 'vendor/nayuki-qr.js', targets: ['User.html', 'Admin.html', 'SuperAdmin.html'] }
+  { name: 'MFA QR', file: 'vendor/nayuki-qr.js', targets: ['Portal.html'] }
 ];
 
 function sync(checkOnly = false) {

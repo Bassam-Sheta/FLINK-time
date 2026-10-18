@@ -3,8 +3,10 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>FLINK Time — Manager</title>
-  <base target="_blank">
+<? if (portalView === 'user') { ?>  <title>FLINK Time — Employee</title>
+<? } else if (portalView === 'admin') { ?>  <title>FLINK Time — Manager</title>
+<? } else if (portalView === 'superadmin') { ?>  <title>FLINK Time — Super Admin</title>
+<? } ?>  <base target="_blank">
   <style>
     :root {
       --bg-base: #0B0F19;
@@ -462,7 +464,10 @@
     <div class="logo-badge">
       <span>FLINK</span> TIME
       <span class="tag-workspace" id="currentWorkspaceBadge">Primary Workspace</span>
-    </div>
+<? if (portalView === 'user') { ?>      <select id="userWorkspaceSelect" class="tag-workspace hidden"
+        onchange="changeUserWorkspace(this.value)"
+        aria-label="Active workspace"></select>
+<? } ?>    </div>
     <nav class="nav-links" id="navLinks"></nav>
     <div class="user-pill">
       <button class="nav-btn" onclick="openStandaloneApp()" title="Open Standalone in New Tab" aria-label="Open standalone tab">&#8599; Standalone</button>
@@ -475,58 +480,100 @@
 
   <!-- MAIN APP CONTAINER -->
   <main>
-    <!-- 1. FIRST-RUN SETUP WIZARD & DEPLOYMENT ASSISTANT -->
+<? if (portalView === 'user') { ?>    <div id="appNotice" class="hidden" role="alert"
+      style="margin-bottom:1rem; padding:0.85rem 1rem; border-radius:6px;
+      background:rgba(239,68,68,0.16); color:#FCA5A5; border:1px solid rgba(239,68,68,0.35);"></div>
+<? } ?>    <!-- 1. FIRST-RUN SETUP WIZARD & DEPLOYMENT ASSISTANT -->
     <div id="setupWizardContainer" class="hidden">
       <!-- Welcome Hero -->
       <div id="setupWelcomeScreen" class="card" style="max-width: 680px; margin: 3rem auto; text-align: center; padding: 3.5rem 2.5rem;">
         <div style="font-size: 2.5rem; font-weight: 800; letter-spacing: -0.03em; margin-bottom: 0.5rem;">
           Welcome to <span style="background: linear-gradient(135deg, #3B82F6, #60A5FA); -webkit-background-clip: text; -webkit-text-fill-color: transparent;">FLINK Time</span>
         </div>
-        <p style="color: var(--text-secondary); font-size: 1.05rem; line-height: 1.5; margin-bottom: 2.5rem;">
+<? if (portalView === 'user' || portalView === 'admin') { ?>        <p style="color: var(--text-secondary); font-size: 1.05rem; line-height: 1.5; margin-bottom: 2.5rem;">
           A commercial-grade, multi-tenant workforce monitoring and time tracking platform built directly on Google Workspace. Zero servers, zero spreadsheet formula editing, pure GUI governance.
-        </p>
-        <div class="grid-2" style="margin-bottom: 2.5rem; text-align: left;">
-          <div class="card" style="margin-bottom: 0; background: var(--bg-card); padding: 1.25rem;">
-            <div style="font-weight: 700; color: #60A5FA; margin-bottom: 0.4rem;">Deployment Assistant</div>
+<? } else if (portalView === 'superadmin') { ?>        <p style="color: var(--text-secondary); font-size: 1.05rem; line-height: 1.5; margin-bottom: 2rem;">
+          You are at the final installation stage. No code, npm, command line, or setup key is required here.
+<? } ?>        </p>
+<? if (portalView === 'user' || portalView === 'admin') { ?>        <div class="grid-2" style="margin-bottom: 2.5rem; text-align: left;">
+<? } else if (portalView === 'superadmin') { ?>        <div class="grid-2" style="margin-bottom: 2rem; text-align: left;">
+<? } ?>          <div class="card" style="margin-bottom: 0; background: var(--bg-card); padding: 1.25rem;">
+<? if (portalView === 'user' || portalView === 'admin') { ?>            <div style="font-weight: 700; color: #60A5FA; margin-bottom: 0.4rem;">Deployment Assistant</div>
             <div style="font-size: 0.8rem; color: var(--text-secondary);">Step-by-step instructions to embed this Web App full-page in Google Sites.</div>
-          </div>
+<? } else if (portalView === 'superadmin') { ?>            <div style="font-weight: 700; color: #60A5FA; margin-bottom: 0.4rem;">Before you start</div>
+            <div style="font-size: 0.8rem; color: var(--text-secondary);">Open the Master Sheet and choose <strong>FLINK Time → Prepare Installation</strong> once.</div>
+<? } ?>          </div>
           <div class="card" style="margin-bottom: 0; background: var(--bg-card); padding: 1.25rem;">
             <div style="font-weight: 700; color: #34D399; margin-bottom: 0.4rem;">Guided 9-Step Setup</div>
-            <div style="font-size: 0.8rem; color: var(--text-secondary);">Provisions root Super Admin, multi-tab workspace database, and company rules.</div>
-          </div>
+<? if (portalView === 'user' || portalView === 'admin') { ?>            <div style="font-size: 0.8rem; color: var(--text-secondary);">Provisions root Super Admin, multi-tab workspace database, and company rules.</div>
+<? } else if (portalView === 'superadmin') { ?>            <div style="font-size: 0.8rem; color: var(--text-secondary);">Create the Super Admin, first workspace, users, projects, and company rules through the GUI.</div>
+<? } ?>          </div>
         </div>
         <div style="display: flex; gap: 1rem; justify-content: center;">
-          <button class="btn btn-secondary" onclick="showDeploymentAssistant()">Deployment Assistant</button>
+<? if (portalView === 'user' || portalView === 'admin') { ?>          <button class="btn btn-secondary" onclick="showDeploymentAssistant()">Deployment Assistant</button>
           <button class="btn" style="padding: 0.75rem 2rem; font-size: 1rem;" onclick="startSetupWizard()">[ START SETUP ]</button>
-        </div>
+<? } else if (portalView === 'superadmin') { ?>          <button class="btn btn-secondary" onclick="showDeploymentAssistant()">Installation Help</button>
+          <button class="btn" style="padding: 0.75rem 2rem; font-size: 1rem;" onclick="startSetupWizard()">START SETUP</button>
+<? } ?>        </div>
       </div>
 
-      <!-- Deployment Assistant Page -->
-      <div id="deploymentAssistantView" class="card hidden" style="max-width: 760px; margin: 2rem auto;">
+<? if (portalView === 'user' || portalView === 'admin') { ?>      <!-- Deployment Assistant Page -->
+<? } else if (portalView === 'superadmin') { ?>      <!-- Installation Help Page -->
+<? } ?>      <div id="deploymentAssistantView" class="card hidden" style="max-width: 760px; margin: 2rem auto;">
         <div class="card-header">
           <div>
-            <div class="card-title">FLINK Time Deployment Assistant</div>
+<? if (portalView === 'user' || portalView === 'admin') { ?>            <div class="card-title">FLINK Time Deployment Assistant</div>
             <div class="card-subtitle">Google Sites Full-Page Embedding Guide</div>
-          </div>
-          <button class="btn btn-secondary btn-sm" onclick="hideDeploymentAssistant()">Back to Setup</button>
-        </div>
-        <div class="card" style="background: var(--bg-card); margin-bottom: 1.5rem;">
-          <div style="font-weight: 700; margin-bottom: 0.75rem;">System Environment Checks</div>
+<? } else if (portalView === 'superadmin') { ?>            <div class="card-title">FLINK Time Installation Help</div>
+            <div class="card-subtitle">Simple first-run checklist</div>
+<? } ?>          </div>
+<? if (portalView === 'user' || portalView === 'admin') { ?>          <button class="btn btn-secondary btn-sm" onclick="hideDeploymentAssistant()">Back to Setup</button>
+<? } else if (portalView === 'superadmin') { ?>          <button class="btn btn-secondary btn-sm" onclick="hideDeploymentAssistant()">Back</button>
+<? } ?>        </div>
+<? if (portalView === 'superadmin') { ?>
+<? } ?>        <div class="card" style="background: var(--bg-card); margin-bottom: 1.5rem;">
+<? if (portalView === 'user' || portalView === 'admin') { ?>          <div style="font-weight: 700; margin-bottom: 0.75rem;">System Environment Checks</div>
           <div style="font-size: 0.85rem; line-height: 1.8;">
             <div><span style="color: #34D399;">✓</span> Google Apps Script Runtime: Authorized V8 Engine</div>
             <div><span style="color: #34D399;">✓</span> Master Sheet Repository: Connected & Bootstrapped</div>
             <div><span style="color: #34D399;">✓</span> Google Drive Storage: Ready for Automated Backups</div>
             <div><span style="color: #34D399;">✓</span> Frame Embedding Mode: ALLOWALL Enabled</div>
-          </div>
+<? } else if (portalView === 'superadmin') { ?>          <div style="font-weight: 700; margin-bottom: 0.75rem;">If you can see this page, the Web App is already deployed.</div>
+          <div style="font-size: 0.85rem; line-height: 1.8; color: var(--text-secondary);">
+            <div><span style="color: #34D399;">✓</span> No setup key is required.</div>
+            <div><span style="color: #34D399;">✓</span> No command line or npm is required.</div>
+            <div><span style="color: #34D399;">✓</span> Step 1 automatically verifies the Google account that prepared and deployed this installation.</div>
+<? } ?>          </div>
         </div>
-        <div style="margin-bottom: 1.5rem;">
-          <div style="font-weight: 700; margin-bottom: 0.5rem;">Web App URL</div>
-          <div style="display: flex; gap: 0.5rem;">
-            <input type="text" id="deployWebAppUrl" value="https://script.google.com/macros/s/CURRENT/exec" readonly>
+<? if (portalView === 'superadmin') { ?>
+<? } ?>        <div style="margin-bottom: 1.5rem;">
+<? if (portalView === 'user' || portalView === 'admin') { ?>          <div style="font-weight: 700; margin-bottom: 0.5rem;">Web App URL</div>
+<? } else if (portalView === 'superadmin') { ?>          <div style="font-weight: 700; margin-bottom: 0.5rem;">Current Web App</div>
+<? } ?>          <div style="display: flex; gap: 0.5rem;">
+<? if (portalView === 'user' || portalView === 'admin') { ?>            <input type="text" id="deployWebAppUrl" value="https://script.google.com/macros/s/CURRENT/exec" readonly>
             <button class="btn btn-secondary" onclick="copyDeployUrl()">COPY URL</button>
+<? } else if (portalView === 'superadmin') { ?>            <input type="text" id="deployWebAppUrl" readonly>
+            <button class="btn btn-secondary" onclick="copyDeployUrl()">COPY</button>
           </div>
         </div>
-        <ol style="padding-left: 1.25rem; font-size: 0.875rem; color: var(--text-secondary); line-height: 1.8; margin-bottom: 2rem;">
+
+        <div class="card" style="background: var(--bg-card); margin-bottom: 1.5rem;">
+          <div style="font-weight: 700; margin-bottom: 0.75rem;">What to do</div>
+          <ol style="padding-left: 1.25rem; font-size: 0.875rem; color: var(--text-secondary); line-height: 1.9; margin: 0;">
+            <li>Open the FLINK Time Master Sheet.</li>
+            <li>Choose <strong>FLINK Time → Prepare Installation</strong>.</li>
+            <li>Return here while signed in with the same Google Workspace account.</li>
+            <li>Click <strong>Start Setup</strong> and complete the guided steps.</li>
+          </ol>
+        </div>
+
+        <div class="card" style="background: var(--bg-card); margin-bottom: 1.5rem;">
+          <div style="font-weight: 700; margin-bottom: 0.75rem;">Portal rule</div>
+          <div style="font-size: 0.85rem; color: var(--text-secondary); line-height: 1.7;">
+            The Employee portal may be embedded in Google Sites. Admin and Super Admin must be opened directly from their Web App links.
+<? } ?>          </div>
+        </div>
+<? if (portalView === 'user' || portalView === 'admin') { ?>        <ol style="padding-left: 1.25rem; font-size: 0.875rem; color: var(--text-secondary); line-height: 1.8; margin-bottom: 2rem;">
           <li>Open your company's <strong>Google Sites</strong> portal.</li>
           <li>Click the <strong>Insert</strong> tab on the right sidebar and select <strong>Embed</strong>.</li>
           <li>Select <strong>By URL</strong> and paste the copied Apps Script Web App URL.</li>
@@ -535,7 +582,9 @@
           <li>Return here and click <strong>[ I HAVE DONE THIS ]</strong> to continue software setup.</li>
         </ol>
         <button class="btn btn-success" style="width: 100%;" onclick="startSetupWizard()">I HAVE DONE THIS — PROCEED TO SETUP</button>
-      </div>
+<? } else if (portalView === 'superadmin') { ?>
+        <button class="btn btn-success" style="width: 100%;" onclick="startSetupWizard()">START SETUP</button>
+<? } ?>      </div>
 
       <!-- 9-Step Setup Wizard Card -->
       <div id="setupWizardCard" class="card hidden" style="max-width: 800px; margin: 2rem auto;">
@@ -1297,8 +1346,10 @@ var qrcodegen;
   </script>
   <!-- CORE FRONTEND ENGINE SCRIPT -->
   <script>
-    const EMBED_MODE = 'ADMIN';
-
+<? if (portalView === 'user') { ?>    const EMBED_MODE = 'USER';
+<? } else if (portalView === 'admin') { ?>    const EMBED_MODE = 'ADMIN';
+<? } else if (portalView === 'superadmin') { ?>    const EMBED_MODE = 'SUPER_ADMIN';
+<? } ?>
     function embedRoleAllowed(role) {
       const normalized = String(role || '').toUpperCase();
       if (EMBED_MODE === 'USER') {
@@ -1317,9 +1368,11 @@ var qrcodegen;
     }
 
     function embedAllowedViews() {
-      if (EMBED_MODE === 'ADMIN') return new Set(['timer', 'mytime', 'admin', 'reports', 'account']);
+<? if (portalView === 'user') { ?>      if (EMBED_MODE === 'ADMIN') return new Set(['admin', 'reports', 'account']);
+      if (EMBED_MODE === 'SUPER_ADMIN') return new Set(['superadmin', 'admin', 'reports', 'account']);
+<? } else if (portalView === 'admin' || portalView === 'superadmin') { ?>      if (EMBED_MODE === 'ADMIN') return new Set(['timer', 'mytime', 'admin', 'reports', 'account']);
       if (EMBED_MODE === 'SUPER_ADMIN') return new Set(['timer', 'mytime', 'superadmin', 'admin', 'reports', 'account']);
-      return new Set(['timer', 'mytime', 'reports', 'account']);
+<? } ?>      return new Set(['timer', 'mytime', 'reports', 'account']);
     }
 
     function showEmbedAccessDenied() {
@@ -1966,18 +2019,46 @@ var qrcodegen;
       try {
         state.workspaces = await apiCall('workspaces.list');
         if (state.workspaces.length > 0) {
-          const preferredWorkspaceId = state.user.primaryWorkspaceId || '';
+<? if (portalView === 'user') { ?>          let preferredWorkspaceId = state.user.primaryWorkspaceId || '';
+          let preferredExists = state.workspaces.some(w => w.WorkspaceID === preferredWorkspaceId);
+          if (!preferredExists) preferredWorkspaceId = state.workspaces[0].WorkspaceID;
+
+          // If this user already has a timer running in another assigned
+          // workspace, restore focus there so the browser never "loses" it.
+          try {
+            const radar = await apiCall('dashboard.radar', {}, '');
+            const ownActive = Array.isArray(radar.workers)
+              ? radar.workers.find(worker => worker.userId === state.user.userId)
+              : null;
+            if (
+              ownActive &&
+              state.workspaces.some(w => w.WorkspaceID === ownActive.workspaceId)
+            ) {
+              preferredWorkspaceId = ownActive.workspaceId;
+            }
+          } catch (radarError) {}
+
+          state.currentWorkspace = preferredWorkspaceId;
+          updateWorkspaceDisplay();
+          renderUserWorkspaceControl();
+        } else {
+          showAppNotice('No active workspace is assigned to your account. Contact your Admin.');
+<? } else if (portalView === 'admin' || portalView === 'superadmin') { ?>          const preferredWorkspaceId = state.user.primaryWorkspaceId || '';
           const preferredExists = state.workspaces.some(w => w.WorkspaceID === preferredWorkspaceId);
           state.currentWorkspace = preferredExists ? preferredWorkspaceId : state.workspaces[0].WorkspaceID;
           const currentWs = state.workspaces.find(w => w.WorkspaceID === state.currentWorkspace);
           document.getElementById('currentWorkspaceBadge').innerText = currentWs ? currentWs.WorkspaceName : state.currentWorkspace;
-        }
-      } catch (e) {}
-
+<? } ?>        }
+<? if (portalView === 'user') { ?>      } catch (e) {
+        showAppNotice('Could not load your workspaces. ' + (e.message || 'Please retry.'));
+      }
+<? } else if (portalView === 'admin' || portalView === 'superadmin') { ?>      } catch (e) {}
+<? } ?>
       buildNavigation();
       navigate(embedDefaultView());
-      loadWorkspaceData();
-    }
+<? if (portalView === 'user') { ?>      if (EMBED_MODE === 'USER') loadWorkspaceData();
+<? } else if (portalView === 'admin' || portalView === 'superadmin') { ?>      loadWorkspaceData();
+<? } ?>    }
 
     function buildNavigation() {
       const nav = document.getElementById('navLinks');
@@ -1986,17 +2067,17 @@ var qrcodegen;
       let links;
       if (EMBED_MODE === 'ADMIN') {
         links = [
-          { id: 'timer', label: 'Timer' },
+<? if (portalView === 'admin' || portalView === 'superadmin') { ?>          { id: 'timer', label: 'Timer' },
           { id: 'mytime', label: 'My Time' },
-          { id: 'admin', label: 'Manager' },
+<? } ?>          { id: 'admin', label: 'Manager' },
           { id: 'reports', label: 'Reports' },
           { id: 'account', label: 'Account' }
         ];
       } else if (EMBED_MODE === 'SUPER_ADMIN') {
         links = [
-          { id: 'timer', label: 'Timer' },
+<? if (portalView === 'admin' || portalView === 'superadmin') { ?>          { id: 'timer', label: 'Timer' },
           { id: 'mytime', label: 'My Time' },
-          { id: 'superadmin', label: 'Admin Console' },
+<? } ?>          { id: 'superadmin', label: 'Admin Console' },
           { id: 'admin', label: 'Manager' },
           { id: 'reports', label: 'Reports' },
           { id: 'account', label: 'Account' }
@@ -2024,7 +2105,8 @@ var qrcodegen;
       if (!embedAllowedViews().has(viewId)) {
         viewId = embedDefaultView();
       }
-      document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+<? if (portalView === 'user') { ?>      clearAppNotice();
+<? } ?>      document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
       const activeBtn = document.getElementById('navBtn_' + viewId);
       if (activeBtn) activeBtn.classList.add('active');
 
@@ -2056,7 +2138,90 @@ var qrcodegen;
       }
     }
 
-    async function logout() {
+<? if (portalView === 'user') { ?>    function showAppNotice(message) {
+      const notice = document.getElementById('appNotice');
+      if (!notice) return;
+      notice.textContent = String(message || 'Something went wrong.');
+      notice.classList.remove('hidden');
+    }
+
+    function clearAppNotice() {
+      const notice = document.getElementById('appNotice');
+      if (!notice) return;
+      notice.textContent = '';
+      notice.classList.add('hidden');
+    }
+
+    function updateWorkspaceDisplay() {
+      const currentWs = (state.workspaces || []).find(
+        w => w.WorkspaceID === state.currentWorkspace
+      );
+      const label = currentWs
+        ? String(currentWs.WorkspaceName || currentWs.WorkspaceID)
+        : String(state.currentWorkspace || '-');
+      const badge = document.getElementById('currentWorkspaceBadge');
+      const timerLabel = document.getElementById('userActiveWsName');
+      if (badge) badge.textContent = label;
+      if (timerLabel) timerLabel.textContent = label;
+    }
+
+    function renderUserWorkspaceControl() {
+      const select = document.getElementById('userWorkspaceSelect');
+      const badge = document.getElementById('currentWorkspaceBadge');
+      if (!select || !badge) return;
+
+      select.replaceChildren();
+      (state.workspaces || []).forEach(ws => {
+        select.add(new Option(
+          String(ws.WorkspaceName || ws.WorkspaceID),
+          String(ws.WorkspaceID)
+        ));
+      });
+      select.value = state.currentWorkspace || '';
+
+      if ((state.workspaces || []).length > 1) {
+        select.classList.remove('hidden');
+        badge.classList.add('hidden');
+      } else {
+        select.classList.add('hidden');
+        badge.classList.remove('hidden');
+      }
+    }
+
+    async function changeUserWorkspace(workspaceId) {
+      const select = document.getElementById('userWorkspaceSelect');
+      if (!workspaceId || workspaceId === state.currentWorkspace) return;
+
+      if (state.activeTimer) {
+        if (select) select.value = state.currentWorkspace;
+        alert('Stop your active timer before switching workspaces.');
+        return;
+      }
+
+      if (!(state.workspaces || []).some(ws => ws.WorkspaceID === workspaceId)) {
+        if (select) select.value = state.currentWorkspace;
+        showAppNotice('That workspace is not assigned to your account.');
+        return;
+      }
+
+      state.currentWorkspace = workspaceId;
+      updateWorkspaceDisplay();
+      clearAppNotice();
+
+      await loadWorkspaceData();
+      await recoverActiveTimer();
+      await loadRecentEntries();
+
+      if (!document.getElementById('timesheetView').classList.contains('hidden')) {
+        await loadTimesheet();
+        await loadMyTimeHistory();
+      }
+      if (!document.getElementById('reportsView').classList.contains('hidden')) {
+        await loadReportsView();
+      }
+    }
+
+<? } ?>    async function logout() {
       clearEnrollmentScreen();
       try {
         await apiCall('auth.logout');
@@ -2094,8 +2259,11 @@ var qrcodegen;
         state.tags.forEach(tag => {
           tagSelect.add(new Option(String(tag.TagName || ''), String(tag.TagID || '')));
         });
-      } catch (e) {}
-    }
+<? if (portalView === 'user') { ?>      } catch (e) {
+        showAppNotice('Could not load projects or tags. ' + (e.message || 'Please retry.'));
+      }
+<? } else if (portalView === 'admin' || portalView === 'superadmin') { ?>      } catch (e) {}
+<? } ?>    }
 
     async function onTimerProjectChange() {
       const projId = document.getElementById('timerProjectSelect').value;
@@ -2129,41 +2297,55 @@ var qrcodegen;
       if (!state.currentWorkspace) return;
       try {
         const timer = await apiCall('timer.getActive');
-        if (timer) {
+<? if (portalView === 'user') { ?>        const btn = document.getElementById('timerToggleBtn');
+        const clock = document.getElementById('timerClockDisplay');
+
+<? } ?>        if (timer) {
           state.activeTimer = timer;
           if (timer.workMode && document.getElementById('timerWorkModeSelect')) {
             document.getElementById('timerWorkModeSelect').value = timer.workMode;
           }
           startLocalClock(timer.startedAtUTC);
-          const btn = document.getElementById('timerToggleBtn');
-          btn.innerText = 'STOP';
+<? if (portalView === 'admin' || portalView === 'superadmin') { ?>          const btn = document.getElementById('timerToggleBtn');
+<? } ?>          btn.innerText = 'STOP';
           btn.className = 'btn btn-danger';
-          const clock = document.getElementById('timerClockDisplay');
+<? if (portalView === 'user') { ?>          if (timer.isOvertime) {
+<? } else if (portalView === 'admin' || portalView === 'superadmin') { ?>          const clock = document.getElementById('timerClockDisplay');
           if (timer.isOvertime && clock) {
-            clock.style.color = '#F59E0B';
-          } else if (clock) {
-            clock.style.color = '';
+<? } ?>            clock.style.color = '#F59E0B';
+<? if (portalView === 'user') { ?>            showAppNotice('Notice: Timer has been running over ' + (timer.maxAllowedSeconds ? (timer.maxAllowedSeconds / 3600) : 14) + ' hours and will be clamped upon stopping.');
+          } else {
+<? } else if (portalView === 'admin' || portalView === 'superadmin') { ?>          } else if (clock) {
+<? } ?>            clock.style.color = '';
           }
         } else {
           state.activeTimer = null;
           if (state.timerInterval) clearInterval(state.timerInterval);
           state.timerInterval = null;
           state._updateLocalClock = null;
-          const clock = document.getElementById('timerClockDisplay');
+<? if (portalView === 'user') { ?>          clock.classList.remove('running');
+          clock.style.color = '';
+          clock.innerText = '00:00:00';
+<? } else if (portalView === 'admin' || portalView === 'superadmin') { ?>          const clock = document.getElementById('timerClockDisplay');
           if (clock) {
             clock.classList.remove('running');
             clock.style.color = '';
             clock.innerText = '00:00:00';
           }
-          try { document.title = 'FLINK Time'; } catch (e) {}
-          const btn = document.getElementById('timerToggleBtn');
+<? } ?>          try { document.title = 'FLINK Time'; } catch (e) {}
+<? if (portalView === 'user') { ?>          btn.innerText = 'START';
+          btn.className = 'btn btn-success';
+<? } else if (portalView === 'admin' || portalView === 'superadmin') { ?>          const btn = document.getElementById('timerToggleBtn');
           if (btn) {
             btn.innerText = 'START';
             btn.className = 'btn btn-success';
           }
-        }
-      } catch (e) {}
-    }
+<? } ?>        }
+<? if (portalView === 'user') { ?>      } catch (e) {
+        showAppNotice('Could not restore your active timer. ' + (e.message || 'Please retry.'));
+      }
+<? } else if (portalView === 'admin' || portalView === 'superadmin') { ?>      } catch (e) {}
+<? } ?>    }
 
     function startLocalClock(startedAtUtcStr) {
       if (state.timerInterval) clearInterval(state.timerInterval);
@@ -2175,7 +2357,8 @@ var qrcodegen;
         const diffSecs = Math.max(0, Math.floor((Date.now() - startMs) / 1000));
         const hrs = Math.floor(diffSecs / 3600);
         const mins = Math.floor((diffSecs % 3600) / 60);
-        const timeStr = `${String(hrs).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+<? if (portalView === 'user') { ?>        const secs = diffSecs % 60;
+<? } ?>        const timeStr = `${String(hrs).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
         clockEl.innerText = timeStr;
         try { document.title = `[${timeStr}] FLINK Time`; } catch (e) {}
       };
@@ -2253,8 +2436,8 @@ var qrcodegen;
           state._updateLocalClock = null;
           document.getElementById('timerClockDisplay').classList.remove('running');
           document.getElementById('timerClockDisplay').innerText = '00:00:00';
-          try { document.title = 'FLINK Time'; } catch (e) {}
-          btn.innerText = 'START';
+<? if (portalView === 'admin' || portalView === 'superadmin') { ?>          try { document.title = 'FLINK Time'; } catch (e) {}
+<? } ?>          btn.innerText = 'START';
           btn.className = 'btn btn-success';
           loadRecentEntries();
         } catch (err) {
@@ -2375,8 +2558,9 @@ var qrcodegen;
           tbody.appendChild(tr);
         });
       } catch (e) {
-        console.error('Failed to load today entries', e);
-      }
+<? if (portalView === 'user') { ?>        showAppNotice('Could not load today\'s entries. ' + (e.message || 'Please retry.'));
+<? } else if (portalView === 'admin' || portalView === 'superadmin') { ?>        console.error('Failed to load today entries', e);
+<? } ?>      }
     }
 
     async function continueRecentTask(entry) {
@@ -2572,8 +2756,9 @@ var qrcodegen;
           tbody.appendChild(tr);
         });
       } catch (e) {
-        console.error('Failed to load timesheet', e);
-      }
+<? if (portalView === 'user') { ?>        showAppNotice('Could not load your timesheet. ' + (e.message || 'Please retry.'));
+<? } else if (portalView === 'admin' || portalView === 'superadmin') { ?>        console.error('Failed to load timesheet', e);
+<? } ?>      }
     }
 
     async function submitTimesheet() {
@@ -2654,8 +2839,9 @@ var qrcodegen;
             tbody.appendChild(tr);
           });
       } catch (e) {
-        console.error('Failed to load My Time history', e);
-      }
+<? if (portalView === 'user') { ?>        showAppNotice('Could not load My Time history. ' + (e.message || 'Please retry.'));
+<? } else if (portalView === 'admin' || portalView === 'superadmin') { ?>        console.error('Failed to load My Time history', e);
+<? } ?>      }
     }
 
     function openEditTimeEntry(entryId) {
@@ -3349,10 +3535,16 @@ var qrcodegen;
       renderWizardStep(1);
     }
 
-    function showDeploymentAssistant() {
+<? if (portalView === 'superadmin') { ?>    function currentWebAppBaseUrl() {
+      return String(window.location.href || '').split('#')[0].split('?')[0];
+    }
+
+<? } ?>    function showDeploymentAssistant() {
       document.getElementById('setupWelcomeScreen').classList.add('hidden');
       document.getElementById('deploymentAssistantView').classList.remove('hidden');
-    }
+<? if (portalView === 'superadmin') { ?>      const url = document.getElementById('deployWebAppUrl');
+      if (url) url.value = currentWebAppBaseUrl();
+<? } ?>    }
 
     function hideDeploymentAssistant() {
       document.getElementById('deploymentAssistantView').classList.add('hidden');
@@ -3384,12 +3576,17 @@ var qrcodegen;
       const content = document.getElementById('wizardStepContent');
       if (step === 1) {
         content.innerHTML = `
-          <h2 style="margin-bottom: 0.5rem;">Step 1 — System Owner Registration</h2>
+<? if (portalView === 'user' || portalView === 'admin') { ?>          <h2 style="margin-bottom: 0.5rem;">Step 1 — System Owner Registration</h2>
           <p style="color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 1.5rem;">Create the root Super Admin account. First run requires the one-time installation key generated by the private server function initializeInstallation_().</p>
           <div style="margin-bottom: 1rem;">
             <label>One-Time Installation Key</label>
             <input type="password" id="wzSetupKey" autocomplete="off" required>
-          </div>
+<? } else if (portalView === 'superadmin') { ?>          <h2 style="margin-bottom: 0.5rem;">Step 1 — Create the System Owner</h2>
+          <p style="color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 1rem;">Create the root Super Admin account. FLINK Time will verify your signed-in Google Workspace identity automatically.</p>
+          <div class="card" style="background: var(--bg-card); padding: 1rem; margin-bottom: 1rem; font-size: 0.82rem; color: var(--text-secondary);">
+            <strong style="color: var(--text-primary);">Security check:</strong>
+            You must be signed in with the same Google account that owns the Master Sheet and deployed this Web App. No setup key is needed.
+<? } ?>          </div>
           <div style="margin-bottom: 1rem;">
             <label>Full Name</label>
             <input type="text" id="wzOwnerName" value="Master Administrator" required>
@@ -3641,15 +3838,16 @@ var qrcodegen;
     }
 
     async function submitWizardStep1() {
-      const setupKey = document.getElementById('wzSetupKey').value;
-      const fullName = document.getElementById('wzOwnerName').value;
+<? if (portalView === 'user' || portalView === 'admin') { ?>      const setupKey = document.getElementById('wzSetupKey').value;
+<? } ?>      const fullName = document.getElementById('wzOwnerName').value;
       const username = document.getElementById('wzOwnerUser').value;
       const password = document.getElementById('wzOwnerPass').value;
       const confirmPassword = document.getElementById('wzOwnerPassConfirm').value;
 
       try {
-        const res = await apiCall('setup.completeStep', { step: 1, setupKey, fullName, username, password, confirmPassword });
-        completeBrowserLogin(res);
+<? if (portalView === 'user' || portalView === 'admin') { ?>        const res = await apiCall('setup.completeStep', { step: 1, setupKey, fullName, username, password, confirmPassword });
+<? } else if (portalView === 'superadmin') { ?>        const res = await apiCall('setup.completeStep', { step: 1, fullName, username, password, confirmPassword });
+<? } ?>        completeBrowserLogin(res);
       } catch (e) {
         alert(e.message || 'Failed to initialize Super Admin.');
       }
@@ -3909,7 +4107,8 @@ var qrcodegen;
         ));
       } catch (e) {
         renderError(content, 'Failed to load reports: ', e);
-      }
+<? if (portalView === 'user') { ?>        showAppNotice('Could not load reports. ' + (e.message || 'Please retry.'));
+<? } ?>      }
     }
 
     function switchSaSubtab(subtabId) {
@@ -4866,8 +5065,12 @@ var qrcodegen;
                 <div class="card-title">System Architecture Diagnostics</div>
                 <div class="card-subtitle">Measured checks only; unverified capabilities are not reported as healthy.</div>
               </div>
-              <button class="btn btn-warning btn-sm" onclick="runSystemAutoRepair()">[ FIX AUTOMATICALLY ]</button>
-            </div>
+<? if (portalView === 'user' || portalView === 'admin') { ?>              <button class="btn btn-warning btn-sm" onclick="runSystemAutoRepair()">[ FIX AUTOMATICALLY ]</button>
+<? } else if (portalView === 'superadmin') { ?>              <div style="display:flex; gap:0.5rem;">
+                <button class="btn btn-secondary btn-sm" onclick="runKdfCalibration()">Calibrate Password Hashing</button>
+                <button class="btn btn-warning btn-sm" onclick="runSystemAutoRepair()">[ FIX AUTOMATICALLY ]</button>
+              </div>
+<? } ?>            </div>
             <div id="saHealthChecks" style="line-height: 2.2;"></div>
           </div>
         `;
@@ -4902,11 +5105,67 @@ var qrcodegen;
       }
     }
 
-    /* Subtab 14: System Settings */
-    async function renderSaSettings() {
-      const container = document.getElementById('saSubtabContent');
+<? if (portalView === 'user' || portalView === 'admin') { ?>    /* Subtab 14: System Settings */
+<? } else if (portalView === 'superadmin') { ?>    async function runKdfCalibration() {
       try {
-        const settings = await apiCall('settings.get');
+        const result = await apiCall('security.calibrateKdf', { targetMs: 700 });
+        alert(
+          'Password hashing calibration complete.\n\n' +
+          'Current iterations: ' + Number(result.currentIterations || 0).toLocaleString() + '\n' +
+          'Recommended iterations (~700 ms target): ' + Number(result.recommendedIterations || 0).toLocaleString() + '\n\n' +
+          'The recommendation is not applied automatically.'
+        );
+      } catch (e) {
+        alert(e.message || 'Password hashing calibration failed.');
+      }
+    }
+
+    /* Subtab 14: Catalog-driven System Settings */
+    function createCatalogSettingControl(entry) {
+      const wrapper = document.createElement('div');
+      wrapper.style.marginBottom = '1rem';
+
+      const label = document.createElement('label');
+      label.textContent = entry.label + (entry.scope === 'WORKSPACE' ? ' — Workspace' : ' — Global');
+
+      let input;
+      if (entry.type === 'bool') {
+        input = document.createElement('select');
+        input.add(new Option('Enabled', 'true'));
+        input.add(new Option('Disabled', 'false'));
+        input.value = entry.value === true ? 'true' : 'false';
+      } else if (entry.type === 'select') {
+        input = document.createElement('select');
+        (entry.options || []).forEach(option => input.add(new Option(String(option), String(option))));
+        input.value = String(entry.value === undefined ? entry.default : entry.value);
+      } else {
+        input = document.createElement('input');
+        input.type = entry.type === 'number' ? 'number' : 'text';
+        if (entry.min !== null && entry.min !== undefined) input.min = String(entry.min);
+        if (entry.max !== null && entry.max !== undefined) input.max = String(entry.max);
+        input.value = String(entry.value === undefined ? entry.default : entry.value);
+      }
+
+      input.className = 'catalog-setting-input';
+      input.dataset.settingKey = entry.key;
+      input.dataset.settingScope = entry.scope;
+      input.dataset.settingType = entry.type;
+      input.disabled = entry.readOnly === true;
+
+      const hint = document.createElement('div');
+      hint.className = 'field-hint';
+      hint.textContent = String(entry.help || '');
+
+      wrapper.append(label, input, hint);
+      return wrapper;
+    }
+
+<? } ?>    async function renderSaSettings() {
+      const container = document.getElementById('saSubtabContent');
+<? if (portalView === 'superadmin') { ?>      container.replaceChildren();
+
+<? } ?>      try {
+<? if (portalView === 'user' || portalView === 'admin') { ?>        const settings = await apiCall('settings.get');
         container.innerHTML = `
           <div class="card">
             <div class="card-header">
@@ -4942,19 +5201,88 @@ var qrcodegen;
             </div>
           </div>
         `;
+<? } else if (portalView === 'superadmin') { ?>        const response = await apiCall('settings.getCatalog', {
+          workspaceId: state.currentWorkspace || ''
+        });
+        const catalog = Array.isArray(response.catalog) ? response.catalog : [];
 
-        document.getElementById('stCompanyName').value = String(settings.COMPANY_NAME || 'FLINK Business Solutions');
+        const header = document.createElement('div');
+        header.className = 'card';
+
+        const headerRow = document.createElement('div');
+        headerRow.className = 'card-header';
+        const titleWrap = document.createElement('div');
+        const title = document.createElement('div');
+        title.className = 'card-title';
+        title.textContent = 'System Settings & Governance';
+        const subtitle = document.createElement('div');
+        subtitle.className = 'card-subtitle';
+        subtitle.textContent = state.currentWorkspace
+          ? 'Global settings plus workspace settings for the selected workspace.'
+          : 'Global settings. Select a workspace to edit workspace-level controls.';
+        titleWrap.append(title, subtitle);
+
+        const save = document.createElement('button');
+        save.className = 'btn btn-sm';
+        save.textContent = 'Save Settings';
+        save.onclick = saveCatalogSettings;
+        headerRow.append(titleWrap, save);
+        header.appendChild(headerRow);
+        container.appendChild(header);
+
+        const groups = new Map();
+        catalog.forEach(entry => {
+          if (!groups.has(entry.group)) groups.set(entry.group, []);
+          groups.get(entry.group).push(entry);
+        });
+<? } ?>
+<? if (portalView === 'user' || portalView === 'admin') { ?>        document.getElementById('stCompanyName').value = String(settings.COMPANY_NAME || 'FLINK Business Solutions');
         document.getElementById('stTimezone').value = String(settings.DEFAULT_TIMEZONE || 'Africa/Cairo');
         document.getElementById('stIdleTimeout').value = String(settings.IDLE_TIMEOUT_HOURS || 8);
         document.getElementById('stAutoStop').value = String(settings.AUTO_STOP_HOURS || 14);
-      } catch (e) {
+<? } else if (portalView === 'superadmin') { ?>        groups.forEach((entries, groupName) => {
+          const card = document.createElement('div');
+          card.className = 'card';
+
+          const groupTitle = document.createElement('div');
+          groupTitle.className = 'card-title';
+          groupTitle.style.marginBottom = '1rem';
+          groupTitle.textContent = groupName;
+
+          const grid = document.createElement('div');
+          grid.className = 'grid-2';
+          entries.forEach(entry => {
+            const control = createCatalogSettingControl(entry);
+            if (entry.scope === 'WORKSPACE' && !state.currentWorkspace) {
+              const input = control.querySelector('.catalog-setting-input');
+              if (input) input.disabled = true;
+            }
+            grid.appendChild(control);
+          });
+
+          card.append(groupTitle, grid);
+          container.appendChild(card);
+        });
+<? } ?>      } catch (e) {
         renderError(container, '', e);
       }
     }
 
-    async function saveGlobalSettings() {
-      try {
-        await apiCall('settings.save', {
+<? if (portalView === 'user' || portalView === 'admin') { ?>    async function saveGlobalSettings() {
+<? } else if (portalView === 'superadmin') { ?>    async function saveCatalogSettings() {
+      const globalSettings = {};
+      const workspaceSettings = {};
+
+      document.querySelectorAll('.catalog-setting-input').forEach(input => {
+        const key = input.dataset.settingKey || '';
+        const scope = input.dataset.settingScope || '';
+        if (!key || input.disabled) return;
+        if (scope === 'WORKSPACE') workspaceSettings[key] = input.value;
+        else globalSettings[key] = input.value;
+      });
+
+<? } ?>      try {
+<? if (portalView === 'user' || portalView === 'admin') { ?>        await apiCall('settings.save', {
           settings: {
             COMPANY_NAME: document.getElementById('stCompanyName').value,
             DEFAULT_TIMEZONE: document.getElementById('stTimezone').value,
@@ -4963,9 +5291,26 @@ var qrcodegen;
           }
         });
         alert('Global settings saved successfully.');
-      } catch (e) {
-        alert(e.message);
-      }
+<? } else if (portalView === 'superadmin') { ?>        if (Object.keys(globalSettings).length) {
+          await apiCall('settings.patch', {
+            scope: 'GLOBAL',
+            settings: globalSettings
+          });
+        }
+        if (Object.keys(workspaceSettings).length) {
+          if (!state.currentWorkspace) throw new Error('Select a workspace before saving workspace settings.');
+          await apiCall('settings.patch', {
+            scope: 'WORKSPACE',
+            workspaceId: state.currentWorkspace,
+            settings: workspaceSettings
+          });
+        }
+        alert('Settings saved successfully.');
+        await renderSaSettings();
+<? } ?>      } catch (e) {
+<? if (portalView === 'user' || portalView === 'admin') { ?>        alert(e.message);
+<? } else if (portalView === 'superadmin') { ?>        alert(e.message || 'Settings could not be saved.');
+<? } ?>      }
     }
 
     /* Subtab 15: Advanced Diagnostics */

@@ -35,7 +35,7 @@ test('staging configuration rejects production, malformed IDs and unknown fields
 test('staging bundle contains only runtime source plus private isolated diagnostics', () => {
   const bundle = createBundle(config);
   assert.deepEqual(Object.keys(bundle).sort(), [
-    'Admin.html', 'Code.gs', 'RuntimeChecks.gs', 'SuperAdmin.html', 'User.html', 'appsscript.json'
+    'Code.gs', 'Portal.html', 'RuntimeChecks.gs', 'appsscript.json'
   ]);
   const manifest = JSON.parse(bundle['appsscript.json']);
   assert.deepEqual(manifest.executionApi, { access: 'MYSELF' });
@@ -157,8 +157,8 @@ test('staging ignores obsolete clasp settings and uploads only the checked allow
   assert.equal(result, 'Staging upload verified.');
   assert.equal(calls[1].url, `https://script.googleapis.com/v1/projects/${local.scriptId}/content`);
   const files = calls[1].data.files;
-  assert.equal(files.length, 6);
-  assert.deepEqual(files.map(file => file.type), ['SERVER_JS', 'HTML', 'HTML', 'HTML', 'JSON', 'SERVER_JS']);
+  assert.equal(files.length, 4);
+  assert.deepEqual(files.map(file => file.type), ['SERVER_JS', 'HTML', 'JSON', 'SERVER_JS']);
   assert.equal(files.find(file => file.name === 'Code').source, createBundle(local)['Code.gs']);
   assert.equal(files.find(file => file.name === 'appsscript').source, createBundle(local)['appsscript.json']);
 });
@@ -172,7 +172,7 @@ test('unconfirmed mutations and changed bundles never load credentials or call G
     await assert.rejects(executeOperation(operation, local, { clientFactory }), /confirm-staging/);
   }
   const check = await executeOperation('check', local, { clientFactory });
-  assert.equal(check.files.length, 6);
+  assert.equal(check.files.length, 4);
   const scopes = await executeOperation('scopes', local, { clientFactory });
   assert.ok(scopes.split(',').includes('https://www.googleapis.com/auth/script.projects'));
   fs.appendFileSync(path.join(directory, 'source', 'Code.gs'), '\n// unverified change');

@@ -42,7 +42,7 @@ function kdf(source) {
   return { iterations: 10000, bytes: 32, samples, medianMs: sorted[1], rangeMs: [sorted[0],sorted[2]] };
 }
 
-function measure(source, read, passwordKdf) {
+function measure(source, read, passwordKdf, deployableNames) {
   const radar = {};
   for (const rows of [10, 50000]) {
     const measurement = radarSheetFixture(rows, { source }).run();
@@ -52,18 +52,22 @@ function measure(source, read, passwordKdf) {
   return {
     passwordKdf,
     selfRadar: radar,
-    deployableUtf8Bytes: Object.fromEntries(['Code.gs','User.html','Admin.html','SuperAdmin.html']
+    deployableUtf8Bytes: Object.fromEntries(deployableNames
       .map(name => [name, Buffer.byteLength(read('apps-script/' + name))]))
   };
 }
 const readCurrent = file => fs.readFileSync(path.join(root, file), 'utf8');
 const beforeSource = atRevision('apps-script/Code.gs');
 const afterSource = readCurrent('apps-script/Code.gs');
+// The single-portal refactor changed the deployable file set, so each cohort is
+// measured against the file names that existed at its own revision.
+const beforeFiles = ['Code.gs', 'User.html', 'Admin.html', 'SuperAdmin.html'];
+const afterFiles = ['Code.gs', 'Portal.html', 'appsscript.json'];
 // Keep both timing cohorts cold and ahead of the large table allocations.
 const beforePasswordKdf = kdf(beforeSource);
 const afterPasswordKdf = kdf(afterSource);
-const before = measure(beforeSource, atRevision, beforePasswordKdf);
-const after = measure(afterSource, readCurrent, afterPasswordKdf);
+const before = measure(beforeSource, atRevision, beforePasswordKdf, beforeFiles);
+const after = measure(afterSource, readCurrent, afterPasswordKdf, afterFiles);
 console.log(JSON.stringify({
   baseline, node: process.version, platform: process.platform,
   evidence: 'Fresh synthetic Node VM per sample; code loading untimed; Utilities simulated with Node crypto. Not Google latency or whole-app speed.',

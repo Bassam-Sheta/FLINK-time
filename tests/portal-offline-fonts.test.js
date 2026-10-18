@@ -5,16 +5,19 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const userPath = path.resolve(__dirname, '../apps-script/User.html');
-const adminPath = path.resolve(__dirname, '../apps-script/Admin.html');
-const superAdminPath = path.resolve(__dirname, '../apps-script/SuperAdmin.html');
+const { views } = require('./helpers/portal-fixture');
+
+function portalViews() {
+  const rendered = views();
+  return [
+    { name: 'user view', content: rendered.user },
+    { name: 'admin view', content: rendered.admin },
+    { name: 'superadmin view', content: rendered.superadmin }
+  ];
+}
 
 test('all portals have zero external Google Fonts or CDN references', () => {
-  const portals = [
-    { name: 'User.html', content: fs.readFileSync(userPath, 'utf8') },
-    { name: 'Admin.html', content: fs.readFileSync(adminPath, 'utf8') },
-    { name: 'SuperAdmin.html', content: fs.readFileSync(superAdminPath, 'utf8') }
-  ];
+  const portals = portalViews();
 
   for (const portal of portals) {
     assert.equal(
@@ -41,11 +44,7 @@ test('all portals have zero external Google Fonts or CDN references', () => {
 });
 
 test('all portals declare native system font stacks in CSS variables', () => {
-  const portals = [
-    { name: 'User.html', content: fs.readFileSync(userPath, 'utf8') },
-    { name: 'Admin.html', content: fs.readFileSync(adminPath, 'utf8') },
-    { name: 'SuperAdmin.html', content: fs.readFileSync(superAdminPath, 'utf8') }
-  ];
+  const portals = portalViews();
 
   for (const portal of portals) {
     assert.match(

@@ -3,7 +3,7 @@
 Base revision: `1be27124948e14c0c87423a57da225cb9e081c27` (WP10 draft).
 Requirements: `SYSTEM_SPEC.md`, yearly entry routing and data integrity sections.
 No production activation, installer-pin change or Google modification is authorized
-by this offline work. Preserve the five deployment files, mandatory MFA, current
+by this offline work. Preserve the three deployment files, mandatory MFA, current
 service authorization, immutable row locations and unrelated work.
 
 ## Bounded implementation

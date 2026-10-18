@@ -36,7 +36,7 @@ Advisory: https://github.com/advisories/GHSA-vfj7-8cjw-p6xm
 
 The vulnerable recursive brace-pattern processing can exhaust a Node process's
 stack if it receives deeply nested patterns. This dependency exists only in the
-developer staging CLI; the five production Apps Script files do not use npm or
+developer staging CLI; the three production Apps Script files do not use npm or
 this package. CI installs clasp but does not run its deployment/file matcher.
 
 The inspected clasp 3.4.1 code loads ignore patterns from `.claspignore` or an

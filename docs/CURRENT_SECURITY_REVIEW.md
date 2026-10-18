@@ -45,7 +45,7 @@ Evidence:
 | High | `WorkspaceRouter`, `JobService.getCapacityMetrics` | Production uses a workspace spreadsheet and 60/75/85% monitoring, not Core + yearly Data files with pre-70% rotation. Implement actual-file rollover based on allocated cells plus pending allocation. |
 | High before integration | `storage-v2/PartRouting.gs:createUserGate`, `planNewWrite` | Prototype gate relies on an evictable/expiring cache flag while writes occur outside the lock. Concurrent writers can overlap; next allocation is not counted and the cell count can be stale. Use real serialization/durable ownership and reserved capacity. |
 | High before integration | `storage-v2/TrackerService.gs:startTimer`, `addManual`; `PartStore.gs` | Entry IDs embed the current part, so retries after rotation can create duplicates. IDs lack full immutable routing context. Tail/full-column searches and log/data interruption also need bounded lookup and recovery. These files are not referenced by production `Code.gs`. |
-| Medium / required design | `User.html:onTimerProjectChange`, matching portal handlers; prototype `startTimer` | Production project selection only reloads tasks; prototype switching is stop+start. Neither implements moving the entire running timer to the chosen project. Test retained start/time, retry and unrelated stopped-entry edits. |
+| Medium / required design | `Portal.html:onTimerProjectChange`, matching portal handlers; prototype `startTimer` | Production project selection only reloads tasks; prototype switching is stop+start. Neither implements moving the entire running timer to the chosen project. Test retained start/time, retry and unrelated stopped-entry edits. |
 | Medium / required design | `FEATURE_TIMESHEET_APPROVAL`, dispatch and portal submission controls | Approval flag defaults off but approval remains callable/visible. Attach server guards and matching UI behavior. Stopping already persists an entry; optional approval must not gate completed-time storage. |
 | High / required design | `ACTION_PERMISSIONS`, `AuthorizationService`, `WorkspaceAccess` | Role/workspace checks exist, but granular manager capabilities are not implemented. Enforce action/resource grants server-side, including deny cases and account lifecycle races. |
 | High / required design | `PASSWORD_RECOVERY_EMAIL`, auth actions | Email recovery is only a catalog placeholder; recovery-code storage/consumption is absent. Implement one-use, generation-bound recovery with durable attempts and continued MFA enforcement. |
@@ -57,7 +57,7 @@ Evidence:
 
 ## Boundaries and positive controls checked
 
-- Five-file production source contract remains intact; no external backend or CDN
+- Three-file production source contract (one server-gated `Portal.html`) remains intact; no external backend or CDN
   script was added. KMS remains the existing Google Cloud integration. Removing it
   or changing provisioning is not part of this fix.
 - Server action allowlists, domain-restricted execute-as-deployer deployment,
