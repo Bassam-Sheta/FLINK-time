@@ -20,7 +20,7 @@ const manifest = JSON.parse(
   )
 );
 
-test('automated installer is isolated from the five-file production app', () => {
+test('automated installer is isolated from the three-file production app', () => {
   assert.equal(manifest.webapp.executeAs, 'USER_ACCESSING');
   assert.equal(manifest.webapp.access, 'DOMAIN');
 

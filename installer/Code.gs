@@ -1,7 +1,7 @@
 /**
  * FLINK Time — Automated Installer
  *
- * Separate installer application. This is NOT part of the five-file FLINK Time
+ * Separate installer application. This is NOT part of the three-file FLINK Time
  * runtime. Deploy this installer as a Web App that executes as USER_ACCESSING.
  *
  * Google intentionally requires each installing user to enable Apps Script API
