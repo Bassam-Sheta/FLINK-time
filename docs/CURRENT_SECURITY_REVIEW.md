@@ -133,7 +133,29 @@ step-up lists are asserted identical, and `auth.disableMfa` is the single docume
 exception. The Super Admin console collects users, timesheets, projects, backups,
 security and maintenance in one page.
 
-Evidence: **665/665 unit tests** (17 new) and **31/31 mocked Chromium tests** (5 new),
+**Deleting a user no longer means losing their work.** Only deactivation existed; there
+was no delete action at all. New action `users.delete` removes an account's ability to
+sign in while keeping every log. Running timers are first preserved as completed
+entries through the same proven, rollback-safe deactivation core, memberships are
+closed with rollback, and only then is sign-in material cleared: authenticator secret,
+pending secret, recovery codes, a stale MFA challenge and any MFA exemption. The
+account row is retained with status `DELETED` so past time entries and audit rows still
+resolve to the person. `USER_DELETE_INTENT` / `USER_DELETE_COMPLETED` records carry
+before/after state with no secrets and fail closed when auditing is unavailable. The
+root Super Admin account and the acting administrator's own account are refused.
+
+**"Do not force MFA for this sign-in, if needed" is possible without reversing
+mandatory MFA.** `MFA_REQUIRED` stays a read-only global setting and
+`auth.disableMfa` still returns 403, so nothing can switch authenticator verification
+off for the fleet. New action `users.setMfaExempt` grants one narrow, explicit
+exemption for a single account that cannot complete enrolment. An exemption only takes
+effect for an account with no enrolled authenticator - an enrolled second factor is
+never downgraded - and it is per-account and capped (100), Super-Admin-only and
+step-up protected, audited with before/after state, and the root Super Admin can never
+be exempted. The exemption is read at sign-in, so revoking it restores the requirement
+immediately.
+
+Evidence: **690/690 unit tests** (25 new) and **34/34 mocked Chromium tests** (8 new),
 plus `node scripts/embed-local-libraries.js --check` and `git diff --check`. These
 remain offline checks against mocked Google RPC; the rows above about session-cache
 freshness, granular manager grants, bounded jobs/reports, checkpoint retention and

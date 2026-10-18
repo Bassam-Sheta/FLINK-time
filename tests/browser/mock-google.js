@@ -362,7 +362,8 @@
             DisplayName: 'System Owner',
             Role: 'SUPER_ADMIN',
             Status: 'ACTIVE',
-            PrimaryWorkspaceID: 'W1'
+            PrimaryWorkspaceID: 'W1',
+            MfaExempt: false
           },
           {
             UserID: 'U-LOCKED',
@@ -370,9 +371,30 @@
             DisplayName: 'Locked User',
             Role: 'USER',
             Status: 'LOCKED',
-            PrimaryWorkspaceID: 'W1'
+            PrimaryWorkspaceID: 'W1',
+            MfaExempt: false
           }
         ];
+
+      case 'users.delete':
+        return {
+          ok: true,
+          userId: payload.targetUserId,
+          status: 'DELETED',
+          timeLogsPreserved: true,
+          auditLogsPreserved: true
+        };
+
+      case 'users.setMfaExempt':
+        return {
+          ok: true,
+          userId: payload.targetUserId,
+          mfaExempt: payload.exempt === true,
+          exemptCount: payload.exempt === true ? 1 : 0,
+          message: payload.exempt === true
+            ? 'locked.user may now sign in without enrolling an authenticator.'
+            : 'locked.user must enroll an authenticator at next sign-in.'
+        };
 
       case 'users.resetMfa':
         return {

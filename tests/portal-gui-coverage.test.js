@@ -112,6 +112,8 @@ test('the previously unreachable capabilities now have controls', () => {
   const body = guiBody(readPortal());
   const required = [
     'users.resetMfa',
+    'users.delete',
+    'users.setMfaExempt',
     'users.unlock',
     'users.update',
     'users.assignWorkspace',
@@ -135,4 +137,24 @@ test('the previously unreachable capabilities now have controls', () => {
   ];
   const absent = required.filter(action => !body.includes("'" + action + "'"));
   assert.deepEqual(absent, []);
+});
+
+test('deleting a user is deliberate and promises the logs survive', () => {
+  const body = guiBody(readPortal());
+
+  assert.ok(body.includes('openDeleteUserModal('), 'a delete control must exist');
+  // Deletion must not be a single accidental click, and it must be explicit that
+  // time logs and the other logs are kept rather than removed.
+  assert.ok(body.includes('deleteUserConfirm'), 'deletion must require typing the username');
+  assert.ok(body.includes('The username you typed does not match.'));
+  assert.ok(body.includes('Time logs and other logs are kept'));
+});
+
+test('the sign-in MFA requirement can be turned both ways from the console', () => {
+  const body = guiBody(readPortal());
+
+  assert.ok(body.includes('toggleMfaExemption('), 'an exemption control must exist');
+  assert.ok(body.includes("'Skip MFA'"), 'the console must be able to stop forcing MFA');
+  assert.ok(body.includes("'Require MFA'"), 'the console must be able to force it again');
+  assert.ok(body.includes("'MfaExempt'") || body.includes('MfaExempt'), 'the current state must be visible');
 });

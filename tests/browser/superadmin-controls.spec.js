@@ -108,3 +108,58 @@ test('Projects & Clients exposes the master-data creation controls', async ({ pa
   const [call] = await mockCalls(page, 'clients.create');
   expect(call.body.payload.clientName).toBe('Acme Industries');
 });
+
+test('deleting a user requires typing the username and says the logs are kept', async ({ page }) => {
+  await page.goto('/superadmin');
+  await page.getByRole('button', { name: 'Users & RBAC' }).click();
+
+  const row = page.locator('tr', { hasText: 'locked.user' });
+  await row.getByRole('button', { name: 'Delete' }).click();
+
+  const modal = page.locator('#modalContainer');
+  await expect(modal.getByRole('heading', { name: 'Delete User' })).toBeVisible();
+  await expect(modal).toContainText('Time logs and other logs are kept');
+
+  // A typo must not delete anything.
+  await modal.locator('#deleteUserConfirm').fill('locked.users');
+  await modal.getByRole('button', { name: 'Delete User' }).click();
+  await page.waitForTimeout(300);
+  expect(await mockCalls(page, 'users.delete')).toHaveLength(0);
+  await expect(modal.getByRole('heading', { name: 'Delete User' })).toBeVisible();
+
+  // The exact username does.
+  await modal.locator('#deleteUserConfirm').fill('locked.user');
+  await modal.getByRole('button', { name: 'Delete User' }).click();
+
+  await expect.poll(async () => (await mockCalls(page, 'users.delete')).length).toBe(1);
+  const [call] = await mockCalls(page, 'users.delete');
+  expect(call.body.payload.targetUserId).toBe('U-LOCKED');
+  expect(call.body.payload.stepUpToken).toBe('STEPUP-TOKEN');
+});
+
+test('a Super Admin can stop forcing sign-in MFA for one account', async ({ page }) => {
+  await page.goto('/superadmin');
+  await page.getByRole('button', { name: 'Users & RBAC' }).click();
+
+  const row = page.locator('tr', { hasText: 'locked.user' });
+  await row.getByRole('button', { name: 'Skip MFA' }).click();
+
+  await expect.poll(async () => (await mockCalls(page, 'users.setMfaExempt')).length).toBe(1);
+  const [call] = await mockCalls(page, 'users.setMfaExempt');
+  expect(call.body.payload.targetUserId).toBe('U-LOCKED');
+  expect(call.body.payload.exempt).toBe(true);
+  expect(call.body.payload.stepUpToken).toBe('STEPUP-TOKEN');
+
+  const stepUps = await mockCalls(page, 'auth.stepUp');
+  expect(stepUps.length, 'the privileged action must first obtain a step-up grant').toBe(1);
+});
+
+test('the root Super Admin row offers neither Delete nor the MFA switch', async ({ page }) => {
+  await page.goto('/superadmin');
+  await page.getByRole('button', { name: 'Users & RBAC' }).click();
+
+  const rootRow = page.locator('tr', { hasText: 'rootadmin' });
+  await expect(rootRow.getByRole('button', { name: 'Delete' })).toHaveCount(0);
+  await expect(rootRow.getByRole('button', { name: 'Skip MFA' })).toHaveCount(0);
+  await expect(rootRow.getByRole('button', { name: 'Require MFA' })).toHaveCount(0);
+});

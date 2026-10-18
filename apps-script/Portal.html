@@ -1500,6 +1500,8 @@ var qrcodegen;
       'users.create',
       'users.update',
       'users.makePassive',
+      'users.delete',
+      'users.setMfaExempt',
       'users.activate',
       'users.resetPassword',
       'users.resetMfa',
@@ -4315,6 +4317,7 @@ var qrcodegen;
                     <th>Role</th>
                     <th>Status</th>
                     <th>Workspace</th>
+                    <th>Sign-In MFA</th>
                     <th>Actions</th>
                   </tr>
                 </thead>
@@ -4326,11 +4329,20 @@ var qrcodegen;
                       <td><span class="role-tag">${escapeHtml(u.Role)}</span></td>
                       <td><span class="badge badge-${safeClassToken(u.Status, 'active')}">${escapeHtml(u.Status)}</span></td>
                       <td>${escapeHtml(u.PrimaryWorkspaceID || '-')}</td>
+                      <td>${u.MfaExempt
+                        ? '<span class="badge badge-submitted" title="This account may sign in without an authenticator">NOT REQUIRED</span>'
+                        : '<span class="badge badge-active" title="This account must complete an authenticator">REQUIRED</span>'}</td>
                       <td>
                         <button class="btn btn-secondary btn-sm" onclick='openPasswordResetWizard(${htmlJsArg(u.UserID)})'>Reset Pwd</button>
                         <button class="btn btn-secondary btn-sm" onclick='openMfaResetWizard(${htmlJsArg(u.UserID)})'>Reset MFA</button>
                         <button class="btn btn-secondary btn-sm" onclick='openEditUserModal(${htmlJsArg(u.UserID)})'>Edit</button>
                         <button class="btn btn-secondary btn-sm" onclick='openAssignWorkspaceModal(${htmlJsArg(u.UserID)})'>Workspaces</button>
+                        ${u.Role === 'SUPER_ADMIN' || String(u.Status || '').toUpperCase() === 'DELETED'
+                          ? ''
+                          : `<button class="btn btn-secondary btn-sm" onclick='toggleMfaExemption(${htmlJsArg(u.UserID)}, ${u.MfaExempt ? 'false' : 'true'})'>${u.MfaExempt ? 'Require MFA' : 'Skip MFA'}</button>`}
+                        ${u.Role === 'SUPER_ADMIN' || String(u.Status || '').toUpperCase() === 'DELETED'
+                          ? ''
+                          : `<button class="btn btn-danger btn-sm" onclick='openDeleteUserModal(${htmlJsArg(u.UserID)})'>Delete</button>`}
                         ${u.Status === 'ACTIVE' 
                           ? `<button class="btn btn-danger btn-sm" onclick='makeUserPassiveDirect(${htmlJsArg(u.UserID)})'>Passive</button>`
                           : `<button class="btn btn-success btn-sm" onclick='activateUserDirect(${htmlJsArg(u.UserID)})'>Activate</button>`}
@@ -4491,6 +4503,124 @@ var qrcodegen;
         await renderSaUsers();
       } catch (e) {
         alert(e.message || 'Failed to unlock the account.');
+      }
+    }
+
+    async function toggleMfaExemption(userId, exempt) {
+      const user = (state.users || []).find(item => item.UserID === userId);
+      const label = user ? (user.Username || user.DisplayName) : userId;
+      const question = exempt
+        ? 'Let ' + label + ' sign in without enrolling an authenticator?\n\n' +
+          'They will sign in with their password only until you turn this back on. ' +
+          'Accounts that already have an authenticator still verify it.'
+        : 'Require ' + label + ' to enroll an authenticator again?';
+      if (!confirm(question)) return;
+
+      try {
+        const result = await apiCall('users.setMfaExempt', {
+          targetUserId: userId,
+          exempt: !!exempt,
+          reason: exempt
+            ? 'Sign-in MFA exemption granted from the Users console'
+            : 'Sign-in MFA exemption revoked from the Users console'
+        });
+        alert((result && result.message) || 'Sign-in MFA policy updated.');
+        await renderSaUsers();
+      } catch (e) {
+        alert(e.message || 'Failed to update the sign-in MFA policy.');
+      }
+    }
+
+    function openDeleteUserModal(userId) {
+      const user = (state.users || []).find(item => item.UserID === userId);
+      if (!user) return alert('User record is not available. Refresh the Users view and try again.');
+
+      const modal = document.getElementById('modalContainer');
+      modal.replaceChildren();
+      modal.dataset.targetUserId = String(userId);
+      modal.dataset.confirmValue = String(user.Username || '');
+
+      const backdrop = document.createElement('div');
+      backdrop.className = 'modal-backdrop';
+      const box = document.createElement('div');
+      box.className = 'modal';
+
+      const title = document.createElement('h3');
+      title.style.marginBottom = '0.5rem';
+      title.style.color = '#F87171';
+      title.textContent = 'Delete User';
+
+      const intro = document.createElement('p');
+      intro.style.color = 'var(--text-secondary)';
+      intro.style.fontSize = '0.85rem';
+      intro.style.lineHeight = '1.6';
+      intro.style.marginBottom = '1rem';
+      intro.textContent =
+        'The account is removed and sign-in stops immediately. ' +
+        'Time logs and other logs are kept, not deleted.';
+
+      const keep = document.createElement('div');
+      keep.style.padding = '0.75rem 0.9rem';
+      keep.style.borderRadius = '6px';
+      keep.style.marginBottom = '1.25rem';
+      keep.style.fontSize = '0.85rem';
+      keep.style.lineHeight = '1.5';
+      keep.style.background = 'rgba(16,185,129,0.12)';
+      keep.style.border = '1px solid rgba(16,185,129,0.35)';
+      keep.style.color = '#34D399';
+      keep.textContent =
+        'Kept: time entries, timesheets and audit history, still attributed to this user. ' +
+        'Removed: sign-in, authenticator and recovery codes.';
+
+      const field = document.createElement('div');
+      field.style.marginBottom = '1.5rem';
+      const label = document.createElement('label');
+      label.textContent = 'Type the username to confirm: ' + String(user.Username || '');
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.id = 'deleteUserConfirm';
+      input.setAttribute('autocomplete', 'off');
+      field.append(label, input);
+
+      const actions = document.createElement('div');
+      actions.style.display = 'flex';
+      actions.style.gap = '0.75rem';
+      actions.style.justifyContent = 'flex-end';
+
+      const cancel = document.createElement('button');
+      cancel.className = 'btn btn-secondary';
+      cancel.textContent = 'Cancel';
+      cancel.onclick = closeModal;
+
+      const confirmBtn = document.createElement('button');
+      confirmBtn.className = 'btn btn-danger';
+      confirmBtn.textContent = 'Delete User';
+      confirmBtn.onclick = submitDeleteUser;
+
+      actions.append(cancel, confirmBtn);
+      box.append(title, intro, keep, field, actions);
+      backdrop.appendChild(box);
+      modal.appendChild(backdrop);
+    }
+
+    async function submitDeleteUser() {
+      const modal = document.getElementById('modalContainer');
+      const userId = modal.dataset.targetUserId || '';
+      const expected = modal.dataset.confirmValue || '';
+      const typed = document.getElementById('deleteUserConfirm')?.value.trim() || '';
+      if (!userId) return alert('Delete context is missing. Close the dialog and try again.');
+      if (typed !== expected) return alert('The username you typed does not match. Nothing was deleted.');
+
+      try {
+        await apiCall('users.delete', {
+          targetUserId: userId,
+          reason: 'Deleted by Super Admin from the Users console'
+        });
+        closeModal();
+        alert('User deleted. Time logs and audit history were preserved.');
+        await renderSaUsers();
+      } catch (e) {
+        alert(e.message || 'Failed to delete the user.');
       }
     }
 

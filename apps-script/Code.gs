@@ -167,6 +167,8 @@ var CONSTANTS = {
     USER_PASSIVE: 'USER_PASSIVE',
     USER_ACTIVATED: 'USER_ACTIVATED',
     USER_DELETED: 'USER_DELETED',
+    USER_DELETE_INTENT: 'USER_DELETE_INTENT',
+    USER_DELETE_COMPLETED: 'USER_DELETE_COMPLETED',
     WORKSPACE_CREATED: 'WORKSPACE_CREATED',
     WORKSPACE_UPDATED: 'WORKSPACE_UPDATED',
     ADMIN_ASSIGNED: 'ADMIN_ASSIGNED',
@@ -191,6 +193,8 @@ var CONSTANTS = {
     MFA_DISABLED: 'MFA_DISABLED',
     MFA_RESET_INTENT: 'MFA_RESET_INTENT',
     MFA_RESET_COMPLETED: 'MFA_RESET_COMPLETED',
+    MFA_EXEMPTION_GRANTED: 'MFA_EXEMPTION_GRANTED',
+    MFA_EXEMPTION_REVOKED: 'MFA_EXEMPTION_REVOKED',
     ACCOUNT_UNLOCKED: 'ACCOUNT_UNLOCKED',
     SETTINGS_CHANGED: 'SETTINGS_CHANGED',
     EXPORT_CREATED: 'EXPORT_CREATED',
@@ -1091,6 +1095,8 @@ const ACTION_PERMISSIONS = {
   'users.create': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN], isWrite: true },
   'users.update': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN], isWrite: true },
   'users.makePassive': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN], isWrite: true },
+  'users.delete': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN], isWrite: true },
+  'users.setMfaExempt': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN], isWrite: true },
   'users.activate': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN], isWrite: true },
   'users.resetPassword': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN], isWrite: true },
   'users.resetMfa': { authRequired: true, roles: [CONSTANTS.ROLES.SUPER_ADMIN], isWrite: true },
@@ -1187,6 +1193,8 @@ const PRIVILEGED_STEP_UP_ACTIONS = new Set([
   'users.create',
   'users.update',
   'users.makePassive',
+  'users.delete',
+  'users.setMfaExempt',
   'users.activate',
   'users.resetPassword',
   'users.resetMfa',
@@ -1511,6 +1519,12 @@ function dispatchAction_(action, data) {
 
     case 'users.makePassive':
       return UserService.makeUserPassive(authContext, payload.targetUserId, payload.reason);
+
+    case 'users.delete':
+      return UserService.deleteUser(authContext, payload.targetUserId, payload.reason);
+
+    case 'users.setMfaExempt':
+      return MfaPolicyService.setExempt(authContext, payload.targetUserId, payload.exempt, payload.reason);
 
     case 'users.activate':
       return UserService.activateUser(authContext, payload.targetUserId);
@@ -4481,6 +4495,67 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
       };
     }
 
+    // An account without an enrolled authenticator normally receives only the
+    // restricted MFA_ENROLLMENT session. A Super Admin may explicitly exempt one
+    // account from the sign-in authenticator requirement, in which case the
+    // account signs in with its password alone. This sits after the enrolled-MFA
+    // branch on purpose: an enrolled second factor is never downgraded.
+    if (MfaPolicyService.isExempt(account.UserID)) {
+      MasterRepository.updateCredentials(account.UserID, {
+        FailedLoginCount: 0,
+        LastFailedAt: '',
+        LockUntil: ''
+      });
+
+      MasterRepository.updateAccount(account.UserID, {
+        LastLoginAt: new Date().toISOString()
+      });
+
+      MasterRepository.logSecurityEvent({
+        UserID: account.UserID,
+        Username: account.Username,
+        EventType: CONSTANTS.AUDIT_EVENTS.LOGIN_SUCCESS,
+        Success: true,
+        metadata: {
+          clientType: normalizedClientType,
+          mfa: false,
+          mfaExempt: true,
+          googleIdentity: googleEmail || ''
+        }
+      });
+
+      const exemptSession = SessionService.createSession(
+        account.UserID,
+        normalizedClientType,
+        googleEmail,
+        'MFA'
+      );
+      const exemptAccesses = MasterRepository.getWorkspaceAccessForUser(account.UserID);
+      const exemptWorkspaces = exemptAccesses.map(a => a.WorkspaceID);
+
+      return {
+        sessionToken: exemptSession.sessionToken,
+        expiresAt: exemptSession.expiresAt,
+        mfaExempt: true,
+        user: {
+          userId: account.UserID,
+          username: account.Username,
+          displayName: account.DisplayName,
+          role: account.Role,
+          status: account.Status,
+          email: account.Email || '',
+          primaryWorkspaceId:
+            account.PrimaryWorkspaceID ||
+            exemptWorkspaces[0] ||
+            '',
+          assignedWorkspaces: exemptWorkspaces,
+          mustChangePassword:
+            account.MustChangePassword === true ||
+            account.MustChangePassword === 'TRUE'
+        }
+      };
+    }
+
     // Enrollment does not complete login or reset durable failure counters.
     const sessionData = SessionService.createSession(
       account.UserID,
@@ -5538,17 +5613,19 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
     }
   },
 
-  _requireAdminSecurityAudit(actorContext, action, targetUserId, before, after) {
+  _requireAdminSecurityAudit(actorContext, action, targetUserId, before, after,
+    entityType = 'USER_SECURITY',
+    reason = 'Administrative authenticator replacement; secrets excluded') {
     const ok = MasterRepository.logGlobalAudit({
       ActorUserID: actorContext.userId,
       ActorRole: actorContext.role,
       WorkspaceID: 'MASTER',
-      EntityType: 'USER_SECURITY',
+      EntityType: entityType,
       EntityID: targetUserId,
       Action: action,
       BeforeJSON: before,
       AfterJSON: after,
-      Reason: 'Administrative authenticator replacement; secrets excluded'
+      Reason: reason
     });
     if (!ok) {
       throw new AppError(
@@ -13382,6 +13459,203 @@ var DashboardService = (typeof global !== 'undefined' && global.DashboardService
  * password generation, and cross-workspace membership registration.
  */
 
+/**
+ * Sign-in authenticator policy.
+ *
+ * Mandatory MFA stays the default and the global `MFA_REQUIRED` setting stays
+ * read-only: no configuration can switch authenticator verification off. This
+ * service exists so a Super Admin can, case by case, exempt one account that
+ * cannot complete enrollment — a lost device, for example, where the person must
+ * keep working immediately. Every exemption is:
+ *   - per account and explicit, never fleet-wide;
+ *   - refused for Super Admin accounts;
+ *   - step-up protected and audited with before/after state;
+ *   - only effective for an account with no enrolled authenticator, so an
+ *     enrolled second factor is never downgraded.
+ */
+var MfaPolicyService = (typeof global !== 'undefined' && global.MfaPolicyService) || {
+  PROPERTY_KEY: 'FLINK_MFA_EXEMPT_USERS',
+  MAX_EXEMPT: 100,
+
+  _properties() {
+    if (typeof PropertiesService !== 'undefined' && PropertiesService.getScriptProperties) {
+      return PropertiesService.getScriptProperties();
+    }
+    return null;
+  },
+
+  _list() {
+    const store = this._properties();
+    if (!store) return [];
+    let raw = '';
+    try {
+      raw = store.getProperty(this.PROPERTY_KEY) || '';
+    } catch (readErr) {
+      return [];
+    }
+    if (!raw) return [];
+    try {
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed)
+        ? parsed.filter(id => typeof id === 'string' && id)
+        : [];
+    } catch (parseErr) {
+      return [];
+    }
+  },
+
+  _write(list) {
+    const store = this._properties();
+    if (!store) {
+      throw new AppError(
+        ERROR_CODES.CRYPTO_FAILURE,
+        'The settings store is unavailable. Please retry.',
+        503
+      );
+    }
+    store.setProperty(this.PROPERTY_KEY, JSON.stringify(list));
+  },
+
+  isExempt(userId) {
+    if (!userId) return false;
+    return this._list().indexOf(String(userId)) !== -1;
+  },
+
+  listExempt() {
+    return this._list();
+  },
+
+  clearExemption(userId) {
+    const list = this._list();
+    const next = list.filter(id => id !== String(userId));
+    if (next.length !== list.length) {
+      this._write(next);
+      return true;
+    }
+    return false;
+  },
+
+  setExempt(superAdminContext, targetUserId, exempt, reason = '') {
+    AuthorizationService.assertRole(superAdminContext, [CONSTANTS.ROLES.SUPER_ADMIN]);
+    if (typeof targetUserId !== 'string' || !targetUserId.trim()) {
+      throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'targetUserId is required.', 400);
+    }
+    const cleanTargetId = targetUserId.trim();
+    const account = MasterRepository.findAccountById(cleanTargetId);
+    if (!account) throw new AppError(ERROR_CODES.NOT_FOUND, 'Target account not found.');
+    if (account.Role === CONSTANTS.ROLES.SUPER_ADMIN) {
+      throw new AppError(
+        ERROR_CODES.PERMISSION_DENIED,
+        'The root Super Admin account must always complete MFA.',
+        403
+      );
+    }
+    if (
+      account.Status === CONSTANTS.ACCOUNT_STATUS.ARCHIVED ||
+      account.Status === CONSTANTS.ACCOUNT_STATUS.DELETED
+    ) {
+      throw new AppError(
+        ERROR_CODES.CONFLICT,
+        'Archived or deleted accounts cannot be exempted from MFA.',
+        409
+      );
+    }
+
+    const shouldExempt = exempt === true || exempt === 'true' || exempt === 'TRUE' ||
+      exempt === 1 || exempt === '1';
+
+    const lock = LockService.getScriptLock();
+    lock.waitLock(10000);
+    try {
+      const list = this._list();
+      const wasExempt = list.indexOf(cleanTargetId) !== -1;
+      if (wasExempt === shouldExempt) {
+        return {
+          ok: true,
+          userId: cleanTargetId,
+          mfaExempt: shouldExempt,
+          exemptCount: list.length,
+          unchanged: true
+        };
+      }
+
+      let next;
+      if (shouldExempt) {
+        if (list.length >= this.MAX_EXEMPT) {
+          throw new AppError(
+            ERROR_CODES.CONFLICT,
+            `At most ${this.MAX_EXEMPT} accounts may be exempt from MFA at once.`,
+            409
+          );
+        }
+        next = list.concat([cleanTargetId]);
+      } else {
+        next = list.filter(id => id !== cleanTargetId);
+      }
+
+      const before = { mfaExempt: wasExempt, exemptCount: list.length };
+      const after = {
+        mfaExempt: shouldExempt,
+        exemptCount: next.length,
+        reason: String(reason || '').slice(0, 500)
+      };
+      const auditEvent = shouldExempt
+        ? CONSTANTS.AUDIT_EVENTS.MFA_EXEMPTION_GRANTED
+        : CONSTANTS.AUDIT_EVENTS.MFA_EXEMPTION_REVOKED;
+
+      // Fail closed: no audit trail means no policy change.
+      const intentOk = MasterRepository.logGlobalAudit({
+        ActorUserID: superAdminContext.userId,
+        ActorRole: superAdminContext.role,
+        WorkspaceID: 'MASTER',
+        EntityType: 'USER_SECURITY',
+        EntityID: cleanTargetId,
+        Action: auditEvent + '_INTENT',
+        BeforeJSON: before,
+        AfterJSON: after,
+        Reason: 'Sign-in MFA exemption; enrolled authenticators are still verified'
+      });
+      if (!intentOk) {
+        throw new AppError(
+          ERROR_CODES.CRYPTO_FAILURE,
+          'Security audit is unavailable. Please retry.',
+          503
+        );
+      }
+
+      this._write(next);
+
+      if (typeof SpreadsheetApp !== 'undefined' && SpreadsheetApp.flush) {
+        try { SpreadsheetApp.flush(); } catch (flushErr) {}
+      }
+
+      MasterRepository.logGlobalAudit({
+        ActorUserID: superAdminContext.userId,
+        ActorRole: superAdminContext.role,
+        WorkspaceID: 'MASTER',
+        EntityType: 'USER_SECURITY',
+        EntityID: cleanTargetId,
+        Action: auditEvent + '_COMPLETED',
+        BeforeJSON: before,
+        AfterJSON: after,
+        Reason: 'Sign-in MFA exemption; enrolled authenticators are still verified'
+      });
+
+      return {
+        ok: true,
+        userId: cleanTargetId,
+        mfaExempt: shouldExempt,
+        exemptCount: next.length,
+        message: shouldExempt
+          ? `${account.Username} may now sign in without enrolling an authenticator. Turn this off to require it again.`
+          : `${account.Username} must enroll an authenticator at next sign-in.`
+      };
+    } finally {
+      lock.releaseLock();
+    }
+  }
+};
+
 var UserService = (typeof global !== 'undefined' && global.UserService) || {
   _toUserDTO(user, assignedWorkspaceIds = [], detailLevel = 'SELF') {
     if (!user) return null;
@@ -13409,6 +13683,7 @@ var UserService = (typeof global !== 'undefined' && global.UserService) || {
       dto.MustChangePassword =
         user.MustChangePassword === true || user.MustChangePassword === 'TRUE';
       dto.Version = parseInt(user.Version, 10) || 1;
+      dto.MfaExempt = MfaPolicyService.isExempt(user.UserID);
     }
 
     return dto;
@@ -13723,83 +13998,8 @@ var UserService = (typeof global !== 'undefined' && global.UserService) || {
         );
       }
 
-      // Revoke sessions first. Any concurrent timer start is blocked by this same ScriptLock.
-      SessionService.revokeAllUserSessions(targetUserId);
-
-      const ownerContext = {
-        userId: targetUserId,
-        role: account.Role,
-        user: account
-      };
-
-      const accesses = MasterRepository.getWorkspaceAccessForUser(targetUserId);
-      const activeAccesses = accesses.filter(acc => {
-        const ws = MasterRepository.getWorkspace(acc.WorkspaceID);
-        return ws && ws.Status === CONSTANTS.WORKSPACE_STATUS.ACTIVE;
-      });
-      const finalizedTimers = [];
-
-      // Phase 1: preserve every active timer before changing account/member state.
-      for (const acc of activeAccesses) {
-        const timer = SheetRepository.getActiveTimer(acc.WorkspaceID, targetUserId);
-        if (timer) {
-          const entry = TimerService._finalizeActiveTimerLocked(
-            ownerContext,
-            acc.WorkspaceID,
-            timer,
-            { reason: 'Timer finalized automatically during account deactivation' },
-            superAdminContext
-          );
-          finalizedTimers.push({
-            workspaceId: acc.WorkspaceID,
-            timerId: timer.TimerID,
-            entryId: entry.EntryID,
-            durationSeconds: entry.DurationSeconds
-          });
-        }
-      }
-
-      // Phase 2: transition all active workspace member rows. Do not silently
-      // continue if one workspace fails, because that would leave a PASSIVE
-      // account with an ACTIVE membership record. Roll back member rows already
-      // changed and leave the account ACTIVE so the operation can be retried.
-      const changedMembers = [];
-      const leftAt = new Date().toISOString();
-      try {
-        for (const acc of activeAccesses) {
-          const beforeMember = SheetRepository.getMember(acc.WorkspaceID, targetUserId);
-          SheetRepository.updateMember(acc.WorkspaceID, targetUserId, {
-            Status: CONSTANTS.ACCOUNT_STATUS.PASSIVE,
-            LeftAt: leftAt
-          });
-          changedMembers.push({
-            workspaceId: acc.WorkspaceID,
-            status: beforeMember ? beforeMember.Status : CONSTANTS.ACCOUNT_STATUS.ACTIVE,
-            leftAt: beforeMember ? (beforeMember.LeftAt || '') : ''
-          });
-        }
-      } catch (memberErr) {
-        for (const changed of changedMembers.reverse()) {
-          try {
-            SheetRepository.updateMember(changed.workspaceId, targetUserId, {
-              Status: changed.status || CONSTANTS.ACCOUNT_STATUS.ACTIVE,
-              LeftAt: changed.leftAt
-            });
-          } catch (rollbackErr) {
-            console.error(
-              `Member rollback failed for ${targetUserId} in ${changed.workspaceId}: ${rollbackErr.message}`
-            );
-          }
-        }
-        throw memberErr;
-      }
-
-      // Only mark the account passive after active time and every active member
-      // row have been transitioned safely.
-      MasterRepository.updateAccount(targetUserId, {
-        Status: CONSTANTS.ACCOUNT_STATUS.PASSIVE,
-        UpdatedAt: new Date().toISOString(),
-        UpdatedBy: superAdminContext.userId
+      const result = this._deactivateUserLocked(superAdminContext, account, reason, {
+        targetStatus: CONSTANTS.ACCOUNT_STATUS.PASSIVE
       });
 
       MasterRepository.logGlobalAudit({
@@ -13808,19 +14008,235 @@ var UserService = (typeof global !== 'undefined' && global.UserService) || {
         EntityType: 'USER',
         EntityID: targetUserId,
         Action: CONSTANTS.AUDIT_EVENTS.USER_PASSIVE,
-        AfterJSON: { finalizedTimers },
+        BeforeJSON: {
+          status: account.Status,
+          role: account.Role,
+          username: account.Username || ''
+        },
+        AfterJSON: {
+          status: CONSTANTS.ACCOUNT_STATUS.PASSIVE,
+          finalizedTimers: result.finalizedTimers,
+          timeLogsPreserved: true,
+          auditLogsPreserved: true
+        },
         Reason: reason
       });
 
-      if (typeof SpreadsheetApp !== 'undefined' && SpreadsheetApp.flush) {
-        try { SpreadsheetApp.flush(); } catch (fErr) {}
+      return result;
+    } finally {
+      lock.releaseLock();
+    }
+  },
+
+  /**
+   * Shared deactivation core used by deactivation and deletion.
+   *
+   * Running timers are preserved as completed entries and every active workspace
+   * membership is closed with rollback before the terminal account status is
+   * written. Time entries and audit history are never removed: only the account
+   * record changes, so historical time and attribution continue to resolve. The
+   * caller owns the audit record and the ScriptLock.
+   */
+  _deactivateUserLocked(superAdminContext, account, reason, options) {
+    const targetUserId = account.UserID;
+    const targetStatus = options.targetStatus;
+
+    // Revoke sessions first. Any concurrent timer start is blocked by this same ScriptLock.
+    SessionService.revokeAllUserSessions(targetUserId);
+
+    const ownerContext = {
+      userId: targetUserId,
+      role: account.Role,
+      user: account
+    };
+
+    const accesses = MasterRepository.getWorkspaceAccessForUser(targetUserId);
+    const activeAccesses = accesses.filter(acc => {
+      const ws = MasterRepository.getWorkspace(acc.WorkspaceID);
+      return ws && ws.Status === CONSTANTS.WORKSPACE_STATUS.ACTIVE;
+    });
+    const finalizedTimers = [];
+
+    // Phase 1: preserve every active timer before changing account/member state.
+    for (const acc of activeAccesses) {
+      const timer = SheetRepository.getActiveTimer(acc.WorkspaceID, targetUserId);
+      if (timer) {
+        const entry = TimerService._finalizeActiveTimerLocked(
+          ownerContext,
+          acc.WorkspaceID,
+          timer,
+          { reason: 'Timer finalized automatically during account deactivation' },
+          superAdminContext
+        );
+        finalizedTimers.push({
+          workspaceId: acc.WorkspaceID,
+          timerId: timer.TimerID,
+          entryId: entry.EntryID,
+          durationSeconds: entry.DurationSeconds
+        });
       }
+    }
+
+    // Phase 2: transition all active workspace member rows. Do not silently
+    // continue if one workspace fails, because that would leave an inactive
+    // account with an ACTIVE membership record. Roll back member rows already
+    // changed and leave the account untouched so the operation can be retried.
+    const changedMembers = [];
+    const leftAt = new Date().toISOString();
+    try {
+      for (const acc of activeAccesses) {
+        const beforeMember = SheetRepository.getMember(acc.WorkspaceID, targetUserId);
+        SheetRepository.updateMember(acc.WorkspaceID, targetUserId, {
+          Status: CONSTANTS.ACCOUNT_STATUS.PASSIVE,
+          LeftAt: leftAt
+        });
+        changedMembers.push({
+          workspaceId: acc.WorkspaceID,
+          status: beforeMember ? beforeMember.Status : CONSTANTS.ACCOUNT_STATUS.ACTIVE,
+          leftAt: beforeMember ? (beforeMember.LeftAt || '') : ''
+        });
+      }
+    } catch (memberErr) {
+      for (const changed of changedMembers.reverse()) {
+        try {
+          SheetRepository.updateMember(changed.workspaceId, targetUserId, {
+            Status: changed.status || CONSTANTS.ACCOUNT_STATUS.ACTIVE,
+            LeftAt: changed.leftAt
+          });
+        } catch (rollbackErr) {
+          console.error(
+            `Member rollback failed for ${targetUserId} in ${changed.workspaceId}: ${rollbackErr.message}`
+          );
+        }
+      }
+      throw memberErr;
+    }
+
+    // Only mark the terminal status after active time and every active member row
+    // have been transitioned safely.
+    MasterRepository.updateAccount(targetUserId, {
+      Status: targetStatus,
+      UpdatedAt: new Date().toISOString(),
+      UpdatedBy: superAdminContext.userId
+    });
+
+    if (typeof SpreadsheetApp !== 'undefined' && SpreadsheetApp.flush) {
+      try { SpreadsheetApp.flush(); } catch (fErr) {}
+    }
+
+    return {
+      ok: true,
+      userId: targetUserId,
+      status: targetStatus,
+      finalizedTimers
+    };
+  },
+
+  /**
+   * Deletes an account while preserving every trace of its work.
+   *
+   * The user can no longer sign in and disappears from active rosters, but time
+   * entries, workspace history and audit records are untouched. They live in
+   * separate sheets and keep the UserID as historical text, and the account row is
+   * retained with status DELETED so past reports and attribution still resolve and
+   * the deletion itself stays auditable. Only sign-in material is cleared.
+   *
+   * Intent is written before the mutation and completion after it, and both carry
+   * before/after account state, so an interrupted deletion is visible rather than
+   * silent. Secrets are never written to the audit trail.
+   */
+  deleteUser(superAdminContext, targetUserId, reason = 'Deleted by Super Admin') {
+    AuthorizationService.assertRole(superAdminContext, [CONSTANTS.ROLES.SUPER_ADMIN]);
+    if (typeof targetUserId !== 'string' || !targetUserId.trim()) {
+      throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'targetUserId is required.', 400);
+    }
+    const cleanTargetId = targetUserId.trim();
+    if (cleanTargetId === String(superAdminContext.userId)) {
+      throw new AppError(
+        ERROR_CODES.VALIDATION_ERROR,
+        'You cannot delete the account you are signed in with.',
+        400
+      );
+    }
+
+    const lock = LockService.getScriptLock();
+    lock.waitLock(10000);
+    try {
+      const account = MasterRepository.findAccountById(cleanTargetId);
+      if (!account) throw new AppError(ERROR_CODES.NOT_FOUND, `User ${cleanTargetId} not found.`);
+      if (account.Role === CONSTANTS.ROLES.SUPER_ADMIN) {
+        throw new AppError(
+          ERROR_CODES.PERMISSION_DENIED,
+          'The root Super Admin account cannot be deleted.',
+          403
+        );
+      }
+      if (account.Status === CONSTANTS.ACCOUNT_STATUS.DELETED) {
+        throw new AppError(ERROR_CODES.CONFLICT, 'This account is already deleted.', 409);
+      }
+
+      const cred = MasterRepository.getCredentials(cleanTargetId);
+      const before = {
+        status: account.Status,
+        role: account.Role,
+        username: account.Username || '',
+        authenticatorBound: !!(cred && cred.TotpSecret),
+        recoveryCodesActive: !!(cred && cred.RecoveryJSON),
+        workspaceAccess: MasterRepository.getWorkspaceAccessForUser(cleanTargetId).length
+      };
+      const after = {
+        status: CONSTANTS.ACCOUNT_STATUS.DELETED,
+        signInAllowed: false,
+        authenticatorCleared: true,
+        recoveryCodesCleared: true,
+        timeLogsPreserved: true,
+        auditLogsPreserved: true,
+        reason: String(reason || '').slice(0, 500)
+      };
+
+      // Fail closed: no audit trail means no deletion.
+      AuthService._requireAdminSecurityAudit(
+        superAdminContext,
+        CONSTANTS.AUDIT_EVENTS.USER_DELETE_INTENT,
+        cleanTargetId,
+        before,
+        after,
+        'USER',
+        'Account deletion; time entries and audit history are preserved'
+      );
+
+      const result = this._deactivateUserLocked(superAdminContext, account, reason, {
+        targetStatus: CONSTANTS.ACCOUNT_STATUS.DELETED
+      });
+
+      // A deleted account must not retain any sign-in secret.
+      MasterRepository.updateCredentials(cleanTargetId, {
+        MfaEnabled: false,
+        TotpSecret: '',
+        PendingTotpSecret: '',
+        LastSuccessfulTotpStep: '',
+        RecoveryJSON: ''
+      });
+      AuthService._deleteMfaChallenge(cleanTargetId);
+      MfaPolicyService.clearExemption(cleanTargetId);
+
+      AuthService._requireAdminSecurityAudit(
+        superAdminContext,
+        CONSTANTS.AUDIT_EVENTS.USER_DELETE_COMPLETED,
+        cleanTargetId,
+        before,
+        after,
+        'USER',
+        'Account deletion; time entries and audit history are preserved'
+      );
 
       return {
         ok: true,
-        userId: targetUserId,
-        status: CONSTANTS.ACCOUNT_STATUS.PASSIVE,
-        finalizedTimers
+        userId: cleanTargetId,
+        status: CONSTANTS.ACCOUNT_STATUS.DELETED,
+        finalizedTimers: result.finalizedTimers,
+        timeLogsPreserved: true,
+        auditLogsPreserved: true
       };
     } finally {
       lock.releaseLock();
@@ -13859,6 +14275,10 @@ var UserService = (typeof global !== 'undefined' && global.UserService) || {
           });
         } catch (e) {}
       }
+
+      // A revived account starts from the mandatory-MFA posture again: a stale
+      // sign-in exemption must never silently follow the account back.
+      MfaPolicyService.clearExemption(targetUserId);
 
       MasterRepository.logGlobalAudit({
         ActorUserID: superAdminContext.userId,
@@ -18604,7 +19024,7 @@ if (typeof module !== 'undefined' && module.exports) {
     ClientService, ProjectService, TaskService, TagService,
     TimeEntryService, TimerService, TimesheetService,
     ApprovalService, ReportService, RollupService, DashboardService,
-    UserService, AdminRequestService, SetupService, IntegrityService,
+    UserService, MfaPolicyService, AdminRequestService, SetupService, IntegrityService,
     JobService, BackupService, AuditService, NotificationService,
     ExportService, MigrationService, initializeInstallation: initializeInstallation_
   };
