@@ -1,5 +1,37 @@
 # Live acceptance handoff
 
+## Staging checkpoint — 2026-10-20
+
+The approved owner-only Web App is now **Version 4**, source
+`e42e1c18caa0b55e421f4aa2e7dbd2a362e6b51f`, on the pushed
+`fix/review-defects-20261020` branch. Production and the installer pin are unchanged.
+
+Version 3 first received `f241a0a`: complete Code/Portal readback from an independent
+editor matched normalized source after fresh clipboard sentinels; all 20 manifest
+lines were independently compared, with only `webapp.access=MYSELF` differing.
+A fresh editor showed exactly the three runtime files, no helper. Versions 1/2
+remain in project history. Deployment success and saved owner-only/execute-as-owner
+metadata were independently checked.
+
+Owner acceptance then reported broken QR enrollment. The page read `otpauthUri`,
+but the real service returns `qrUri`; the browser mock had hidden that mismatch.
+Three real-service contract regressions failed before the one-line fix. All
+**731 unit tests** and **40 mocked signed-Chrome tests** now pass. A fresh Google
+history view showed only Portal modified and exactly **Difference 1 of 1**, the
+same line as the local patch. No clipboard access or application capture occurred
+during the owner's private enrollment. Version 4 success and saved deployment
+ID/version/access/execution mode were independently verified.
+
+The owner must refresh the existing staging Employee tab, sign in as
+`stagingadmin`, generate a fresh QR, complete MFA, and save/dismiss recovery codes.
+Do not recreate root, request recovery mail or edit credential cells. Application
+capture stays paused until the owner explicitly confirms sensitive screens closed.
+Camera scanning, completed sign-in, remaining acceptance cases and comparable
+authenticated end-to-end timings are **not verified**. No 10× whole-app claim or
+installer advancement is justified. REST doctor remains unconfigured; no guard was
+weakened. GitHub CLI is unavailable, so the fixes are pushed but no PR was opened
+or merged in this follow-up.
+
 ## Staging checkpoint — 2026-10-15
 
 The approved owner-only Version 2 Web App still contains baseline `1be2712`.

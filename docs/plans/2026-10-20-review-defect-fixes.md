@@ -34,3 +34,9 @@ source and verify saved content before deployment. Owner handles login/consent/M
 locally. Missing target exclusions, credentials, synthetic roles or consent block
 live acceptance and end-to-end speed claims. Keep the installer pin unchanged
 until matched-source live acceptance and comparable measurements pass.
+
+Acceptance finding: the server's `qrUri` field did not match the page/mock's
+`otpauthUri`. Add actual-service response regressions in `tests/mfa-qr.test.js`
+and `tests/browser/mandatory-mfa.spec.js`, correct the mock and the one shared
+portal call, then independently verify the saved one-line staging diff before
+owner-only redeployment. Owner scanning/sign-in remains private and unverified.

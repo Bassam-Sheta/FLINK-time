@@ -174,3 +174,19 @@ known npm audit findings, parse checks and local-library verification. Synthetic
 failure-injection notices are expected. See
 [the scoped plan](plans/2026-10-20-review-defect-fixes.md). These results are not
 Google acceptance, a production deployment or proof of a whole-app 10× speedup.
+
+### Staging acceptance follow-up
+
+Owner testing exposed a QR contract mismatch: the service returns `qrUri`, while
+the page and its mock expected `otpauthUri`. Three real-service regressions failed
+before correcting the page. Browser tests now feed the actual service response
+into all three rendered role flows and independently decode their SVG geometry.
+Fresh verification: **731/731 unit tests**, **40/40 mocked signed-Chrome tests**,
+and local-library verification pass.
+
+The fixes are pushed on `fix/review-defects-20261020`. Reviewed source
+`e42e1c18caa0b55e421f4aa2e7dbd2a362e6b51f` is deployed only to approved owner-only
+staging Version 4, with independent source/diff and saved-deployment verification.
+Live sign-in/MFA, broader acceptance and comparable end-to-end speed measurements
+remain pending. See [the current handoff](LIVE_ACCEPTANCE.md). Installer pin and
+production are unchanged; the branch has not been merged.
