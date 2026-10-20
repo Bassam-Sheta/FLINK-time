@@ -2,7 +2,7 @@
 
 const { test, expect } = require('@playwright/test');
 const { decodeMatrix } = require('../helpers/qr-matrix-decoder');
-const setupUri = 'otpauth://totp/FLINK%3Asynthetic?secret=JBSWY3DPEHPK3PXP&issuer=FLINK&algorithm=SHA1&digits=6&period=30';
+const { mfaFixture } = require('../helpers/mfa-fixture');
 
 for (const route of ['/user', '/admin', '/superadmin']) {
   test(`${route} enrolls before loading application data`, async ({ page }) => {
@@ -10,7 +10,17 @@ for (const route of ['/user', '/admin', '/superadmin']) {
     page.on('request', request => {
       if (new URL(request.url()).hostname !== '127.0.0.1') external.push(request.url());
     });
-    await page.addInitScript(() => { window.__TEST_ENROLLMENT = true; });
+    const fx = mfaFixture();
+    fx.context.SecurityService.generateTotpSecret = () => 'JBSWY3DPEHPK3PXP';
+    const login = fx.login();
+    const auth = fx.context.SessionService.validateSession(login.sessionToken);
+    const enrollment = fx.context.AuthService.enrollMfa(auth, 'SyntheticPassword1!');
+    expect(enrollment.otpauthUri).toBeUndefined();
+    await page.clock.install({ time: new Date(fx.clock.now) });
+    await page.addInitScript(response => {
+      window.__TEST_ENROLLMENT = true;
+      window.__TEST_ENROLLMENT_RESPONSE = response;
+    }, JSON.parse(JSON.stringify(enrollment)));
     await page.goto(route);
     await page.getByLabel('Username', { exact: true }).fill('employee');
     await page.getByLabel('Password', { exact: true }).fill('demo-pass');
@@ -40,7 +50,7 @@ for (const route of ['/user', '/admin', '/superadmin']) {
       expect(y).toBeLessThan(size);
       matrix[y][x] = true;
     }
-    expect(decodeMatrix(matrix)).toBe(setupUri);
+    expect(decodeMatrix(matrix)).toBe(enrollment.qrUri);
     expect(await page.evaluate(() => JSON.stringify({ ...localStorage, ...sessionStorage }))).not.toContain('JBSWY3DPEHPK3PXP');
     expect(await page.evaluate(() => window.__mockState.calls.map(call => call.action))).not.toContain('workspaces.list');
     await page.getByLabel('New authenticator code').fill('000000');

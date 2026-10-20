@@ -1782,7 +1782,7 @@ var qrcodegen;
         const remainingMs = new Date(res.expiresAt).getTime() - Date.now();
         if (!Number.isFinite(remainingMs) || remainingMs <= 0) throw new Error('Enrollment expired. Generate a new QR code.');
         document.getElementById('enrollmentSecret').textContent = res.secret;
-        renderEnrollmentQr(res.otpauthUri);
+        renderEnrollmentQr(res.qrUri);
         document.getElementById('enrollmentExpiry').textContent = 'Confirm before ' + new Date(res.expiresAt).toLocaleTimeString();
         document.getElementById('mfaEnrollmentForm').classList.add('hidden');
         document.getElementById('mfaEnrollmentConfirmForm').classList.remove('hidden');

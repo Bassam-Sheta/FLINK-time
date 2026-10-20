@@ -162,9 +162,9 @@
 
       case 'auth.enrollMfa':
         if (payload.currentPassword !== 'demo-pass') throw new Error('Fresh password verification failed.');
-        return enrollmentResult('auth.enrollMfa', {
+        return enrollmentResult('auth.enrollMfa', window.__TEST_ENROLLMENT_RESPONSE || {
           secret: 'JBSWY3DPEHPK3PXP',
-          otpauthUri: 'otpauth://totp/FLINK%3Asynthetic?secret=JBSWY3DPEHPK3PXP&issuer=FLINK&algorithm=SHA1&digits=6&period=30',
+          qrUri: 'otpauth://totp/FLINK%3Asynthetic?secret=JBSWY3DPEHPK3PXP&issuer=FLINK&algorithm=SHA1&digits=6&period=30',
           expiresAt: new Date(Date.now() + 600000).toISOString()
         });
 
