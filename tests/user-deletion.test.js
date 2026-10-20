@@ -198,7 +198,7 @@ test('deletion blocks sign-in but keeps the time logs and the other logs', () =>
   );
 });
 
-test('deletion clears every sign-in secret and revokes access', () => {
+test('deletion clears authenticator/recovery secrets and revokes access', () => {
   const { state, UserService } = fixture();
 
   UserService.deleteUser(SUPER_ADMIN, 'U1', 'Leaver');
@@ -295,7 +295,7 @@ test('a Super Admin cannot delete the account they are signed in with', () => {
   assert.equal(state.accountUpdates.length, 0);
 });
 
-test('unknown and already deleted targets are refused', () => {
+test('unknown targets are refused and deleted targets resume only cleanup', () => {
   const missing = fixture();
   assert.throws(
     () => missing.UserService.deleteUser(SUPER_ADMIN, 'U404', ''),
@@ -303,11 +303,11 @@ test('unknown and already deleted targets are refused', () => {
   );
 
   const already = fixture({ account: { Status: 'DELETED' } });
-  assert.throws(
-    () => already.UserService.deleteUser(SUPER_ADMIN, 'U1', ''),
-    err => err instanceof AppError && err.code === 'CONFLICT'
-  );
+  assert.equal(already.UserService.deleteUser(SUPER_ADMIN, 'U1', '').ok, true);
   assert.equal(already.state.revoked, 0);
+  assert.equal(already.state.finalized.length, 0);
+  assert.equal(already.state.memberWrites.length, 0);
+  assert.equal(already.state.cred.TotpSecret, '');
 });
 
 test('only a Super Admin may delete an account', () => {
@@ -387,4 +387,73 @@ test('deletion rolls membership back when a later workspace write fails', () => 
     true,
     'the earlier membership transition must be rolled back'
   );
+});
+
+for (const phase of ['credentials-before', 'credentials-after', 'challenge', 'exemption', 'completion']) {
+  test('deletion resumes cleanup after interruption at ' + phase + ' without duplicating time', () => {
+    const { state, UserService } = fixture();
+    const auth = require(servicePath).AuthService;
+    const policy = require(servicePath).MfaPolicyService;
+    let restore;
+    if (phase.startsWith('credentials')) {
+      const update = global.MasterRepository.updateCredentials;
+      global.MasterRepository.updateCredentials = (...args) => {
+        if (phase === 'credentials-after') update(...args);
+        throw new Error('Synthetic cleanup interruption');
+      };
+      restore = () => { global.MasterRepository.updateCredentials = update; };
+    } else if (phase === 'completion') {
+      const audit = global.MasterRepository.logGlobalAudit;
+      global.MasterRepository.logGlobalAudit = data => data.Action === 'USER_DELETE_COMPLETED' ? false : audit(data);
+      restore = () => { global.MasterRepository.logGlobalAudit = audit; };
+    } else {
+      const service = phase === 'challenge' ? auth : policy;
+      const method = phase === 'challenge' ? '_deleteMfaChallenge' : 'clearExemption';
+      const original = service[method];
+      service[method] = () => { throw new Error('Synthetic cleanup interruption'); };
+      restore = () => { service[method] = original; };
+    }
+    assert.throws(() => UserService.deleteUser(SUPER_ADMIN, 'U1', 'Leaver'));
+    assert.equal(state.account.Status, 'DELETED');
+    restore();
+    const result = UserService.deleteUser(SUPER_ADMIN, 'U1', 'Retry cleanup');
+    assert.equal(result.ok, true);
+    assert.equal(state.cred.TotpSecret, '');
+    assert.equal(state.cred.RecoveryJSON, '');
+    assert.equal(state.finalized.length, 1);
+    assert.equal(state.memberWrites.length, 1);
+    assert.equal(state.audits[0].BeforeJSON.status, 'ACTIVE');
+    assert.equal(state.audits.at(-1).Action, 'USER_DELETE_COMPLETED');
+    assert.equal(state.destructiveCalls.length, 0);
+  });
+}
+
+test('a deleted account cannot be resurrected through activation or passive status', () => {
+  const { state, UserService } = fixture({ account: { Status: 'DELETED' } });
+  for (const method of ['activateUser', 'makeUserPassive']) {
+    assert.throws(() => UserService[method](SUPER_ADMIN, 'U1'), error => error.code === 'CONFLICT');
+  }
+  assert.equal(state.account.Status, 'DELETED');
+  assert.equal(state.accountUpdates.length, 0);
+});
+
+test('deletion does not mutate without a durably flushed intent', () => {
+  const { state, UserService } = fixture();
+  global.SpreadsheetApp.flush = () => { throw new Error('Synthetic flush uncertainty'); };
+  assert.throws(() => UserService.deleteUser(SUPER_ADMIN, 'U1'), /Synthetic flush uncertainty/);
+  assert.equal(state.account.Status, 'ACTIVE');
+  assert.equal(state.finalized.length, 0);
+});
+
+test('failed deletion completion flush is reported and cleanup retry preserves time', () => {
+  const { state, UserService } = fixture();
+  let flushes = 0;
+  global.SpreadsheetApp.flush = () => {
+    if (++flushes === 3) throw new Error('Synthetic completion flush uncertainty');
+  };
+  assert.throws(() => UserService.deleteUser(SUPER_ADMIN, 'U1'), /Synthetic completion flush uncertainty/);
+  assert.equal(state.account.Status, 'DELETED');
+  assert.equal(UserService.deleteUser(SUPER_ADMIN, 'U1').ok, true);
+  assert.equal(state.finalized.length, 1);
+  assert.equal(state.audits.at(-1).Action, 'USER_DELETE_COMPLETED');
 });

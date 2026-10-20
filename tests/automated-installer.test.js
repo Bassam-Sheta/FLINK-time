@@ -4,6 +4,8 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const vm = require('node:vm');
+const approvedRelease = require('./fixtures/installer-pinned-release.json');
 
 const code = fs.readFileSync(
   path.resolve(__dirname, '../installer/Code.gs'),
@@ -51,16 +53,11 @@ test('installer release source is pinned to an immutable commit and allowlisted 
   assert.ok(commitMatch, 'installer must pin a full 40-character commit SHA');
   assert.doesNotMatch(code, /raw\.githubusercontent\.com\/[^'"]+\/main\//);
 
-  for (const pathName of [
-    'apps-script/Code.gs',
-    'apps-script/Portal.html',
-    'apps-script/appsscript.json'
-  ]) {
-    assert.equal(code.includes(pathName), true, pathName);
-  }
-
-  const fileEntries = [...code.matchAll(/\{ path: 'apps-script\//g)];
-  assert.equal(fileEntries.length, 3);
+  const context = vm.createContext({});
+  vm.runInContext(code, context);
+  assert.deepEqual(JSON.parse(JSON.stringify(context.INSTALLER_RELEASE)), {
+    repository: 'Bassam-Sheta/FLINK-time', ...approvedRelease
+  }, 'the approved historical release must keep its own complete file contract');
 });
 
 test('installer performs official API lifecycle in safe order', () => {

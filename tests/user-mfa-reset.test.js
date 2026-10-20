@@ -14,6 +14,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');
+const { mfaFixture } = require('./helpers/mfa-fixture');
 
 const servicePath = path.resolve(__dirname, '../apps-script/Code.gs');
 
@@ -247,4 +248,41 @@ test('the replacement is recorded against the acting administrator', () => {
   fx.AuthService.resetMfaByAdmin(SUPER_ADMIN, 'U1', '');
   assert.ok(fx.accountUpdates.length >= 1);
   assert.equal(fx.accountUpdates[0].UpdatedBy, 'SA1');
+});
+
+test('reset clears timed lockout so the next correct sign-in reaches enrollment', () => {
+  const fx = mfaFixture();
+  fx.account.Status = 'LOCKED';
+  fx.cred.FailedLoginCount = 5;
+  fx.cred.LastFailedAt = new Date(fx.clock.now).toISOString();
+  fx.cred.LockUntil = new Date(fx.clock.now + 600000).toISOString();
+  fx.context.AuthService.resetMfaByAdmin(SUPER_ADMIN, 'U1', 'Lost device');
+  assert.equal(fx.cred.LockUntil, '');
+  assert.equal(fx.cred.FailedLoginCount, 0);
+  assert.equal(fx.cred.LastFailedAt, '');
+  assert.equal(fx.login().enrollmentRequired, true);
+});
+
+test('reset preserves an explicit exemption and accurately reports password-only sign-in', () => {
+  const fx = mfaFixture();
+  fx.properties.set('FLINK_MFA_EXEMPT_USERS', JSON.stringify(['U1']));
+  fx.cred.MfaEnabled = true;
+  fx.cred.TotpSecret = 'SYNTHETIC-SECRET';
+  const result = fx.context.AuthService.resetMfaByAdmin(SUPER_ADMIN, 'U1', 'Lost device');
+  assert.equal(result.enrollmentRequired, false);
+  assert.equal(result.mfaExempt, true);
+  assert.match(result.message, /exemption remains active/i);
+  assert.doesNotMatch(result.message, /must sign in and enroll/i);
+  assert.equal(fx.login().mfaExempt, true);
+  assert.equal(fx.audits.at(-1).AfterJSON.enrollmentRequired, false);
+});
+
+test('reset does not mutate credentials when intent flush fails', () => {
+  const fx = mfaFixture();
+  fx.cred.MfaEnabled = true;
+  fx.cred.TotpSecret = 'SYNTHETIC-SECRET';
+  fx.context.SpreadsheetApp.flush = () => { throw new Error('Synthetic flush uncertainty'); };
+  assert.throws(() => fx.context.AuthService.resetMfaByAdmin(SUPER_ADMIN, 'U1'), /Synthetic flush uncertainty/);
+  assert.equal(fx.cred.MfaEnabled, true);
+  assert.equal(fx.cred.TotpSecret, 'SYNTHETIC-SECRET');
 });

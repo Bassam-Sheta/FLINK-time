@@ -35,7 +35,8 @@ test('Super Admin reauthenticates before replacing another user authenticator', 
 
   const modal = page.locator('#modalContainer');
   await expect(modal.getByRole('heading', { name: 'Replace Authenticator' })).toBeVisible();
-  await expect(modal).toContainText('MFA stays mandatory and cannot be switched off');
+  await expect(modal).toContainText('MFA is required unless you explicitly exempted this account');
+  await expect(modal).toContainText('An existing sign-in exemption remains active');
 
   await modal.locator('#mfaResetReason').fill('User replaced their phone');
   await modal.getByRole('button', { name: 'Replace Authenticator' }).click();

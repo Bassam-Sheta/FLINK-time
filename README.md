@@ -13,7 +13,7 @@ The separate application under `installer/` automates the deployment work:
 1. Open your organization's **FLINK Time Installer**.
 2. Open Google's Apps Script settings and enable **Google Apps Script API** access once.
 3. Return to the installer and click **INSTALL FLINK TIME**.
-4. The installer creates the Master Sheet, creates the bound Apps Script project, uploads the three production files, creates a version, creates the Web App deployment, and opens the Super Admin URL.
+4. The installer creates the Master Sheet, creates the bound Apps Script project, uploads its pinned release files, creates a version, creates the Web App deployment, and opens the Super Admin URL.
 5. If the newly created FLINK Time project still needs its own Drive/Sheets consent, its first-run page shows **AUTHORIZE FLINK TIME** using Google's authorization URL.
 6. Complete the guided Super Admin setup.
 
@@ -21,9 +21,13 @@ Google's API-access toggle and OAuth consent are deliberate Google security appr
 
 See **[docs/INSTALLATION.md](docs/INSTALLATION.md)** for the full installer flow and manual fallback.
 
+The installer still serves the approved historical five-file release. Its pin is
+unchanged; the current three-file source below is not an accepted installer release
+until staging acceptance and end-to-end performance gates pass.
+
 ## Production application
 
-The installed FLINK Time runtime is still only:
+The current FLINK Time application source contains only:
 
 ```
 apps-script/

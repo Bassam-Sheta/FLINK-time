@@ -160,3 +160,17 @@ plus `node scripts/embed-local-libraries.js --check` and `git diff --check`. The
 remain offline checks against mocked Google RPC; the rows above about session-cache
 freshness, granular manager grants, bounded jobs/reports, checkpoint retention and
 live acceptance are unchanged and still open. Nothing is deployed.
+
+## Follow-up — 2026-10-20: review defect fixes
+
+The earlier dated snapshots are preserved. The follow-up review reproduced gaps
+despite their passing suites. Fixes now cover the login/reset interleaving, all
+role clocks, interrupted deletion cleanup and resurrection guards, durable MFA
+policy completion/retry, reset lockout/exemption messaging, bounded bulk-version
+lookup and the installer's historical file contract without advancing its pin.
+
+Local evidence: **728/728 unit tests**, **40/40 mocked Chromium tests**, zero
+known npm audit findings, parse checks and local-library verification. Synthetic
+failure-injection notices are expected. See
+[the scoped plan](plans/2026-10-20-review-defect-fixes.md). These results are not
+Google acceptance, a production deployment or proof of a whole-app 10× speedup.

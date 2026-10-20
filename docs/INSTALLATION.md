@@ -11,9 +11,9 @@ After the user grants Google's required management access, the installer:
 1. verifies the signed-in Google Workspace identity;
 2. creates a new **FLINK Time Master** Google Sheet owned by that user;
 3. creates a new Apps Script project bound to the Sheet;
-4. downloads exactly three production files from an immutable pinned Git commit;
+4. downloads the exact file set belonging to its immutable pinned Git commit;
 5. injects only the dedicated Master Sheet ID and installation-owner bootstrap values;
-6. uploads the three files with the official Apps Script API;
+6. uploads that release's files with the official Apps Script API;
 7. creates an immutable Apps Script version;
 8. creates the Web App deployment;
 9. reads the Web App URL returned by Google;
@@ -21,6 +21,10 @@ After the user grants Google's required management access, the installer:
 11. opens Super Admin setup.
 
 If installation fails before completion, the installer attempts to move the incomplete Master Sheet to Trash.
+
+The installer pin remains on the approved historical five-file release. The
+current three-file source has not passed staging acceptance and end-to-end speed
+gates; it is not yet the installer release.
 
 ### What the user still approves
 
@@ -94,4 +98,4 @@ Do not deploy the production app as public **Anyone** access.
 - **Admin:** `?view=admin` — direct Web App access.
 - **Super Admin:** `?view=superadmin` — direct Web App access.
 
-Admin and Super Admin views are intentionally not embeddable. All three links point at the same Web App deployment and the same `Portal.html`; only the `view` parameter selects the server-rendered role regions.
+Admin and Super Admin views are intentionally not embeddable. All three links point at the same Web App deployment. In the current source, the `view` parameter selects server-rendered regions in `Portal.html`; the historical installer release uses separate HTML files.

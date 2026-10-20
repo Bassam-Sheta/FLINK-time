@@ -12,9 +12,13 @@
 var INSTALLER_RELEASE = Object.freeze({
   repository: 'Bassam-Sheta/FLINK-time',
   commit: 'ba3cb0408a867fd48ea5948e3f0a88b39e139739',
+  // This approved historical release predates Portal.html. Keep its own file
+  // contract until the current three-file runtime passes the release gates.
   files: [
     { path: 'apps-script/Code.gs', name: 'Code', type: 'SERVER_JS' },
-    { path: 'apps-script/Portal.html', name: 'Portal', type: 'HTML' },
+    { path: 'apps-script/User.html', name: 'User', type: 'HTML' },
+    { path: 'apps-script/Admin.html', name: 'Admin', type: 'HTML' },
+    { path: 'apps-script/SuperAdmin.html', name: 'SuperAdmin', type: 'HTML' },
     { path: 'apps-script/appsscript.json', name: 'appsscript', type: 'JSON' }
   ]
 });

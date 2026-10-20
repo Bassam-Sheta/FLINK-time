@@ -4,6 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const { mfaFixture } = require('./helpers/mfa-fixture');
 
 const codePath = path.resolve(__dirname, '../apps-script/Code.gs');
 const source = fs.readFileSync(codePath, 'utf8');
@@ -52,16 +53,31 @@ test('stored PBKDF2 iteration count drives upgrade-on-login', () => {
 });
 
 test('login upgrades only after a valid password and atomic credential re-read', () => {
-  const verifyIndex = source.indexOf('const isValid = SecurityService.verifyPassword');
-  const rereadIndex = source.indexOf('const latestCred = MasterRepository.getCredentials(account.UserID)', verifyIndex);
-  const upgradeIndex = source.indexOf('SecurityService.needsPasswordHashUpgrade(cred.PasswordHash)', rereadIndex);
-  const mfaIndex = source.indexOf("if (cred.MfaEnabled === true || cred.MfaEnabled === 'TRUE')", upgradeIndex);
-
-  assert.ok(verifyIndex >= 0);
-  assert.ok(rereadIndex > verifyIndex);
-  assert.ok(upgradeIndex > rereadIndex);
-  assert.ok(mfaIndex > upgradeIndex);
-  assert.match(source.slice(upgradeIndex, mfaIndex), /PASSWORD_HASH_UPGRADED/);
+  for (const scenario of ['valid', 'invalid-password', 'credentials-changed']) {
+    const fx = mfaFixture();
+    let upgrades = 0;
+    fx.context.SecurityService.verifyPassword = () => scenario !== 'invalid-password';
+    fx.context.SecurityService.needsPasswordHashUpgrade = () => true;
+    fx.context.SecurityService.getStoredPasswordIterations = () => 10000;
+    fx.context.SecurityService.getConfiguredPasswordIterations = () => 25000;
+    fx.context.SecurityService.hashPassword = (_password, iterations) => {
+      assert.equal(fx.controls.locked, true, 'mutable credentials must have been re-read under lock');
+      assert.equal(iterations, 25000);
+      upgrades++;
+      return 'SYNTHETIC-UPGRADED-HASH';
+    };
+    if (scenario === 'credentials-changed') fx.controls.onLock = () => { fx.cred.PasswordHash = 'SYNTHETIC-REPLACEMENT'; };
+    if (scenario === 'valid') {
+      assert.equal(fx.login().enrollmentRequired, true);
+      assert.equal(upgrades, 1);
+      assert.equal(fx.cred.PasswordHash, 'SYNTHETIC-UPGRADED-HASH');
+      assert.equal(fx.events.some(event => event.EventType === 'PASSWORD_HASH_UPGRADED'), true);
+    } else {
+      assert.throws(() => fx.login(), error => error.code === 'AUTH_REQUIRED');
+      assert.equal(upgrades, 0);
+      assert.equal(fx.sessions.length, 0);
+    }
+  }
 });
 
 test('Super Admin health UI exposes the calibration action', () => {
@@ -86,8 +102,16 @@ test('new password hashes use v2 framing and transparent rehash does not rotate 
     mod.MasterRepository.getGlobalSettingFast = originalSetting;
   }
 
-  const upgradeStart = source.indexOf('SecurityService.needsPasswordHashUpgrade(cred.PasswordHash)');
-  const upgradeEnd = source.indexOf("if (cred.MfaEnabled === true || cred.MfaEnabled === 'TRUE')", upgradeStart);
-  const upgradeBlock = source.slice(upgradeStart, upgradeEnd);
-  assert.doesNotMatch(upgradeBlock, /PasswordVersion\s*:/);
+  const fx = mfaFixture();
+  fx.cred.PasswordVersion = 4;
+  fx.account.SessionEpoch = 3;
+  fx.context.SecurityService.needsPasswordHashUpgrade = () => true;
+  fx.context.SecurityService.getStoredPasswordIterations = () => 10000;
+  fx.context.SecurityService.getConfiguredPasswordIterations = () => 25000;
+  fx.context.SecurityService.hashPassword = () => 'SYNTHETIC-UPGRADED-HASH';
+  fx.login();
+  assert.equal(fx.cred.PasswordHash, 'SYNTHETIC-UPGRADED-HASH');
+  assert.equal(fx.cred.PasswordVersion, 4, 'transparent rehash must not rotate the credential generation');
+  assert.equal(fx.account.SessionEpoch, 3);
+  assert.equal(fx.sessions[0].AccountEpoch, 3);
 });

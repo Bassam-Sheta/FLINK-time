@@ -2363,8 +2363,8 @@ var qrcodegen;
         const diffSecs = Math.max(0, Math.floor((Date.now() - startMs) / 1000));
         const hrs = Math.floor(diffSecs / 3600);
         const mins = Math.floor((diffSecs % 3600) / 60);
-<? if (portalView === 'user') { ?>        const secs = diffSecs % 60;
-<? } ?>        const timeStr = `${String(hrs).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+        const secs = diffSecs % 60;
+        const timeStr = `${String(hrs).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
         clockEl.innerText = timeStr;
         try { document.title = `[${timeStr}] FLINK Time`; } catch (e) {}
       };
@@ -4340,10 +4340,10 @@ var qrcodegen;
                         ${u.Role === 'SUPER_ADMIN' || String(u.Status || '').toUpperCase() === 'DELETED'
                           ? ''
                           : `<button class="btn btn-secondary btn-sm" onclick='toggleMfaExemption(${htmlJsArg(u.UserID)}, ${u.MfaExempt ? 'false' : 'true'})'>${u.MfaExempt ? 'Require MFA' : 'Skip MFA'}</button>`}
-                        ${u.Role === 'SUPER_ADMIN' || String(u.Status || '').toUpperCase() === 'DELETED'
+                        ${u.Role === 'SUPER_ADMIN'
                           ? ''
-                          : `<button class="btn btn-danger btn-sm" onclick='openDeleteUserModal(${htmlJsArg(u.UserID)})'>Delete</button>`}
-                        ${u.Status === 'ACTIVE' 
+                          : `<button class="btn btn-danger btn-sm" onclick='openDeleteUserModal(${htmlJsArg(u.UserID)})'>${u.Status === 'DELETED' ? 'Retry Cleanup' : 'Delete'}</button>`}
+                        ${u.Status === 'DELETED' ? '' : u.Status === 'ACTIVE'
                           ? `<button class="btn btn-danger btn-sm" onclick='makeUserPassiveDirect(${htmlJsArg(u.UserID)})'>Passive</button>`
                           : `<button class="btn btn-success btn-sm" onclick='activateUserDirect(${htmlJsArg(u.UserID)})'>Activate</button>`}
                         ${String(u.Status || '').toUpperCase() === 'LOCKED'
@@ -5726,14 +5726,14 @@ var qrcodegen;
       return el.textContent;
     }
 
-    async function runDiagnosticsAction(action, elementId, payload) {
+    async function runDiagnosticsAction(action, elementId, payload, workspaceId = state.currentWorkspace) {
       const el = document.getElementById(elementId);
       if (el) {
         el.classList.remove('hidden');
         el.textContent = 'Working...';
       }
       try {
-        const result = await apiCall(action, payload || {});
+        const result = await apiCall(action, payload || {}, workspaceId);
         renderDiagnosticsOutput(elementId, result === undefined ? { ok: true } : result);
       } catch (e) {
         if (el) el.textContent = String((e && e.message) || e);
@@ -5798,6 +5798,7 @@ var qrcodegen;
       const actionType = document.getElementById('bulkEntryAction')?.value || '';
       if (!entryIds.length) return alert('Enter at least one Entry ID.');
       if (entryIds.length > 100) return alert('Bulk actions are limited to 100 entries per request.');
+      if (new Set(entryIds).size !== entryIds.length) return alert('Entry IDs must not contain duplicates.');
 
       let params = {};
       const rawParams = String(document.getElementById('bulkEntryParams')?.value || '').trim();
@@ -5809,11 +5810,27 @@ var qrcodegen;
         }
       }
 
-      if (!confirm('Apply ' + actionType + ' to ' + entryIds.length + ' entry(s)?')) return;
-
-      await runDiagnosticsAction('entries.bulkAction', 'diagnosticsOutputBulk', {
-        entryIds, actionType, params
-      });
+      if (!params || typeof params !== 'object' || Array.isArray(params)) return alert('Parameters must be a JSON object.');
+      const workspaceId = state.currentWorkspace;
+      if (!workspaceId) return alert('Select a workspace first.');
+      try {
+        const entries = await apiCall('entries.list', { filters: { entryIds } }, workspaceId);
+        const versions = Object.create(null);
+        for (const id of entryIds) {
+          const entry = (entries || []).find(item => item.entryId === id);
+          if (!entry || !Number.isSafeInteger(entry.version) || entry.version < 1) {
+            return alert('A selected entry is missing or unavailable. Refresh and try again.');
+          }
+          versions[id] = entry.version;
+        }
+        params.expectedVersions = versions;
+        if (!confirm('Apply ' + actionType + ' to ' + entryIds.length + ' entry(s)?')) return;
+        await runDiagnosticsAction('entries.bulkAction', 'diagnosticsOutputBulk', {
+          entryIds, actionType, params
+        }, workspaceId);
+      } catch (e) {
+        alert(e.message || 'Could not prepare the bulk action. Refresh and try again.');
+      }
     }
 
     /* Fallback subtab handlers */
@@ -6399,7 +6416,7 @@ var qrcodegen;
       note.style.border = '1px solid rgba(245,158,11,0.35)';
       note.style.color = '#FCD34D';
       note.textContent =
-        'MFA stays mandatory and cannot be switched off. The user must sign in with their password ' +
+        'MFA is required unless you explicitly exempted this account. An existing sign-in exemption remains active. Otherwise the user must sign in with their password ' +
         'and enroll a new authenticator before the app opens. All of their active sessions are revoked.';
 
       const field = document.createElement('div');

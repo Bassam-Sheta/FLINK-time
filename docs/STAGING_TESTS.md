@@ -44,7 +44,7 @@ npm run staging -- prepare
 ```
 
 Preparation writes an ignored `.staging/<scriptId>/` directory. It refuses to
-overwrite an existing bundle. Its upload contains precisely the five app files
+overwrite an existing bundle. Its upload contains precisely the three app files
 and a developer-only `RuntimeChecks.gs`; no Node tests, credentials or installer.
 It adds `executionApi.access = MYSELF` **only to the staging manifest**.
 

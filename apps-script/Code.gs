@@ -4033,7 +4033,11 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
     try {
       return fn();
     } finally {
-      try { lock.releaseLock(); } catch (e) {}
+      try {
+        if (typeof SpreadsheetApp !== 'undefined' && SpreadsheetApp.flush) SpreadsheetApp.flush();
+      } finally {
+        try { lock.releaseLock(); } catch (e) {}
+      }
     }
   },
 
@@ -4410,10 +4414,13 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
       });
     }
 
+    // Keep the fresh authentication decision and session/challenge creation in
+    // one critical section: a queued password reset must not mint a session at
+    // its new epoch using a password verified before that reset.
     // Re-read the authentication state atomically. MFA-enabled accounts are
     // not fully authenticated until the second factor succeeds, so failure
     // counters must not be cleared at the password-only stage.
-    this._withLoginStateLock(() => {
+    return this._withLoginStateLock(() => {
       if (MasterRepository._invalidateTable) {
         MasterRepository._invalidateTable(CONSTANTS.MASTER_TABS.CREDENTIALS);
         MasterRepository._invalidateTable(CONSTANTS.MASTER_TABS.ACCOUNTS);
@@ -4424,7 +4431,11 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
         !latestCred ||
         !latestAccount ||
         latestAccount.Status !== CONSTANTS.ACCOUNT_STATUS.ACTIVE ||
-        String(latestCred.PasswordHash) !== String(cred.PasswordHash)
+        String(latestCred.PasswordHash) !== String(cred.PasswordHash) ||
+        Number(latestCred.PasswordVersion || 1) !== Number(cred.PasswordVersion || 1) ||
+        Number(latestAccount.SessionEpoch || 1) !== Number(account.SessionEpoch || 1) ||
+        (latestCred.LockUntil && (!Number.isFinite(new Date(latestCred.LockUntil).getTime()) ||
+          new Date(latestCred.LockUntil).getTime() > Date.now()))
       ) {
         throw invalidAuth();
       }
@@ -4456,9 +4467,7 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
           }
         });
       }
-    });
-
-    if (cred.MfaEnabled === true || cred.MfaEnabled === 'TRUE') {
+    if (cred.MfaEnabled === true || cred.MfaEnabled === 'TRUE' || cred.MfaEnabled === 1) {
       const timestamp = Date.now();
       const sig = SecurityService
         .hashToken(
@@ -4587,6 +4596,7 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
           account.MustChangePassword === 'TRUE'
       }
     };
+    });
   },
 
   /**
@@ -5501,8 +5511,9 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
    * Administrative authenticator replacement.
    *
    * Mandatory MFA is never disabled by this operation. It clears the target's
-   * enrolled authenticator and recovery codes so the next sign-in lands in the
-   * restricted MFA_ENROLLMENT session, where the only permitted actions are
+   * enrolled authenticator and recovery codes so, unless the Super Admin has
+   * explicitly exempted the account, the next sign-in lands in the restricted
+   * MFA_ENROLLMENT session, where the only permitted actions are
    * validateSession / enrollMfa / confirmMfa / logout. The user therefore has to
    * bind a new authenticator before any application data is reachable.
    *
@@ -5545,11 +5556,15 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
         throw new AppError(ERROR_CODES.NOT_FOUND, 'Target credentials record not found.');
       }
 
+      const mfaExempt = MfaPolicyService.isExempt(cleanTargetId);
       const before = {
         mfaEnabled: targetCred.MfaEnabled === true || targetCred.MfaEnabled === 'TRUE',
         authenticatorBound: !!targetCred.TotpSecret,
         pendingEnrollment: !!targetCred.PendingTotpSecret,
-        recoveryCodesActive: !!targetCred.RecoveryJSON
+        recoveryCodesActive: !!targetCred.RecoveryJSON,
+        accountStatus: targetAccount.Status,
+        lockoutActive: !!targetCred.LockUntil,
+        mfaExempt
       };
       const after = {
         mfaEnabled: false,
@@ -5557,6 +5572,9 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
         pendingEnrollment: false,
         recoveryCodesActive: false,
         sessionsRevoked: true,
+        lockoutActive: false,
+        mfaExempt,
+        enrollmentRequired: !mfaExempt,
         reason: String(reason || '').slice(0, 500)
       };
 
@@ -5574,7 +5592,10 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
         TotpSecret: '',
         PendingTotpSecret: '',
         LastSuccessfulTotpStep: '',
-        RecoveryJSON: ''
+        RecoveryJSON: '',
+        FailedLoginCount: 0,
+        LastFailedAt: '',
+        LockUntil: ''
       });
 
       MasterRepository.updateAccount(cleanTargetId, {
@@ -5590,10 +5611,6 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
       SessionService.revokeAllUserSessions(cleanTargetId);
       this._deleteMfaChallenge(cleanTargetId);
 
-      if (typeof SpreadsheetApp !== 'undefined' && SpreadsheetApp.flush) {
-        try { SpreadsheetApp.flush(); } catch (flushErr) {}
-      }
-
       this._requireAdminSecurityAudit(
         superAdminContext,
         CONSTANTS.AUDIT_EVENTS.MFA_RESET_COMPLETED,
@@ -5604,9 +5621,13 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
 
       return {
         ok: true,
+        mfaExempt,
+        enrollmentRequired: !mfaExempt,
         message:
           `Authenticator replaced for ${targetAccount.Username}. ` +
-          'The user must sign in and enroll a new authenticator. MFA remains mandatory.'
+          (mfaExempt
+            ? 'The explicit sign-in MFA exemption remains active. Require MFA from Users to require enrollment.'
+            : 'The user must sign in and enroll a new authenticator. MFA remains mandatory.')
       };
     } finally {
       lock.releaseLock();
@@ -5634,6 +5655,9 @@ var AuthService = (typeof global !== 'undefined' && global.AuthService) || {
         503
       );
     }
+    // The caller must not proceed past intent, or report completion, until the
+    // Sheet writes are durable. Flush uncertainty propagates while still locked.
+    if (typeof SpreadsheetApp !== 'undefined' && SpreadsheetApp.flush) SpreadsheetApp.flush();
   },
 
   /**
@@ -7608,7 +7632,17 @@ var SheetRepository = (typeof global !== 'undefined' && global.SheetRepository) 
   /* ------------------- TIME ENTRIES ------------------- */
 
   listTimeEntries(workspaceId, filters = {}) {
-    const { rows } = this.getTableData(workspaceId, CONSTANTS.WORKSPACE_TABS.TIME_ENTRIES);
+    let rows;
+    if (filters.entryIds !== undefined) {
+      const ids = filters.entryIds;
+      if (!Array.isArray(ids) || ids.length < 1 || ids.length > 100 ||
+          ids.some(id => typeof id !== 'string' || !id.trim()) || new Set(ids).size !== ids.length) {
+        throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'entryIds must contain 1 to 100 unique, nonempty IDs.', 400);
+      }
+      rows = ids.map(id => this.getEntry(workspaceId, id)).filter(Boolean);
+    } else {
+      rows = this.getTableData(workspaceId, CONSTANTS.WORKSPACE_TABS.TIME_ENTRIES).rows;
+    }
     const filterStartMs = (filters.startDate !== undefined && filters.startDate !== null && filters.startDate !== '')
       ? new Date(filters.startDate).getTime()
       : null;
@@ -13484,22 +13518,27 @@ var MfaPolicyService = (typeof global !== 'undefined' && global.MfaPolicyService
     return null;
   },
 
-  _list() {
+  _list(strict = false) {
     const store = this._properties();
-    if (!store) return [];
+    if (!store) {
+      if (strict) throw new AppError(ERROR_CODES.CRYPTO_FAILURE, 'The settings store is unavailable.', 503);
+      return [];
+    }
     let raw = '';
     try {
       raw = store.getProperty(this.PROPERTY_KEY) || '';
     } catch (readErr) {
+      if (strict) throw new AppError(ERROR_CODES.CRYPTO_FAILURE, 'The settings store is unavailable.', 503);
       return [];
     }
     if (!raw) return [];
     try {
       const parsed = JSON.parse(raw);
-      return Array.isArray(parsed)
-        ? parsed.filter(id => typeof id === 'string' && id)
-        : [];
+      if (!Array.isArray(parsed) || parsed.some(id => typeof id !== 'string' || !id) ||
+          parsed.length > this.MAX_EXEMPT || new Set(parsed).size !== parsed.length) throw new Error('Invalid policy');
+      return parsed;
     } catch (parseErr) {
+      if (strict) throw new AppError(ERROR_CODES.CRYPTO_FAILURE, 'The MFA policy requires administrator recovery.', 503);
       return [];
     }
   },
@@ -13518,21 +13557,76 @@ var MfaPolicyService = (typeof global !== 'undefined' && global.MfaPolicyService
 
   isExempt(userId) {
     if (!userId) return false;
-    return this._list().indexOf(String(userId)) !== -1;
+    try {
+      const store = this._properties();
+      // A partially written grant is never usable until its completion is durable.
+      if (!store || store.getProperty(this._pendingKey(userId))) return false;
+      return this._list().indexOf(String(userId)) !== -1;
+    } catch (readErr) { return false; }
   },
 
   listExempt() {
-    return this._list();
+    try {
+      const store = this._properties();
+      return store ? this._list().filter(id => !store.getProperty(this._pendingKey(id))) : [];
+    } catch (readErr) { return []; }
+  },
+
+  _pendingKey(userId) {
+    return this.PROPERTY_KEY + '_PENDING_' + String(userId);
+  },
+
+  _readPending(userId) {
+    const store = this._properties();
+    if (!store) throw new AppError(ERROR_CODES.CRYPTO_FAILURE, 'The settings store is unavailable.', 503);
+    const raw = store.getProperty(this._pendingKey(userId));
+    if (!raw) return null;
+    try {
+      const p = JSON.parse(raw);
+      if (p.version !== 1 || p.userId !== userId || typeof p.actorUserId !== 'string' || !p.actorUserId ||
+          typeof p.before.mfaExempt !== 'boolean' || typeof p.after.mfaExempt !== 'boolean' ||
+          !Number.isInteger(p.before.exemptCount) || p.before.exemptCount < 0 || p.before.exemptCount > this.MAX_EXEMPT ||
+          !Number.isInteger(p.after.exemptCount) || p.after.exemptCount < 0 || p.after.exemptCount > this.MAX_EXEMPT ||
+          typeof p.after.reason !== 'string' || p.after.reason.length > 500) throw new Error('Invalid checkpoint');
+      return {
+        version: 1, userId, actorUserId: p.actorUserId,
+        before: { mfaExempt: p.before.mfaExempt, exemptCount: p.before.exemptCount },
+        after: { mfaExempt: p.after.mfaExempt, exemptCount: p.after.exemptCount, reason: p.after.reason }
+      };
+    } catch (parseErr) {
+      throw new AppError(ERROR_CODES.CRYPTO_FAILURE, 'The MFA policy checkpoint requires administrator recovery.', 503);
+    }
+  },
+
+  _completePending(userId, pending) {
+    const list = this._list(true);
+    const next = list.filter(id => id !== userId);
+    if (pending.after.mfaExempt) {
+      if (next.length >= this.MAX_EXEMPT) throw new AppError(ERROR_CODES.CONFLICT, 'The MFA exemption limit is reached.', 409);
+      next.push(userId);
+    }
+    this._write(next);
+    const event = pending.after.mfaExempt
+      ? CONSTANTS.AUDIT_EVENTS.MFA_EXEMPTION_GRANTED : CONSTANTS.AUDIT_EVENTS.MFA_EXEMPTION_REVOKED;
+    AuthService._requireAdminSecurityAudit(
+      { userId: pending.actorUserId, role: CONSTANTS.ROLES.SUPER_ADMIN },
+      event + '_COMPLETED', userId, pending.before,
+      { ...pending.after, exemptCount: next.length }, 'USER_SECURITY',
+      'Sign-in MFA exemption; enrolled authenticators are still verified'
+    );
+    this._properties().deleteProperty(this._pendingKey(userId));
   },
 
   clearExemption(userId) {
-    const list = this._list();
+    const list = this._list(true);
     const next = list.filter(id => id !== String(userId));
     if (next.length !== list.length) {
       this._write(next);
-      return true;
     }
-    return false;
+    // Account deletion/activation owns its lifecycle audit and supersedes a
+    // pending policy change; it must never be replayed onto that account later.
+    this._properties().deleteProperty(this._pendingKey(userId));
+    return next.length !== list.length;
   },
 
   setExempt(superAdminContext, targetUserId, exempt, reason = '') {
@@ -13541,33 +13635,34 @@ var MfaPolicyService = (typeof global !== 'undefined' && global.MfaPolicyService
       throw new AppError(ERROR_CODES.VALIDATION_ERROR, 'targetUserId is required.', 400);
     }
     const cleanTargetId = targetUserId.trim();
-    const account = MasterRepository.findAccountById(cleanTargetId);
-    if (!account) throw new AppError(ERROR_CODES.NOT_FOUND, 'Target account not found.');
-    if (account.Role === CONSTANTS.ROLES.SUPER_ADMIN) {
-      throw new AppError(
-        ERROR_CODES.PERMISSION_DENIED,
-        'The root Super Admin account must always complete MFA.',
-        403
-      );
-    }
-    if (
-      account.Status === CONSTANTS.ACCOUNT_STATUS.ARCHIVED ||
-      account.Status === CONSTANTS.ACCOUNT_STATUS.DELETED
-    ) {
-      throw new AppError(
-        ERROR_CODES.CONFLICT,
-        'Archived or deleted accounts cannot be exempted from MFA.',
-        409
-      );
-    }
-
     const shouldExempt = exempt === true || exempt === 'true' || exempt === 'TRUE' ||
       exempt === 1 || exempt === '1';
-
     const lock = LockService.getScriptLock();
     lock.waitLock(10000);
     try {
-      const list = this._list();
+      const account = MasterRepository.findAccountById(cleanTargetId);
+      if (!account) throw new AppError(ERROR_CODES.NOT_FOUND, 'Target account not found.');
+      if (account.Role === CONSTANTS.ROLES.SUPER_ADMIN) {
+        throw new AppError(
+          ERROR_CODES.PERMISSION_DENIED,
+          'The root Super Admin account must always complete MFA.',
+          403
+        );
+      }
+      if (
+        account.Status === CONSTANTS.ACCOUNT_STATUS.ARCHIVED ||
+        account.Status === CONSTANTS.ACCOUNT_STATUS.DELETED
+      ) {
+        throw new AppError(
+          ERROR_CODES.CONFLICT,
+          'Archived or deleted accounts cannot be exempted from MFA.',
+          409
+        );
+      }
+
+      const pending = this._readPending(cleanTargetId);
+      if (pending) this._completePending(cleanTargetId, pending);
+      const list = this._list(true);
       const wasExempt = list.indexOf(cleanTargetId) !== -1;
       if (wasExempt === shouldExempt) {
         return {
@@ -13604,42 +13699,15 @@ var MfaPolicyService = (typeof global !== 'undefined' && global.MfaPolicyService
         : CONSTANTS.AUDIT_EVENTS.MFA_EXEMPTION_REVOKED;
 
       // Fail closed: no audit trail means no policy change.
-      const intentOk = MasterRepository.logGlobalAudit({
-        ActorUserID: superAdminContext.userId,
-        ActorRole: superAdminContext.role,
-        WorkspaceID: 'MASTER',
-        EntityType: 'USER_SECURITY',
-        EntityID: cleanTargetId,
-        Action: auditEvent + '_INTENT',
-        BeforeJSON: before,
-        AfterJSON: after,
-        Reason: 'Sign-in MFA exemption; enrolled authenticators are still verified'
-      });
-      if (!intentOk) {
-        throw new AppError(
-          ERROR_CODES.CRYPTO_FAILURE,
-          'Security audit is unavailable. Please retry.',
-          503
-        );
-      }
-
-      this._write(next);
-
-      if (typeof SpreadsheetApp !== 'undefined' && SpreadsheetApp.flush) {
-        try { SpreadsheetApp.flush(); } catch (flushErr) {}
-      }
-
-      MasterRepository.logGlobalAudit({
-        ActorUserID: superAdminContext.userId,
-        ActorRole: superAdminContext.role,
-        WorkspaceID: 'MASTER',
-        EntityType: 'USER_SECURITY',
-        EntityID: cleanTargetId,
-        Action: auditEvent + '_COMPLETED',
-        BeforeJSON: before,
-        AfterJSON: after,
-        Reason: 'Sign-in MFA exemption; enrolled authenticators are still verified'
-      });
+      AuthService._requireAdminSecurityAudit(
+        superAdminContext, auditEvent + '_INTENT', cleanTargetId, before, after,
+        'USER_SECURITY', 'Sign-in MFA exemption; enrolled authenticators are still verified'
+      );
+      const checkpoint = {
+        version: 1, userId: cleanTargetId, actorUserId: superAdminContext.userId, before, after
+      };
+      this._properties().setProperty(this._pendingKey(cleanTargetId), JSON.stringify(checkpoint));
+      this._completePending(cleanTargetId, checkpoint);
 
       return {
         ok: true,
@@ -13990,6 +14058,9 @@ var UserService = (typeof global !== 'undefined' && global.UserService) || {
     try {
       const account = MasterRepository.findAccountById(targetUserId);
       if (!account) throw new AppError(ERROR_CODES.NOT_FOUND, `User ${targetUserId} not found.`);
+      if (account.Status === CONSTANTS.ACCOUNT_STATUS.DELETED) {
+        throw new AppError(ERROR_CODES.CONFLICT, 'Deleted accounts cannot be deactivated or reactivated.', 409);
+      }
       if (account.Role === CONSTANTS.ROLES.SUPER_ADMIN) {
         throw new AppError(
           ERROR_CODES.PERMISSION_DENIED,
@@ -14171,10 +14242,6 @@ var UserService = (typeof global !== 'undefined' && global.UserService) || {
           403
         );
       }
-      if (account.Status === CONSTANTS.ACCOUNT_STATUS.DELETED) {
-        throw new AppError(ERROR_CODES.CONFLICT, 'This account is already deleted.', 409);
-      }
-
       const cred = MasterRepository.getCredentials(cleanTargetId);
       const before = {
         status: account.Status,
@@ -14205,11 +14272,15 @@ var UserService = (typeof global !== 'undefined' && global.UserService) || {
         'Account deletion; time entries and audit history are preserved'
       );
 
-      const result = this._deactivateUserLocked(superAdminContext, account, reason, {
-        targetStatus: CONSTANTS.ACCOUNT_STATUS.DELETED
-      });
+      // The retained DELETED row is a durable cleanup checkpoint. A retry after
+      // credential/audit failure resumes cleanup without touching timers again.
+      const result = account.Status === CONSTANTS.ACCOUNT_STATUS.DELETED
+        ? { finalizedTimers: [] }
+        : this._deactivateUserLocked(superAdminContext, account, reason, {
+          targetStatus: CONSTANTS.ACCOUNT_STATUS.DELETED
+        });
 
-      // A deleted account must not retain any sign-in secret.
+      // Clear authenticator/recovery material; DELETED blocks password sign-in.
       MasterRepository.updateCredentials(cleanTargetId, {
         MfaEnabled: false,
         TotpSecret: '',
@@ -14255,6 +14326,9 @@ var UserService = (typeof global !== 'undefined' && global.UserService) || {
       const account = MasterRepository.findAccountById(targetUserId);
       if (!account) throw new AppError(ERROR_CODES.NOT_FOUND, `User ${targetUserId} not found.`);
 
+      if (account.Status === CONSTANTS.ACCOUNT_STATUS.DELETED) {
+        throw new AppError(ERROR_CODES.CONFLICT, 'Deleted accounts cannot be reactivated.', 409);
+      }
       MasterRepository.updateAccount(targetUserId, {
         Status: CONSTANTS.ACCOUNT_STATUS.ACTIVE,
         UpdatedAt: new Date().toISOString(),

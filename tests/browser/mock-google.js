@@ -286,7 +286,19 @@
       }
 
       case 'entries.list':
-        return state.entries.map(entry => ({ ...entry }));
+        return state.entries
+          .filter(entry => !payload.filters?.entryIds || payload.filters.entryIds.includes(entry.entryId))
+          .map(entry => ({ ...entry }));
+
+      case 'entries.bulkAction': {
+        const entries = payload.entryIds.map(id => state.entries.find(entry => entry.entryId === id));
+        if (entries.some(entry => !entry || payload.params?.expectedVersions?.[entry.entryId] !== entry.version)) {
+          throw new Error('Missing or stale expected entry version.');
+        }
+        if (payload.actionType !== 'LOCK') throw new Error('Unsupported synthetic bulk action.');
+        entries.forEach(entry => { entry.locked = true; entry.version++; });
+        return entries.length;
+      }
 
       case 'entries.update': {
         const entry = state.entries.find(item => item.entryId === payload.entryId);
@@ -373,6 +385,10 @@
             Status: 'LOCKED',
             PrimaryWorkspaceID: 'W1',
             MfaExempt: false
+          },
+          {
+            UserID: 'U-DELETED', Username: 'deleted.user', DisplayName: 'Deleted User',
+            Role: 'USER', Status: 'DELETED', PrimaryWorkspaceID: 'W1', MfaExempt: false
           }
         ];
 

@@ -225,3 +225,163 @@ test('the global MFA policy stays mandatory and read-only', () => {
   assert.equal(fx.context.Flags.isOn('MFA_REQUIRED'), true);
   assert.throws(() => fx.context.Validation.validateGlobalSettingsPatch({ MFA_REQUIRED: false }));
 });
+
+test('a password reset queued behind login cannot produce a usable new-generation session from the old password', () => {
+  const fx = mfaFixture();
+  exempt(fx, ['U1']);
+  const lock = fx.context.LockService.getScriptLock();
+  const release = lock.releaseLock;
+  let reset = false;
+  lock.releaseLock = () => {
+    release();
+    if (!reset) {
+      reset = true;
+      fx.cred.PasswordHash = 'SYNTHETIC-REPLACEMENT';
+      fx.cred.PasswordVersion++;
+      fx.account.SessionEpoch++;
+    }
+  };
+  const result = fx.login();
+  assert.equal(reset, true);
+  fx.context.SessionService.beginRequest();
+  assert.throws(() => fx.context.SessionService.validateSession(result.sessionToken), error => error.code === 'AUTH_REQUIRED');
+});
+
+test('login rejects changed credential generation or timed lockout at lock acquisition', () => {
+  for (const change of [fx => { fx.cred.PasswordVersion++; }, fx => { fx.account.SessionEpoch++; },
+    fx => { fx.cred.LockUntil = new Date(fx.clock.now + 60000).toISOString(); }]) {
+    const fx = mfaFixture();
+    exempt(fx, ['U1']);
+    fx.controls.onLock = () => change(fx);
+    assert.throws(() => fx.login(), error => error.code === 'AUTH_REQUIRED');
+    assert.equal(fx.sessions.length, 0);
+  }
+});
+
+test('session creation and success-side writes remain inside the validated login lock', () => {
+  const fx = mfaFixture();
+  exempt(fx, ['U1']);
+  const create = fx.context.SessionService.createSession;
+  fx.context.SessionService.createSession = function(...args) {
+    assert.equal(fx.controls.locked, true);
+    return create.apply(this, args);
+  };
+  fx.login();
+  assert.equal(fx.controls.locked, false);
+});
+
+test('failed exemption completion stays fail-closed and retry preserves the original audit state', () => {
+  const fx = mfaFixture();
+  const audit = fx.context.MasterRepository.logGlobalAudit;
+  fx.context.MasterRepository.logGlobalAudit = data => data.Action.endsWith('_COMPLETED') ? false : audit(data);
+  assert.throws(() => fx.context.MfaPolicyService.setExempt(SUPER_ADMIN, 'U1', true, 'Lost phone'), error => error.code === 'CRYPTO_FAILURE');
+  assert.equal(fx.context.MfaPolicyService.isExempt('U1'), false);
+  assert.deepEqual(Array.from(fx.context.MfaPolicyService.listExempt()), []);
+  assert.equal(fx.login().enrollmentRequired, true);
+  fx.context.MasterRepository.logGlobalAudit = audit;
+  const result = fx.context.MfaPolicyService.setExempt(SUPER_ADMIN, 'U1', true, 'Retry');
+  assert.equal(result.mfaExempt, true);
+  assert.equal(fx.context.MfaPolicyService.isExempt('U1'), true);
+  assert.equal(fx.audits.filter(item => item.Action.endsWith('_INTENT')).length, 1);
+  assert.equal(fx.audits.at(-1).BeforeJSON.mfaExempt, false);
+  assert.equal(fx.audits.at(-1).AfterJSON.reason, 'Lost phone');
+});
+
+test('a failed exemption write is recoverable without claiming completion', () => {
+  const fx = mfaFixture();
+  const write = fx.context.MfaPolicyService._write;
+  fx.context.MfaPolicyService._write = () => { throw new Error('Synthetic property interruption'); };
+  assert.throws(() => fx.context.MfaPolicyService.setExempt(SUPER_ADMIN, 'U1', true, 'Lost phone'), /Synthetic property interruption/);
+  fx.context.MfaPolicyService._write = write;
+  fx.context.MfaPolicyService.setExempt(SUPER_ADMIN, 'U1', true, 'Retry');
+  assert.equal(fx.context.MfaPolicyService.isExempt('U1'), true);
+  assert.deepEqual(auditActions(fx), ['MFA_EXEMPTION_GRANTED_INTENT', 'MFA_EXEMPTION_GRANTED_COMPLETED']);
+});
+
+test('exemption intent must flush before policy changes', () => {
+  const fx = mfaFixture();
+  fx.context.SpreadsheetApp.flush = () => { throw new Error('Synthetic flush uncertainty'); };
+  assert.throws(() => fx.context.MfaPolicyService.setExempt(SUPER_ADMIN, 'U1', true), /Synthetic flush uncertainty/);
+  assert.equal(fx.properties.get(EXEMPT_KEY), undefined);
+});
+
+test('exemption target is re-read after lock wait before granting', () => {
+  const fx = mfaFixture();
+  fx.controls.onLock = () => { fx.account.Status = 'DELETED'; };
+  assert.throws(() => fx.context.MfaPolicyService.setExempt(SUPER_ADMIN, 'U1', true), error => error.code === 'CONFLICT');
+  assert.equal(fx.properties.get(EXEMPT_KEY), undefined);
+});
+
+test('login flushes session writes while locked and releases the lock on flush failure', () => {
+  const fx = mfaFixture();
+  exempt(fx, ['U1']);
+  let flushes = 0;
+  fx.context.SpreadsheetApp.flush = () => {
+    flushes++;
+    assert.equal(fx.controls.locked, true);
+    throw new Error('Synthetic session flush uncertainty');
+  };
+  assert.throws(() => fx.login(), /Synthetic session flush uncertainty/);
+  assert.equal(flushes, 1);
+  assert.equal(fx.controls.locked, false);
+});
+
+test('numeric enrolled-MFA state never becomes a password-only exemption', () => {
+  const fx = mfaFixture();
+  exempt(fx, ['U1']);
+  fx.cred.MfaEnabled = 1;
+  fx.cred.TotpSecret = 'SYNTHETIC-SECRET';
+  assert.equal(fx.login().mfaRequired, true);
+  assert.equal(fx.sessions.length, 0);
+});
+
+test('failed completion flush keeps a grant blocked until durable recovery', () => {
+  const fx = mfaFixture();
+  let flushes = 0;
+  fx.context.SpreadsheetApp.flush = () => {
+    if (++flushes === 2) throw new Error('Synthetic completion flush uncertainty');
+  };
+  assert.throws(() => fx.context.MfaPolicyService.setExempt(SUPER_ADMIN, 'U1', true, 'Original reason'), /Synthetic completion flush uncertainty/);
+  assert.equal(fx.context.MfaPolicyService.isExempt('U1'), false);
+  fx.context.MfaPolicyService.setExempt({ userId: 'SA2', role: 'SUPER_ADMIN' }, 'U1', true, 'Retry');
+  assert.equal(fx.context.MfaPolicyService.isExempt('U1'), true);
+  assert.equal(fx.audits.at(-1).ActorUserID, 'SA1', 'recovery retains the initiating actor');
+  assert.equal(fx.audits.at(-1).AfterJSON.reason, 'Original reason');
+});
+
+test('revocation recovery finishes the pending operation rather than returning unchanged', () => {
+  const fx = mfaFixture();
+  exempt(fx, ['U1']);
+  const audit = fx.context.MasterRepository.logGlobalAudit;
+  fx.context.MasterRepository.logGlobalAudit = data => data.Action.endsWith('_COMPLETED') ? false : audit(data);
+  assert.throws(() => fx.context.MfaPolicyService.setExempt(SUPER_ADMIN, 'U1', false, 'Device replaced'));
+  assert.equal(fx.context.MfaPolicyService.isExempt('U1'), false);
+  fx.context.MasterRepository.logGlobalAudit = audit;
+  fx.context.MfaPolicyService.setExempt(SUPER_ADMIN, 'U1', false, 'Retry');
+  assert.deepEqual(auditActions(fx), ['MFA_EXEMPTION_REVOKED_INTENT', 'MFA_EXEMPTION_REVOKED_COMPLETED']);
+  assert.equal(fx.audits.at(-1).BeforeJSON.mfaExempt, true);
+});
+
+test('deletion cancels a pending exemption grant permanently', () => {
+  const fx = mfaFixture();
+  const audit = fx.context.MasterRepository.logGlobalAudit;
+  fx.context.MasterRepository.logGlobalAudit = data => data.Action.endsWith('_COMPLETED') ? false : audit(data);
+  assert.throws(() => fx.context.MfaPolicyService.setExempt(SUPER_ADMIN, 'U1', true));
+  fx.context.MasterRepository.logGlobalAudit = audit;
+  fx.context.UserService.deleteUser(SUPER_ADMIN, 'U1');
+  assert.equal(fx.context.MfaPolicyService.isExempt('U1'), false);
+  assert.deepEqual(JSON.parse(fx.properties.get(EXEMPT_KEY)), []);
+  assert.equal(fx.properties.has('FLINK_MFA_EXEMPT_USERS_PENDING_U1'), false);
+});
+
+test('corrupt policy/checkpoint data fails closed without overwriting other exemptions', () => {
+  for (const key of [EXEMPT_KEY, 'FLINK_MFA_EXEMPT_USERS_PENDING_U1']) {
+    const fx = mfaFixture();
+    exempt(fx, ['U1', 'U2']);
+    fx.properties.set(key, '{corrupt');
+    const original = fx.properties.get(EXEMPT_KEY);
+    assert.equal(fx.context.MfaPolicyService.isExempt('U1'), false);
+    assert.throws(() => fx.context.MfaPolicyService.setExempt(SUPER_ADMIN, 'U1', true), error => error.code === 'CRYPTO_FAILURE');
+    assert.equal(fx.properties.get(EXEMPT_KEY), original);
+  }
+});
