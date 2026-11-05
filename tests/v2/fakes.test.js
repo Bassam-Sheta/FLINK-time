@@ -330,3 +330,15 @@ test('fakes can be shared with a test and each loadApp gets isolated state by de
   runInApp(one, 'PropertiesService.getScriptProperties().setProperty("X", "1")');
   assert.equal(runInApp(two, 'PropertiesService.getScriptProperties().getProperty("X")'), null);
 });
+
+test('fetch routes: the first match answers, and { first: true } goes in front', () => {
+  const ctx = loadApp();
+  const fetch = ctx.__fakes.fetch;
+  fetch.route('https://db.test/', () => ({ body: 'base' }));
+  const body = () => runInApp(ctx, 'UrlFetchApp.fetch("https://db.test/x", { muteHttpExceptions: true }).getContentText()');
+  assert.equal(body(), 'base');
+  fetch.route('https://db.test/', () => ({ body: 'wrapper' }));
+  assert.equal(body(), 'base', 'a later route does not override an earlier one');
+  fetch.route('https://db.test/', () => ({ body: 'front' }), { first: true });
+  assert.equal(body(), 'front');
+});

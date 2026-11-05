@@ -321,8 +321,11 @@ function createFetch(clock) {
   const control = {
     calls,
     // handler(request) -> { status?, body?, headers? }; match is a string prefix or a function(url) -> boolean.
-    route(match, handler) {
-      routes.push({ match: typeof match === 'function' ? match : url => String(url).startsWith(match), handler });
+    // The first matching route answers; { first: true } puts this one in front of the routes already added,
+    // which is how a test wraps the fake Turso route (drop a response, fail the Nth call).
+    route(match, handler, options = {}) {
+      const entry = { match: typeof match === 'function' ? match : url => String(url).startsWith(match), handler };
+      if (options.first) routes.unshift(entry); else routes.push(entry);
     },
     failNext() { queue.push({ fail: true }); },
     stallNext(ms) { queue.push({ stallMs: ms }); },

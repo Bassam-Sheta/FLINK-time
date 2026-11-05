@@ -480,3 +480,20 @@ test('attached to the fakes, app code reaches it with fetch: tokens, paths and J
   assert.equal(JSON.parse(roWrite.body).results[0].type, 'error');
   assert.equal(count(turso, 't'), 1, 'the read-only call wrote nothing');
 });
+
+// ---------------------------------------------------------------- foreign keys
+
+test('foreign keys are NOT enforced by default (code must not depend on them), but can be switched on', () => {
+  const schema = 'CREATE TABLE parent (id TEXT PRIMARY KEY); CREATE TABLE child (id TEXT PRIMARY KEY, parent_id TEXT REFERENCES parent(id))';
+  const orphan = exec("INSERT INTO child VALUES ('c1', 'nobody')");
+
+  const loose = newTurso(schema);
+  assert.equal(loose.run([orphan]).results[0].type, 'ok', 'orphan rows are accepted, so assert steps must do the checking');
+  assert.equal(count(loose, 'child'), 1);
+
+  const strict = createFakeTurso({ foreignKeys: true });
+  strict.db.exec(schema);
+  const refused = strict.run([orphan]).results[0];
+  assert.equal(refused.type, 'error');
+  assert.match(refused.error.message, /FOREIGN KEY constraint failed/);
+});

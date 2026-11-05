@@ -135,7 +135,10 @@ function hasSecondStatement(sql) {
 
 function createFakeTurso(options = {}) {
   const origin = options.origin || DEFAULT_ORIGIN;
-  const db = new DatabaseSync(':memory:');
+  // node:sqlite enforces foreign keys unless told not to. Whether Turso does is Phase 0 test 5, and the spec says code
+  // must not depend on it (existence is checked by assert steps). So the default is OFF, which makes the asserts do
+  // the work in tests; pass { foreignKeys: true } to see the other behaviour.
+  const db = new DatabaseSync(':memory:', { enableForeignKeyConstraints: options.foreignKeys === true });
 
   function executeStatement(spec, role) {
     if (spec === null || typeof spec !== 'object' || typeof spec.sql !== 'string') {
@@ -314,6 +317,8 @@ function createFakeTurso(options = {}) {
     origin,
     tokens: TOKENS,
     handleBody,
+    // The UrlFetchApp route itself, for tests that wrap it (drop the response, delay it, fail the Nth call).
+    handleHttp,
     // Direct call for tests; throws if the HTTP layer refused it.
     run(requests, token = TOKENS.rw) {
       const { status, json } = handleBody(token, { requests });
