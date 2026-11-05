@@ -33,6 +33,24 @@ jobs:
       - name: Run regression tests with locked dependencies
         run: npm test
 
+  v2-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Use Node.js 24
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: '24'
+
+      - name: Install locked developer dependencies without lifecycle scripts
+        run: npm ci --ignore-scripts
+
+      - name: Run v2 tests
+        run: npm run test:v2
+
   human-browser-acceptance:
     runs-on: ubuntu-latest
     timeout-minutes: 15
