@@ -497,3 +497,24 @@ test('foreign keys are NOT enforced by default (code must not depend on them), b
   assert.equal(refused.type, 'error');
   assert.match(refused.error.message, /FOREIGN KEY constraint failed/);
 });
+
+// ---------------------------------------------------------------- injected failures
+
+test('injectError fails the next matching statements only, with the given message, and runs nothing', () => {
+  const turso = newTurso('CREATE TABLE t (v INTEGER)');
+  turso.injectError({ match: 'BEGIN IMMEDIATE', message: 'database is locked' });
+  turso.injectError({ match: /INSERT INTO t/, message: 'SQLITE_BUSY: busy', times: 2 });
+
+  const { step_errors: errors } = turso.run([batch([
+    { stmt: stmt('BEGIN IMMEDIATE') },
+    { stmt: stmt('INSERT INTO t VALUES (1)') },
+    { stmt: stmt('INSERT INTO t VALUES (2)') },
+    { stmt: stmt('INSERT INTO t VALUES (3)') },
+  ])]).results[0].response.result;
+  assert.deepEqual(errors.map(e => e && e.message), ['database is locked', 'SQLITE_BUSY: busy', 'SQLITE_BUSY: busy', null]);
+  assert.deepEqual(turso.db.prepare('SELECT v FROM t').all().map(r => Number(r.v)), [3], 'only the third insert ran');
+
+  // used up: the same statements run normally now
+  const [again] = turso.run([exec('BEGIN IMMEDIATE'), exec('ROLLBACK')]).results;
+  assert.equal(again.type, 'ok');
+});

@@ -223,22 +223,9 @@ test('a schema_migrations table that exists but cannot be read is an error, neve
 
 // ---------------------------------------------------------------- unknown outcomes
 
-// Wraps the fake Turso route so the Nth call is answered with a 503, either before or after it really ran.
-function breakNthCall(env, n, { executeFirst }) {
-  const seen = { count: 0 };
-  env.fakes.fetch.route(env.origin + '/', request => {
-    seen.count += 1;
-    if (seen.count === n) {
-      if (executeFirst) env.turso.handleHttp(request);
-      return { status: 503, body: 'upstream unavailable' };
-    }
-    return env.turso.handleHttp(request);
-  }, { first: true });
-}
-
 test('a 503 before the migration ran: the error says the outcome is unknown, and a rerun applies it', () => {
   const env = createEnv();
-  breakNthCall(env, 2, { executeFirst: false });
+  env.breakNthCall(2, { executeFirst: false });
   assert.throws(() => migrate(env), /HTTP 503.*unknown.*run .*again/s);
   assert.deepEqual(rows(env, "SELECT name FROM sqlite_master WHERE type = 'table'"), []);
   assert.deepEqual(migrate(env), { applied: [1], current: 1 });
@@ -246,7 +233,7 @@ test('a 503 before the migration ran: the error says the outcome is unknown, and
 
 test('a 503 AFTER the migration ran (response lost): the rerun sees it applied and does nothing', () => {
   const env = createEnv();
-  breakNthCall(env, 2, { executeFirst: true });
+  env.breakNthCall(2, { executeFirst: true });
   assert.throws(() => migrate(env), /HTTP 503/);
   assert.equal(rows(env, 'SELECT version FROM schema_migrations').length, 1, 'it did commit');
   assert.deepEqual(migrate(env), { applied: [], current: 1 });

@@ -139,6 +139,7 @@ function createFakeTurso(options = {}) {
   // must not depend on it (existence is checked by assert steps). So the default is OFF, which makes the asserts do
   // the work in tests; pass { foreignKeys: true } to see the other behaviour.
   const db = new DatabaseSync(':memory:', { enableForeignKeyConstraints: options.foreignKeys === true });
+  const injected = [];
 
   function executeStatement(spec, role) {
     if (spec === null || typeof spec !== 'object' || typeof spec.sql !== 'string') {
@@ -157,6 +158,12 @@ function createFakeTurso(options = {}) {
     const keyword = firstKeyword(spec.sql);
     if (role === 'ro' && keyword !== 'SELECT' && keyword !== 'WITH') {
       throw new StepError('attempt to write a readonly database');
+    }
+    // Test-controlled failures (injectError): the statement fails before it runs, with the given message.
+    const rule = injected.find(candidate => candidate.times > 0 && candidate.matches(spec.sql));
+    if (rule) {
+      rule.times -= 1;
+      throw new StepError(rule.message);
     }
 
     try {
@@ -324,6 +331,12 @@ function createFakeTurso(options = {}) {
       const { status, json } = handleBody(token, { requests });
       if (status !== 200) throw new Error(`fake-turso refused the call: ${status} ${JSON.stringify(json)}`);
       return json;
+    },
+    // Makes the next `times` statements whose SQL matches (a RegExp, or a substring) fail with `message` instead of
+    // running, e.g. injectError({ match: 'BEGIN IMMEDIATE', message: 'database is locked' }) to produce BUSY.
+    injectError({ match, message, times = 1 }) {
+      const matches = match instanceof RegExp ? sql => match.test(sql) : sql => sql.includes(match);
+      injected.push({ matches, message, times });
     },
     // Makes UrlFetchApp.fetch(origin + '/v2/pipeline') reach this database.
     attach(fakes) {

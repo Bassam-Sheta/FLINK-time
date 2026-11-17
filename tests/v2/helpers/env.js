@@ -25,7 +25,22 @@ function createEnv(options = {}) {
   fakes.properties.set('TURSO_RW_TOKEN', TOKENS.rw);
   fakes.properties.set('TURSO_RO_TOKEN', TOKENS.ro);
   const ctx = loadApp({ fakes });
-  return { ctx, fakes, turso, origin, run: code => runInApp(ctx, code) };
+
+  // Answers the Nth call to Turso (counting from now) with a 503. With executeFirst the database really ran the
+  // call first, so the work is done but the caller never learns it: the "unknown outcome" case.
+  function breakNthCall(n, { executeFirst }) {
+    const seen = { count: 0 };
+    fakes.fetch.route(origin + '/', request => {
+      seen.count += 1;
+      if (seen.count === n) {
+        if (executeFirst) turso.handleHttp(request);
+        return { status: 503, body: 'upstream unavailable' };
+      }
+      return turso.handleHttp(request);
+    }, { first: true });
+  }
+
+  return { ctx, fakes, turso, origin, run: code => runInApp(ctx, code), breakNthCall };
 }
 
 module.exports = { createEnv };

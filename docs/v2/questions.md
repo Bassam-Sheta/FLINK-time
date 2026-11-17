@@ -10,9 +10,23 @@ Proposed fix, for the owner to approve: the owner functions compare `Session.get
 
 **Blocks T1.11 only.** Until then there is no public `runMigrations`, `installTriggers` or other owner function (a test pins this for `runMigrations`). **Open.**
 
+## 2026-11-17 · T1.4 · Noted, no answer needed: choices where the spec is silent
+
+`Db.gs` follows section 5.3 branch for branch. These points are not in the spec, so the implementer chose and recorded them here; say if any should change.
+
+- **A request-level error from Turso** (well-formed response whose first result is `{type:"error"}`) maps to `DB_UNAVAILABLE` (retryable), or `BUSY` if the message says the database is locked. Rationale: the outcome is not known, and the page retries with the same request id, which is safe. Phase 0 test 4 should record what real Turso sends.
+- **A locked-database message beats `onError`.** If an `exec` step has `onError: CONFLICT` and the database says `SQLITE_BUSY`, the caller gets `BUSY`, not a false conflict.
+- **Rate limit source.** `Db.tx_` reads `ctx.rateLimit` (default 60). T1.7 and T1.8 must pass the `RATE_LIMIT_WRITES_PER_MIN` setting there.
+- **Usage counter.** Key `usage:{UTC yyyy-mm-dd}`, value `{"read":n,"written":n,"calls":n}`. CacheService keeps a value at most 6 hours, so the counter restarts after 6 idle hours; the hourly health job must copy it into `job_runs` before then, and the numbers are approximate by design. The spec does not say which time zone the "day" uses; UTC was chosen.
+- **`INTERNAL` messages are generic** ("The database rejected a statement."); the SQL error text goes in `details.error` for the log, never in the message.
+- **New spec-adjacent code in `Config.gs`:** `ERROR_CODES_` and `AppError_` (spec section 3 and 4.3), checked against the spec's own table by a test. T1.7 adds the settings catalog on top.
+
 ## 2026-11-05 · T1.3 · Noted, no answer needed: the migration runner carries its own sender and hasher
 
-The runner cannot use `Db.tx_` (it writes to `request_log`, a table migration 001 creates), and `Db.gs` (T1.4) and `Util.gs` (T1.5) do not exist yet. `Migrations.gs` therefore has small private helpers `send_`, `arg_` and `sha256Hex_`. When T1.4 and T1.5 land, they should replace those with `Db` and `Util` calls, and their "Done when" should include that. The owner wrapper `runMigrations()` is left to T1.11 for the reason in the entry above.
+The runner cannot use `Db.tx_` (it writes to `request_log`, a table migration 001 creates), and `Util.gs` (T1.5) does not exist yet. `Migrations.gs` therefore has small private helpers `send_`, `arg_` and `sha256Hex_`.
+
+- **Update 2026-11-17:** `Db.gs` now exists, but `Migrations.send_` stays on purpose for now. It talks to the owner in the editor ("run again to resume", "check TURSO_RW_TOKEN"), while `Db` reports app-facing `AppError_` codes, and the migration tests pin the owner wording. Revisit when T1.11 wraps `runMigrations()`; the wrapper can translate `Db` errors. T1.5 should still replace `sha256Hex_` with `Util`.
+- The owner wrapper `runMigrations()` is left to T1.11 for the reason in the owner-check entry above.
 
 ## 2026-11-05 · T0.1 / T0.2 · Phase 0 has not been run — is building ahead of the gate accepted?
 
