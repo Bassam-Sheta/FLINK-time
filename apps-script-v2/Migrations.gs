@@ -7,9 +7,9 @@
  *
  * Top-level code only defines things (BUILD_SPEC section 2.1).
  *
- * The runner has to talk to Turso and hash text before Db.gs (T1.4) and Util.gs (T1.5) exist, and it cannot use
- * Db.tx_ at all, which writes to request_log, a table migration 001 creates. Until those tickets land it carries its own
- * small sender and hasher (send_, sha256Hex_, arg_); T1.4 and T1.5 should replace them with Db and Util calls.
+ * The runner cannot use Db.tx_, which writes to request_log, a table migration 001 creates, and it talks to the owner in
+ * the editor rather than returning app error codes. So it keeps its own small sender (send_, arg_). Hashing uses
+ * Util.sha256Hex_.
  *
  * There is deliberately no public runMigrations() yet. Every top-level function without a trailing underscore can be
  * called from the browser through google.script.run, so the owner-only wrapper arrives together with its owner check
@@ -284,19 +284,9 @@ var MIGRATIONS_ = [
 
 var Migrations = {
 
-  /** SHA-256 of a string as lower-case hex. Apps Script's computeDigest returns SIGNED bytes (-128..127). */
-  sha256Hex_: function (text) {
-    var bytes = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, text);
-    var hex = '';
-    for (var i = 0; i < bytes.length; i++) {
-      hex += ((bytes[i] & 0xff) + 0x100).toString(16).slice(1);
-    }
-    return hex;
-  },
-
   /** The checksum stored with an applied migration: sha256hex(statements.join('\n;\n')). */
   checksum_: function (statements) {
-    return Migrations.sha256Hex_(statements.join('\n;\n'));
+    return Util.sha256Hex_(statements.join('\n;\n'));
   },
 
   /** Throws unless the list is a usable migration list (versions 1..n, names, statements without semicolons). */

@@ -9,6 +9,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { createEnv } = require('./helpers/env');
+const { expectCode } = require('./helpers/asserts');
 
 let sequence = 0;
 
@@ -44,17 +45,6 @@ const sent = env => env.fakes.fetch.calls.map(call => JSON.parse(call.payload));
 const stepsOf = (env, call = 0) => sent(env)[call].requests[0].batch.steps;
 const text = value => ({ type: 'text', value });
 const integer = value => ({ type: 'integer', value: String(value) });
-
-function thrown(fn) {
-  try { fn(); } catch (err) { return err; }
-  return null;
-}
-function expectCode(fn, code) {
-  const err = thrown(fn);
-  assert.ok(err, `expected ${code} but nothing was thrown`);
-  assert.equal(err.code, code, `expected ${code}, got ${err.code}: ${err.message} ${JSON.stringify(err.details)}`);
-  return err;
-}
 
 // An insert into notes in one transaction; the typical write.
 function addNote(env, ctx, id, body = 'hi') {

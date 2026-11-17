@@ -10,6 +10,33 @@ Proposed fix, for the owner to approve: the owner functions compare `Session.get
 
 **Blocks T1.11 only.** Until then there is no public `runMigrations`, `installTriggers` or other owner function (a test pins this for `runMigrations`). **Open.**
 
+## 2026-11-17 · T1.5 · Please run a 30-second check in the Apps Script editor (time zones)
+
+`Util.gs` computes every `local_date` with `Utilities.formatDate`. The tests use the fake, whose time zone data is Node's (which has Egypt's 2023 DST rules). Two things about **real** Apps Script are not recorded in `phase0-results.md`, and the spec says not to assume them. Run this once in any Apps Script project and paste the output here or into `phase0-results.md` (it fits Phase 0 test 7's session):
+
+```js
+function checkTimeZones() {
+  const f = (iso, tz) => Utilities.formatDate(new Date(iso), tz, "yyyy-MM-dd HH:mm:ss Z");
+  ['2026-04-23T21:59:59Z', '2026-04-23T22:00:00Z', '2026-10-29T20:59:59Z', '2026-10-29T21:00:00Z', '2026-10-29T22:00:00Z']
+    .forEach(iso => console.log(iso, f(iso, 'Africa/Cairo')));
+  ['Mars/Base', 'africa/cairo'].forEach(tz => {
+    try { console.log(tz, '->', f('2026-07-01T12:00:00Z', tz)); } catch (e) { console.log(tz, 'throws:', e.message); }
+  });
+}
+```
+
+Expected if Apps Script knows Egypt's rules: `2026-04-23 23:59:59 +0200`, `2026-04-24 01:00:00 +0300`, `2026-10-29 23:59:59 +0300`, `2026-10-29 23:00:00 +0200`, `2026-10-30 00:00:00 +0200`. For the other two zone ids it either throws or quietly formats as GMT; both are fine, because `Util.isValidTimeZone_` cross-checks `formatDate` against `Intl` and rejects an id the two disagree about. If the Cairo lines differ, the DST handling of `local_date` is wrong on the real platform and needs a decision before T2.4. **Open.**
+
+## 2026-11-17 · T1.5 · Noted, no answer needed: choices where the spec is silent
+
+- **`Util.clampClientTime_(clientAt, now, skewSeconds)`** takes the skew as an optional third argument (default 120) because the spec lists two. T1.7 and T1.8 must pass `TIMER_CLIENT_SKEW_SECONDS`. A `clientAt` that is not an integer time is not trusted at all (the server time is used).
+- **`Util.hmacSha256Hex_(key, message)`** uses the spec's order, `HMAC_SHA256(key, message)`; Apps Script's own function takes `(value, key)`. Both strings are used as the UTF-8 text they are, so the 64-hex-digit audit key is not decoded.
+- **Hashing never relies on a platform charset.** `Util.sha256Hex_` and `hmacSha256Hex_` turn strings into UTF-8 bytes themselves; a lone surrogate becomes U+FFFD (as in Node), so odd text in a description cannot make a request fail.
+- **The report cache key** is `rep:{wsId}:{wsGen}.{repGen}:{digest}`. Section 5.4 says a report is invalidated by both `gen:ws:{wsId}` and `gen:rep:{wsId}` but shows one `{gen}`; the two numbers are joined so that bumping either changes the key.
+- **A cache key over 250 characters is silently not cached** (CacheService would throw). Only an email of about 235 characters or more could reach that, and such a user would just be served uncached.
+- **Date helpers** accept years 0001 to 9999; narrower ranges, if wanted, belong in `Validate.gs` (T1.6).
+- `Migrations.gs` now hashes with `Util.sha256Hex_` (the T1.3 note asked for this); it keeps its own sender.
+
 ## 2026-11-17 · T1.4 · Noted, no answer needed: choices where the spec is silent
 
 `Db.gs` follows section 5.3 branch for branch. These points are not in the spec, so the implementer chose and recorded them here; say if any should change.
