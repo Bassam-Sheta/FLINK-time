@@ -10,6 +10,14 @@ Proposed fix, for the owner to approve: the owner functions compare `Session.get
 
 **Blocks T1.11 only.** Until then there is no public `runMigrations`, `installTriggers` or other owner function (a test pins this for `runMigrations`). **Open.**
 
+## 2026-11-17 · T1.7 · Noted, no answer needed: how settings are stored, cached and read
+
+- **One cached snapshot.** Section 5.4 caches "merged settings" under `settings:{gen}` without a workspace id, so the cache holds every row of the `settings` table as `{ "GLOBAL": {key: value}, "<workspace id>": {key: value} }`, for 5 minutes. A read resolves **the workspace's own row, then the GLOBAL row, then the catalog default**; a GLOBAL-scope setting never looks at workspace rows. `false` and `0` are values, not "missing".
+- **Bad rows are ignored, an unreadable database is an error.** A row with an unknown key, bad JSON, a value outside its range, a workspace row for a GLOBAL setting, or a scope that is neither `GLOBAL` nor a workspace id is skipped with a warning that names the row but not its value. If the table cannot be read at all, `Config.get_` throws `DB_UNAVAILABLE` instead of assuming defaults, because defaults could silently relax a rule (for example `ALLOW_USER_DELETE_ENTRY`).
+- **Settings are read with the read-only token.** `settings.patch` (not yet built) must write through `Db.tx_`, then bump `gen:settings`, and `gen:ws:{id}` for a workspace-scope row (spec section 6.2).
+- **`Config.checkSetting_(key, value, scope)`** is provided now for `settings.patch`: it checks the key, the scope (a GLOBAL-scope setting cannot be set per workspace) and the value, and returns the normalised value and the JSON to store.
+- **Wiring left to T1.8.** Earlier notes said T1.7/T1.8 must pass `RATE_LIMIT_WRITES_PER_MIN` to `Db.tx_` (as `ctx.rateLimit`) and `TIMER_CLIENT_SKEW_SECONDS` to `Util.clampClientTime_`. The values are now available through `Config`; the request pipeline should call `Config.load_()` once per request and use `Config.value_(snapshot, key, workspaceId)`, because each `Config.get_` costs two cache reads.
+
 ## 2026-11-17 · T1.6 · Two actions have a payload field the schema grammar cannot describe
 
 Section 6.1 lists the schema types. Two fields in section 6.2 have a type that depends on another field, and none of the listed types fits:
