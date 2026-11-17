@@ -10,6 +10,31 @@ Proposed fix, for the owner to approve: the owner functions compare `Session.get
 
 **Blocks T1.11 only.** Until then there is no public `runMigrations`, `installTriggers` or other owner function (a test pins this for `runMigrations`). **Open.**
 
+## 2026-11-17 · T1.6 · Two actions have a payload field the schema grammar cannot describe
+
+Section 6.1 lists the schema types. Two fields in section 6.2 have a type that depends on another field, and none of the listed types fits:
+
+- `settings.patch`: `{scope, key, value}`. `value` is text, a number or a bool depending on `key` (the settings catalog, section 6.5).
+- `entries.bulk`: `{ids, op, value?}`. `value` is a project id, a bool, or a list of tag ids depending on `op`.
+
+Proposal: one extra schema type, `any`, which accepts only a JSON scalar (text of at most 500 characters under the same character rules as `text`, a finite number, a bool) or a list of at most 50 ids, and nothing nested. The handler then validates the value against the catalog entry or the operation, as the spec already describes. Section 6.1 would gain one line. Nothing is built for it yet, so no behaviour changes if you prefer a different answer (for example one schema per `op`).
+
+**Blocks the schemas of those two actions in T1.8 / T2.5 only.** **Open.**
+
+## 2026-11-17 · T1.6 · Noted, no answer needed: how the schema checker fills the gaps in section 6.1
+
+Each of these is pinned by a test in `tests/v2/validate.test.js`; say if any should change.
+
+- **Optional means absent or null.** A field with `?` may be missing (left out of the result: "leave unchanged") or `null` (kept as `null`: "clear it"). Section 6.2 needs the second reading, for example `users.setAdminLimit` takes "`int:0:50` or `null` for the default" and `entries.update` must be able to remove a project. A required field may be neither.
+- **Order of complaints.** Unknown fields are reported first (so a mass-assignment probe stops there), then the schema's fields in the order the schema lists them. `__proto__`, `constructor` and similar names are just unknown fields.
+- **Text length counts characters, not UTF-16 units**, because the database `CHECK`s use SQLite `length()`. 120 emoji fit a 120-character name.
+- **Tab and newline are allowed only in text whose maximum is 500 or more** (descriptions, notes, reasons); names and shorter text allow neither. The spec says "except tab and newline in notes and descriptions" but the schema type does not say which fields those are; the limits (500 and 2,000 against 120 and 60) do.
+- **Always refused in text:** other control characters (including carriage return and the C1 range), U+2028/U+2029, and lone surrogates. The last two go beyond the spec: they would otherwise reach the database and the exports as invisible line breaks or broken characters.
+- **`id` is lower-case only** (no case folding, so an id can never match two different rows); **`code` is not upper-cased for you** (`abc` is refused); **`email`** is trimmed, lower-cased and must be ASCII with a dotted domain and a letter-only last label (internationalised addresses are refused; the database also requires lower-case).
+- **`ms`** allows 10 years of 365.25 days either side of the server clock, ends included. **`cursor`** is passed through untouched (no trim), 1 to 200 characters, no control characters.
+- **Formula neutraliser:** copied from `Validation.sanitizeCellValue` and `ExportService.escapeCsv`. Same rule (apostrophe in front of a string that starts, after spaces, with `= + - @` tab CR LF, except plain numbers). Three differences: the 50,000-character cap is applied after the apostrophe so a cell never exceeds the Sheets limit, a cut never leaves half a surrogate pair, and a `NaN`, object or date is refused instead of being turned into text.
+- **A source-file quirk worth knowing:** an escape typed as ` ` or ` ` in a file-writing tool call was turned into the real character, which ends a line in JavaScript and broke a regex. The files are fixed and a test now fails if either character appears literally in `apps-script-v2/` or `tests/v2/`.
+
 ## 2026-11-17 · T1.5 · Please run a 30-second check in the Apps Script editor (time zones)
 
 `Util.gs` computes every `local_date` with `Utilities.formatDate`. The tests use the fake, whose time zone data is Node's (which has Egypt's 2023 DST rules). Two things about **real** Apps Script are not recorded in `phase0-results.md`, and the spec says not to assume them. Run this once in any Apps Script project and paste the output here or into `phase0-results.md` (it fits Phase 0 test 7's session):

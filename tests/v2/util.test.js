@@ -58,7 +58,7 @@ test('canonicalJson_ writes numbers as JSON does: integers plain, no trailing ze
 });
 
 test('canonicalJson_ escapes strings and keys exactly as JSON.stringify does', () => {
-  const tricky = 'quote " back \\ newline \n tab \t nul \u0000 line-sep   é 😀';
+  const tricky = 'quote " back \\ newline \n tab \t nul \u0000 line-sep \u2028 é 😀';
   assert.equal(canon(tricky), JSON.stringify(tricky));
   assert.equal(canon({ [tricky]: 1 }), `{${JSON.stringify(tricky)}:1}`);
 });

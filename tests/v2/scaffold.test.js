@@ -101,3 +101,17 @@ test('Portal.html placeholder is a complete document without dynamic HTML sinks'
     assert.ok(!html.includes(sink), `Portal.html must not contain ${sink}`);
   }
 });
+
+test('no source file contains a literal U+2028 or U+2029: they end a line in JavaScript and break regex literals', () => {
+  // Written as code points on purpose: an escape typed in a tool call can be turned into the real character.
+  const separators = [String.fromCharCode(0x2028), String.fromCharCode(0x2029)];
+  const files = fs.readdirSync(APP_DIR).filter(name => /\.(gs|html|json)$/.test(name)).map(name => path.join(APP_DIR, name));
+  const testsDir = path.resolve(__dirname);
+  for (const name of fs.readdirSync(testsDir).filter(n => n.endsWith('.js'))) files.push(path.join(testsDir, name));
+  for (const file of files) {
+    const text = fs.readFileSync(file, 'utf8');
+    for (const separator of separators) {
+      assert.ok(!text.includes(separator), `${path.basename(file)} contains U+${separator.charCodeAt(0).toString(16)}; write it as an escape`);
+    }
+  }
+});
