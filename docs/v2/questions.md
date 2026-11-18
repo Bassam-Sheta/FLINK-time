@@ -2,6 +2,16 @@
 
 Newest first. Each entry: date, ticket, the question, what is blocked. The owner answers inline and marks it **Answered**.
 
+## 2026-11-18 · T1.12 · Noted, no answer needed: `--app v2` in the staging tool
+
+Pinned by `tests/v2/staging-v2.test.js`; usage is in `docs/v2/STAGING.md`. The old path (no `--app`, or `--app v1`) is untouched and its tests (`tests/staging-*.test.js`) pass unchanged.
+
+- **A separate configuration file, `.staging.v2.config.json`** (git-ignored, example in `scripts/staging.v2.config.example.json`), because the old validator rejects unknown fields and the old file must keep working. It is the old fields plus `tursoOrigin`, which must be `https://host[:port]` in lower case with no path or trailing slash, and no placeholder text. A prepared v2 bundle goes to `.staging/v2-<scriptId>/`, never into the v1 directory.
+- **The manifest goes first** in the upload, then the files in `files.json` order. The Apps Script API's documentation does not say whether the order of the `files` array decides the order Apps Script loads them. The code does not depend on it (section 2.1: top-level code only defines things, so file order is irrelevant), so a different order would not break the app. This is the one platform detail that is not confirmed.
+- **No `executionApi` and no diagnostics file** are added for v2 (the old path adds both for its remote runtime check). So `run` is refused for v2 and `readyForRuntimeCheck` is always false; the owner runs `runMigrations` in the editor, as T1.13 says ("applied on staging Turso via `runMigrations`").
+- **A stricter command line:** an unknown option or a second operation is now an error instead of being ignored, for both apps.
+- **Not testable on this machine:** a listed file that is a real symbolic link is refused, but creating a link needs a privilege here, so that test is skipped; a simulated link (a patched `lstat`) covers the same check.
+
 ## 2026-11-18 · T1.11 · Noted, no answer needed: the setup page and the owner functions
 
 Pinned by `tests/v2/setup.test.js`. The owner-check question further down is implemented as proposed there.

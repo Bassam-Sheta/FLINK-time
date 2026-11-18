@@ -25,7 +25,78 @@ function validateConfig(config) {
   return config;
 }
 
-function createBundle(config) {
+// ---- the v2 app (apps-script-v2/, BUILD_SPEC ticket T1.12): `--app v2`
+//
+// The v2 bundle is the files of apps-script-v2/files.json, in that order, plus the manifest rendered from
+// appsscript.template.json with the staging environment's Turso origin as the only URL fetch may reach. No
+// diagnostics file and no executionApi are added: the owner runs runMigrations from the editor after a push.
+
+const v2Directory = path.join(root, 'apps-script-v2');
+const placeholder = /REPLACE|YOUR_|PLACEHOLDER/i;
+
+// The v1 fields plus tursoOrigin, the staging database's address as https://host[:port] with no path and no slash.
+function validateConfigV2(config) {
+  if (!config || typeof config !== 'object' || Array.isArray(config)) throw new Error('Invalid staging configuration');
+  const { tursoOrigin, ...base } = config;
+  validateConfig(base);
+  if (typeof tursoOrigin !== 'string' || placeholder.test(tursoOrigin) || !tursoOrigin.includes('.') ||
+      !/^https:\/\/[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?(?::[0-9]{1,5})?$/.test(tursoOrigin) ||
+      (tursoOrigin.split(':')[2] !== undefined && Number(tursoOrigin.split(':')[2]) > 65535)) {
+    throw new Error('Invalid tursoOrigin: use https://host with no path or trailing slash');
+  }
+  return config;
+}
+
+function regularFileText(file) {
+  const stat = fs.lstatSync(file);
+  if (!stat.isFile() || stat.isSymbolicLink()) throw new Error('Runtime source must be a regular file');
+  return fs.readFileSync(file, 'utf8');
+}
+
+function createBundleV2(config, { appDirectory = v2Directory } = {}) {
+  validateConfigV2(config);
+  let list;
+  try { list = JSON.parse(regularFileText(path.join(appDirectory, 'files.json'))); }
+  catch (_) { throw new Error('Invalid files.json'); }
+  if (!Array.isArray(list) || list.length === 0 || new Set(list).size !== list.length ||
+      list.some(name => typeof name !== 'string' || !/^[A-Za-z][A-Za-z0-9]*\.(gs|html)$/.test(name))) {
+    throw new Error('Invalid files.json');
+  }
+  const template = regularFileText(path.join(appDirectory, 'appsscript.template.json'));
+  if (template.split('{{TURSO_ORIGIN}}').length !== 2) throw new Error('The manifest template must contain {{TURSO_ORIGIN}} exactly once');
+  let manifest;
+  try { manifest = JSON.parse(template.replace('{{TURSO_ORIGIN}}', () => config.tursoOrigin)); }
+  catch (_) { throw new Error('The rendered manifest is not valid JSON'); }
+  const bundle = { 'appsscript.json': JSON.stringify(manifest, null, 2) + '\n' };
+  for (const name of list) bundle[name] = regularFileText(path.join(appDirectory, name));
+  return bundle;
+}
+
+function validateConfigFor(config, app) {
+  return app === 'v2' ? validateConfigV2(config) : validateConfig(config);
+}
+
+// --app v2 | --app=v2, anywhere in the arguments; the first other word is the operation.
+function parseArgs(argv) {
+  let app = 'v1';
+  let operation;
+  let confirmed = false;
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === '--confirm-staging') confirmed = true;
+    else if (arg === '--app' || arg.startsWith('--app=')) {
+      const value = arg === '--app' ? argv[++i] : arg.slice('--app='.length);
+      if (value !== 'v1' && value !== 'v2') throw new Error('Usage: --app v1|v2');
+      app = value;
+    } else if (arg.startsWith('--')) throw new Error('Unknown option ' + arg);
+    else if (operation === undefined) operation = arg;
+    else throw new Error('Unexpected argument ' + arg);
+  }
+  return { app, operation, confirmed };
+}
+
+function createBundle(config, app = 'v1', options) {
+  if (app === 'v2') return createBundleV2(config, options);
   validateConfig(config);
   const bundle = {};
   for (const file of runtimeFiles) {
@@ -82,13 +153,18 @@ function assertDirectory(directory) {
   }
 }
 
-function prepare(config) {
-  validateConfig(config);
-  const bundle = createBundle(config);
+// A v2 bundle lives next to a v1 one for the same script id, never in it.
+function bundleDirectory(config, app) {
+  return path.join(root, '.staging', (app === 'v2' ? 'v2-' : '') + config.scriptId);
+}
+
+function prepare(config, app = 'v1') {
+  validateConfigFor(config, app);
+  const bundle = createBundle(config, app);
   const staging = path.join(root, '.staging');
   if (!fs.existsSync(staging)) fs.mkdirSync(staging);
   assertDirectory(staging);
-  const directory = path.join(staging, config.scriptId);
+  const directory = bundleDirectory(config, app);
   // Refuse to overwrite a previous bundle or unrelated files.
   fs.mkdirSync(directory);
   const source = path.join(directory, 'source');
@@ -107,9 +183,9 @@ function prepare(config) {
   return directory;
 }
 
-function checkedBundle(config) {
-  validateConfig(config);
-  const directory = path.join(root, '.staging', config.scriptId);
+function checkedBundle(config, app = 'v1') {
+  validateConfigFor(config, app);
+  const directory = bundleDirectory(config, app);
   for (const dir of [path.join(root, '.staging'), directory, path.join(directory, 'source')]) {
     assertDirectory(dir);
   }
@@ -128,7 +204,7 @@ function checkedBundle(config) {
   if (settings.scriptId !== config.scriptId || settings.projectId !== config.projectId || settings.environment !== 'STAGING') {
     throw new Error('Staging target changed');
   }
-  const bundle = createBundle(config);
+  const bundle = createBundle(config, app);
   const actualFiles = fs.readdirSync(path.join(directory, 'source')).sort();
   if (JSON.stringify(actualFiles) !== JSON.stringify(Object.keys(bundle).sort())) throw new Error('Unexpected upload files');
   for (const [file, text] of Object.entries(bundle)) {
@@ -139,24 +215,27 @@ function checkedBundle(config) {
   return { directory, bundle };
 }
 
-function checkBundle(config) {
-  return checkedBundle(config).directory;
+function checkBundle(config, app = 'v1') {
+  return checkedBundle(config, app).directory;
 }
 
-async function executeOperation(operation, config, { confirmed = false, env = process.env, clientFactory } = {}) {
-  validateConfig(config);
+async function executeOperation(operation, config, { confirmed = false, env = process.env, clientFactory, app = 'v1' } = {}) {
+  validateConfigFor(config, app);
   if (!['prepare', 'check', 'scopes', 'push', 'run'].includes(operation)) {
-    throw new Error('Usage: npm run staging -- prepare|check|scopes|push|run [--confirm-staging]');
+    throw new Error('Usage: npm run staging -- [--app v2] prepare|check|scopes|push|run [--confirm-staging]');
+  }
+  if (app === 'v2' && operation === 'run') {
+    throw new Error('The v2 app has no remote runtime check: after a push, the owner runs runMigrations from the Apps Script editor');
   }
   if (operation === 'scopes') {
-    return [...new Set([...JSON.parse(createBundle(config)['appsscript.json']).oauthScopes,
+    return [...new Set([...JSON.parse(createBundle(config, app)['appsscript.json']).oauthScopes,
       'https://www.googleapis.com/auth/script.projects', 'https://www.googleapis.com/auth/script.deployments.readonly'])].join(',');
   }
   if (operation === 'prepare') {
-    prepare(config);
+    prepare(config, app);
     return 'Local staging bundle prepared. Nothing uploaded.';
   }
-  const { directory, bundle } = checkedBundle(config);
+  const { directory, bundle } = checkedBundle(config, app);
   if (operation === 'check') {
     return { environment: 'STAGING', scriptId: config.scriptId, files: Object.keys(bundle) };
   }
@@ -180,35 +259,42 @@ async function executeOperation(operation, config, { confirmed = false, env = pr
 }
 
 async function main() {
-  const file = path.join(root, '.staging.config.json');
-  if (process.argv[2] === 'doctor') {
+  const { app, operation, confirmed } = parseArgs(process.argv.slice(2));
+  const file = path.join(root, app === 'v2' ? '.staging.v2.config.json' : '.staging.config.json');
+  if (operation === 'doctor') {
     let config = null;
     if (fs.existsSync(file)) {
       try { config = JSON.parse(fs.readFileSync(file, 'utf8')); }
       catch (_) { config = {}; }
     }
-    const report = readiness(config, process.env);
+    const report = readiness(config, process.env, app);
     console.log(JSON.stringify(report, null, 2));
     if (!report.readyForUpload) process.exitCode = 1;
     return;
   }
-  if (!fs.existsSync(file)) throw new Error('Staging is not configured. See docs/STAGING_TESTS.md; no Google calls made.');
+  if (!fs.existsSync(file)) {
+    throw new Error(app === 'v2'
+      ? 'Staging is not configured. Copy scripts/staging.v2.config.example.json to .staging.v2.config.json (see docs/v2/STAGING.md); no Google calls made.'
+      : 'Staging is not configured. See docs/STAGING_TESTS.md; no Google calls made.');
+  }
   let config;
   try { config = JSON.parse(fs.readFileSync(file, 'utf8')); }
   catch (_) { throw new Error('Invalid staging configuration JSON'); }
-  const result = await executeOperation(process.argv[2], config, { confirmed: process.argv.includes('--confirm-staging') });
+  const result = await executeOperation(operation, config, { confirmed, app });
   console.log(typeof result === 'string' ? result : JSON.stringify(result, null, 2));
 }
 
-function readiness(config, env = {}) {
+function readiness(config, env = {}, app = 'v1') {
   const report = { config: config === null ? 'MISSING' : 'INVALID', bundle: 'NOT_CHECKED',
     credentials: 'NOT_CHECKED', deployment: 'NOT_CONFIGURED', readyForUpload: false,
     readyForRuntimeCheck: false, googleContacted: false, liveVerified: false, next: [] };
-  try { validateConfig(config); report.config = 'VALID'; } catch (_) {
-    report.next.push('Fill .staging.config.json from scripts/staging.config.example.json with an owner-approved disposable target.');
+  try { validateConfigFor(config, app); report.config = 'VALID'; } catch (_) {
+    report.next.push(app === 'v2'
+      ? 'Fill .staging.v2.config.json from scripts/staging.v2.config.example.json with an owner-approved disposable target.'
+      : 'Fill .staging.config.json from scripts/staging.config.example.json with an owner-approved disposable target.');
     return report;
   }
-  try { checkedBundle(config); report.bundle = 'CURRENT'; }
+  try { checkedBundle(config, app); report.bundle = 'CURRENT'; }
   catch (_) { report.bundle = 'MISSING_OR_STALE'; report.next.push('Prepare a current bundle; preserve any previous bundle before preparing again.'); }
   try {
     require('./staging-google').loadCredentials(env.FLINK_STAGING_CREDENTIALS, config);
@@ -220,12 +306,16 @@ function readiness(config, env = {}) {
   if (typeof env.FLINK_STAGING_DEPLOYMENT_ID === 'string' && /^[A-Za-z0-9_-]{20,200}$/.test(env.FLINK_STAGING_DEPLOYMENT_ID)) report.deployment = 'CONFIGURED_UNVERIFIED';
   else report.next.push('Set FLINK_STAGING_DEPLOYMENT_ID after creating the owner-only API deployment.');
   report.readyForUpload = report.bundle === 'CURRENT' && report.credentials === 'VALID_LOCAL_FILE';
-  report.readyForRuntimeCheck = report.readyForUpload && report.deployment === 'CONFIGURED_UNVERIFIED';
+  report.readyForRuntimeCheck = app === 'v1' && report.readyForUpload && report.deployment === 'CONFIGURED_UNVERIFIED';
+  if (app === 'v2') report.next.push('v2 has no remote runtime check: after a push, the owner runs runMigrations from the Apps Script editor.');
   report.next.push('Owner confirmation is required before upload/run. Local readiness does not verify identity, consent, IAM or remote ownership.');
   return report;
 }
 
-module.exports = { validateConfig, createBundle, validateReport, prepare, checkBundle, executeOperation, readiness };
+module.exports = {
+  validateConfig, createBundle, validateReport, prepare, checkBundle, executeOperation, readiness,
+  validateConfigV2, createBundleV2, parseArgs
+};
 if (require.main === module) {
   main().catch(err => { console.error(err.message); process.exitCode = 1; });
 }

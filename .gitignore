@@ -24,4 +24,5 @@ artifacts/screenshots/
 client_secret*.json
 .staging/
 .staging.config.json
+.staging.v2.config.json
 application_default_credentials.json
