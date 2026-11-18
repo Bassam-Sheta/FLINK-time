@@ -33,11 +33,18 @@ var Main = {
     return typeof view === 'string' && Main.VIEWS_.indexOf(view) >= 0 ? view : 'user';
   },
 
+  /** True for ?view=setup (exactly): the owner's setup page, which has its own rules (Setup.gs). */
+  isSetup_: function (event) {
+    var parameter = Main.isObject_(event) ? event.parameter : undefined;
+    return Main.isObject_(parameter) && parameter.view === 'setup';
+  },
+
   /**
    * One template for the three views. Only the user view may be framed (it lives inside a Google Site); the admin
    * views are served with the default frame mode, which refuses framing.
    */
   doGet_: function (event) {
+    if (Main.isSetup_(event)) return Setup.page_();
     var view = Main.viewFrom_(event);
     var template = HtmlService.createTemplateFromFile('Portal');
     template.view = view;
@@ -141,12 +148,23 @@ var Main = {
   },
 
   /**
+   * ownerMaintenance(true) sets MAINTENANCE = 1. Every request for a known action is then answered with a retryable
+   * DB_UNAVAILABLE (section 4.3 has no code of its own for it) before anything else is looked at.
+   */
+  checkMaintenance_: function () {
+    if (PropertiesService.getScriptProperties().getProperty('MAINTENANCE') === '1') {
+      throw new AppError_('DB_UNAVAILABLE', 'FLINK Time is down for maintenance. Try again in a few minutes.');
+    }
+  },
+
+  /**
    * Steps 1 to 10 for one request: returns what the handler returned, or throws. state is filled in as far as the
    * request gets, for the log line: the action once it is a known one, the user id once the account is loaded.
    */
   run_: function (action, envelope, state, now) {
     var entry = Auth.actionEntry_(action);                                  // 1
     state.action = action;
+    Main.checkMaintenance_();                                               // owner switch, not a step of 4.4
     var email = Auth.identity_();                                           // 2, 3
     var account = Auth.loadAccount_(email);                                 // 4
     if (account !== null) state.userId = account.user.id;

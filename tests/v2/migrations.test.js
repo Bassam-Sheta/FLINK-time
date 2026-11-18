@@ -9,6 +9,7 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const { createEnv } = require('./helpers/env');
+const { thrown } = require('./helpers/asserts');
 
 const SPEC_PATH = path.resolve(__dirname, '..', '..', 'docs', 'v2', 'BUILD_SPEC.md');
 
@@ -251,10 +252,15 @@ test('an unreadable or failed transport is reported, not guessed at', () => {
 
 // ---------------------------------------------------------------- what is not here
 
-test('no public owner function exists yet: runMigrations needs the owner check from ticket T1.11', () => {
-  // Every top-level function without a trailing underscore can be called from the browser through
-  // google.script.run, so exposing the runner before its owner check exists would let any employee run it.
+test('runMigrations is public only behind the owner check (ticket T1.11)', () => {
+  // Every top-level function without a trailing underscore can be called from the browser through google.script.run,
+  // so the owner-only wrapper refuses anybody but the owner. tests/v2/setup.test.js tests the check itself.
   const env = createEnv();
-  assert.equal(env.run('typeof runMigrations'), 'undefined');
+  assert.equal(env.run('typeof runMigrations'), 'function');
   assert.equal(env.run('typeof Migrations.run_'), 'function');
+  env.fakes.session.setActiveEmail('visitor@flink.test');
+  env.fakes.session.setEffectiveEmail('owner@flink.test');
+  const err = thrown(() => env.ctx.runMigrations());
+  assert.equal(err.code, 'FORBIDDEN');
+  assert.equal(env.fakes.fetch.calls.length, 0);
 });

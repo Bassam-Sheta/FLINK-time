@@ -2,6 +2,20 @@
 
 Newest first. Each entry: date, ticket, the question, what is blocked. The owner answers inline and marks it **Answered**.
 
+## 2026-11-18 · T1.11 · Noted, no answer needed: the setup page and the owner functions
+
+Pinned by `tests/v2/setup.test.js`. The owner-check question further down is implemented as proposed there.
+
+- **The owner check** is `Setup.requireOwner_()`: the active user (who is actually running) must equal the effective user, and both must equal `OWNER_EMAIL` once it is recorded; before setup the deployer is the owner. A blank on either side is refused. Every owner function and `setupSubmit` start with it, and a test fails if any top-level function without a trailing underscore exists that is not on the list of section 2.1 (the page, `setupSubmit`, the owner functions, `job*`).
+- **The setup page** is `/exec?view=setup`, served with `DEFAULT` frame mode and built inline in `Setup.gs` (`files.json` has no separate setup file). For the owner before setup it is a form (URL, two tokens, company domain, alert address); for a visitor, or after setup, a plain message with nothing to fill in. It makes no database call and shows no stored value. The two token fields are password inputs and answers are shown with `textContent`.
+- **`setupSubmit` is single use and safe to repeat after a failure.** It checks the whole form first (nothing is written if any field is wrong), stores the connection settings and `OWNER_EMAIL`, creates only the keys that do not exist yet (regenerating the audit key after rows were sealed would break the chain), applies the migrations, creates the owner's root Super Admin account (D1) unless a root exists, and only then sets `SETUP_DONE = 1`. The URL is converted from `libsql://` to `https://`, lower-cased, no path; the two tokens must differ; and the company domain must be the domain of the owner's own address, or the owner would lock themselves out. Secrets are never returned, logged, mailed or audited.
+- **`ownerGrantSuperAdmin(email)`** takes an address in the company domain, creates the account or promotes and re-activates the existing one in one transaction with an audit row (`SUPER_ADMIN_GRANTED`, actor `SYSTEM`), drops the account cache, and mails `ALERT_EMAIL` (plan: an alert on every Super Admin change). Someone who already is an active Super Admin is left alone (no audit row, no mail). It never makes a root.
+- **`installTriggers`** builds the schedule of section 8, with two triggers for `jobBackup` (weekly, and every 10 minutes so an unfinished backup resumes; the job does nothing unless one is RUNNING). It **refuses, changing nothing, while any job function it names does not exist**, because a trigger for a missing function only fails later, by mail. So until T2.7, T2.9 and T4.4 define `jobSealAudit`, `jobAutoStop`, `jobDailyExport`, `jobVerifyChain`, `jobBackup`, `jobPurge` and `jobHealth`, running it gives `INTERNAL` naming the missing ones.
+- **`ownerMaintenance(on)`** is a boolean switch for `MAINTENANCE`. Section 8 lists it but says nothing about its effect, so: while it is `1`, the request pipeline answers every request for a known action with a retryable `DB_UNAVAILABLE` ("FLINK Time is down for maintenance. Try again in a few minutes.") before anything else, without a database call; the page itself is still served. Section 4.3 has no code of its own for it, and the page already retries `DB_UNAVAILABLE` three times, so a short maintenance shows as a brief delay.
+- **Key rotation** (`ownerRotateAuditKey`, `ownerRotateTotpKey`) adds key version n+1 and makes it current; the old key stays, because old rows and secrets still need it. The audit row (`AUDIT_KEY_ROTATED` or `TOTP_KEY_ROTATED`, versions only) is written first, so a failed record means no rotation, and `ALERT_EMAIL` is told. Re-encrypting existing TOTP secrets under the new key is not done here (they keep decrypting with the key version stored beside each); T3.1 decides how a secret is re-encrypted.
+- **`ownerIssueRootEnrollCode`** is not here: it needs the enrollment code format and the secret cipher, which come with T3.1 and T3.2, and it will be added to the allowed public functions then.
+- **Not covered by tests, needs your eyes in the real editor:** that `Session.getActiveUser().getEmail()` is the owner's address when a function is run from the Apps Script editor (the check refuses if it is blank). It is the one platform behaviour the owner check depends on; the Phase 0 sessions are the place to confirm it.
+
 ## 2026-11-18 · T1.10 · Noted, no answer needed: how the audit chain fills the gaps in section 5.5
 
 Each point is pinned by a test in `tests/v2/audit.test.js`, which also recomputes every chain independently with `node:crypto`.
@@ -62,7 +76,7 @@ Section 8 says each owner function checks `Session.getEffectiveUser().getEmail()
 
 Proposed fix, for the owner to approve: the owner functions compare `Session.getActiveUser().getEmail()` (the person actually running or visiting) with `OWNER_EMAIL`, and also require `getEffectiveUser()` to match; a test sets effective = owner and active = someone else and expects a refusal. In the editor both emails are the owner's, so the owner still passes. Section 8 and the T1.11 ticket should say so.
 
-**Blocks T1.11 only.** Until then there is no public `runMigrations`, `installTriggers` or other owner function (a test pins this for `runMigrations`). **Open.**
+**Implemented as proposed on 2026-11-18** (the instruction was to carry on without waiting), so T1.11 is built. It stays **Open** for you to confirm or overrule, and Phase 0 test 7 should confirm the premise: from a web-app visit, `getActiveUser()` is the visitor and `getEffectiveUser()` is the deployer. If `getActiveUser()` turned out to be blank for visitors, the check would refuse the owner's own web-page use too, but never an editor run.
 
 ## 2026-11-17 · T1.7 · Noted, no answer needed: how settings are stored, cached and read
 

@@ -99,6 +99,31 @@ test('step 1: an action that is not a string is FORBIDDEN and never throws', () 
   }
 });
 
+// ---------------------------------------------------------------- maintenance (ownerMaintenance, ticket T1.11)
+
+test('maintenance: while MAINTENANCE is 1 a known action gets a retryable DB_UNAVAILABLE and nothing else runs', () => {
+  const { env, world } = setup();
+  register(env, 'probe.read');
+  env.fakes.properties.set('MAINTENANCE', '1');
+  const response = failure(call(env, 'probe.read', { v: 1 }, world.emails.user1), 'DB_UNAVAILABLE');
+  assert.equal(response.retryable, true);
+  assert.match(response.message, /maintenance/i);
+  assert.deepEqual(response.details, {});
+  assert.equal(tursoCalls(env), 0);
+  assert.equal(probeCalls(env), 0);
+  failure(call(env, 'nope.nothing'), 'FORBIDDEN');                       // an unknown action is still just unknown
+  env.fakes.properties.delete('MAINTENANCE');
+  success(call(env, 'probe.read', { v: 1 }));
+  env.fakes.properties.set('MAINTENANCE', '0');                          // only the exact value 1 switches it on
+  success(call(env, 'probe.read', { v: 1 }));
+});
+
+test('maintenance: the page itself is still served', () => {
+  const { env } = setup();
+  env.fakes.properties.set('MAINTENANCE', '1');
+  assert.ok(env.ctx.doGet({ parameter: { view: 'user' } }).getContent().length > 0);
+});
+
 // ---------------------------------------------------------------- steps 2 and 3: who is calling
 
 test('step 2: a blank email is AUTH_UNAVAILABLE', () => {

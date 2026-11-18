@@ -11,9 +11,8 @@
  * the editor rather than returning app error codes. So it keeps its own small sender (send_, arg_). Hashing uses
  * Util.sha256Hex_.
  *
- * There is deliberately no public runMigrations() yet. Every top-level function without a trailing underscore can be
- * called from the browser through google.script.run, so the owner-only wrapper arrives together with its owner check
- * in ticket T1.11.
+ * The owner-only public wrapper is runMigrations() in Setup.gs: every top-level function without a trailing underscore
+ * can be called from the browser through google.script.run, so it starts with the owner check.
  */
 var MIGRATIONS_ = [
   {
