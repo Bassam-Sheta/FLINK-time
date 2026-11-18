@@ -26,6 +26,9 @@ var Validate = {
   MULTILINE_FROM_MAX_: 500,
   /** A Google Sheets cell holds at most 50,000 characters. */
   MAX_CELL_CHARS_: 50000,
+  /** The type "any": text of at most this many characters, or a list of at most ANY_IDS_MAX_ ids. */
+  ANY_TEXT_MAX_: 500,
+  ANY_IDS_MAX_: 50,
 
   UUID_PATTERN_: /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
   CODE_PATTERN_: /^[A-Z0-9_-]{1,20}$/,
@@ -69,7 +72,7 @@ var Validate = {
     };
 
     switch (kind) {
-      case 'id': case 'code': case 'email': case 'bool': case 'ms': case 'date': case 'tz': case 'cursor':
+      case 'id': case 'code': case 'email': case 'bool': case 'ms': case 'date': case 'tz': case 'cursor': case 'any':
         if (parts.length !== 1) throw Validate.bug_(kind + ' takes no arguments: ' + spec);
         break;
       case 'ids':
@@ -242,6 +245,15 @@ var Validate = {
         if (ok) return value;
         throw Validate.fail_(field, field + ' is not a valid cursor');
       }
+
+      case 'any':
+        // One JSON scalar or a short list of ids, nothing nested. For the two fields whose type depends on another
+        // field (settings.patch.value, entries.bulk.value); the handler checks the value against that other field.
+        if (typeof value === 'string') return Validate.checkText_(field, { min: 0, max: Validate.ANY_TEXT_MAX_ }, value);
+        if (typeof value === 'boolean') return value;
+        if (typeof value === 'number' && isFinite(value)) return value === 0 ? 0 : value;
+        if (Array.isArray(value)) return Validate.checkValue_(field, { kind: 'ids', n: Validate.ANY_IDS_MAX_ }, value);
+        throw Validate.fail_(field, field + ' must be text, a number, true or false, or a list of ids');
 
       default:
         throw Validate.bug_('unknown schema type ' + spec.kind);

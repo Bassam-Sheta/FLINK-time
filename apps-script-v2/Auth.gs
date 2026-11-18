@@ -17,11 +17,335 @@
  */
 
 /**
- * The permission map (BUILD_SPEC section 6.1): one entry per action, filled in by ticket T1.9. An entry is
- * { roles, ws, wsAdmin, grant, stepUp, write, readOnlyOk, schema, handler } where ws is true, false or 'optional'
- * and handler is the name of a function in a module, such as 'ActTimer.start_'.
+ * The permission map (BUILD_SPEC sections 6.1 and 6.2): one entry per action, the only place that says who may call
+ * what. tests/v2/permission-matrix.test.js runs every action as five kinds of caller against a hand-written table.
+ *
+ *   roles       account roles that may call it
+ *   ws          true: needs envelope.workspaceId and active membership; 'optional': checked only when sent; false: none
+ *   wsAdmin     needs workspace-admin rights in that workspace (an Admin whose ws_role is ADMIN there, or a Super Admin)
+ *   grant       needs a valid admin grant; stepUp: also a code entered in the last 5 minutes (stepUp implies grant)
+ *   write       needs a requestId and goes through Db.tx_
+ *   readOnlyOk  allowed in an archived workspace: every read, never a write
+ *   schema      the payload (Validate.gs types)
+ *   handler     'Module.name_', the function that does the work
+ *
+ * What a handler adds on top of the pipeline, because it depends on the payload or on whose record is touched:
+ *   a grant       entries.list (another user's entries), reports.summary and reports.detailed (scope = workspace)
+ *   a step-up     entries.update and entries.delete (someone else's entry), members.add/update/remove (a Super Admin
+ *                 caller), reports.exportCsv (the first page); through Auth.requireGrant_ and Auth.requireStepUp_
+ *   own records   timer.*, entries.* and the user-role views touch only the caller's own rows, enforced by assert steps
  */
-var ACTIONS = {};
+var ACTIONS = {
+  // ---- session and admin codes (section 6.2: every auth.* except auth.status is a write)
+  'app.bootstrap': {
+    roles: ['USER', 'ADMIN', 'SUPER_ADMIN'], ws: 'optional', wsAdmin: false, grant: false, stepUp: false, write: false, readOnlyOk: true,
+    schema: { view: 'enum:user|admin|superadmin' }, handler: 'ActSystem.appBootstrap_'
+  },
+  'auth.status': {
+    roles: ['ADMIN', 'SUPER_ADMIN'], ws: false, wsAdmin: false, grant: false, stepUp: false, write: false, readOnlyOk: false,
+    schema: {}, handler: 'ActSystem.authStatus_'
+  },
+  'auth.verifyCode': {
+    roles: ['ADMIN', 'SUPER_ADMIN'], ws: false, wsAdmin: false, grant: false, stepUp: false, write: true, readOnlyOk: false,
+    schema: { code: 'text:6:6' }, handler: 'ActSystem.authVerifyCode_'
+  },
+  'auth.stepUp': {
+    roles: ['ADMIN', 'SUPER_ADMIN'], ws: false, wsAdmin: false, grant: true, stepUp: false, write: true, readOnlyOk: false,
+    schema: { code: 'text:6:6' }, handler: 'ActSystem.authStepUp_'
+  },
+  'auth.logout': {
+    roles: ['ADMIN', 'SUPER_ADMIN'], ws: false, wsAdmin: false, grant: true, stepUp: false, write: true, readOnlyOk: false,
+    schema: {}, handler: 'ActSystem.authLogout_'
+  },
+  'auth.enrollStart': {
+    roles: ['ADMIN', 'SUPER_ADMIN'], ws: false, wsAdmin: false, grant: false, stepUp: false, write: true, readOnlyOk: false,
+    schema: { enrollCode: 'text:10:10?' }, handler: 'ActSystem.authEnrollStart_'
+  },
+  'auth.enrollConfirm': {
+    roles: ['ADMIN', 'SUPER_ADMIN'], ws: false, wsAdmin: false, grant: false, stepUp: false, write: true, readOnlyOk: false,
+    schema: { enrollCode: 'text:10:10?', code: 'text:6:6' }, handler: 'ActSystem.authEnrollConfirm_'
+  },
+  'auth.useBackupCode': {
+    roles: ['ADMIN', 'SUPER_ADMIN'], ws: false, wsAdmin: false, grant: false, stepUp: false, write: true, readOnlyOk: false,
+    schema: { backupCode: 'text:10:10' }, handler: 'ActSystem.authUseBackupCode_'
+  },
+
+  // ---- timer (own only)
+  'timer.start': {
+    roles: ['USER', 'ADMIN', 'SUPER_ADMIN'], ws: true, wsAdmin: false, grant: false, stepUp: false, write: true, readOnlyOk: false,
+    schema: { projectId: 'id?', taskId: 'id?', description: 'text:0:500?', billable: 'bool?', tagIds: 'ids:10?', clientAt: 'ms' },
+    handler: 'ActTimer.start_'
+  },
+  'timer.stop': {
+    roles: ['USER', 'ADMIN', 'SUPER_ADMIN'], ws: true, wsAdmin: false, grant: false, stepUp: false, write: true, readOnlyOk: false,
+    schema: { timerId: 'id', clientAt: 'ms' }, handler: 'ActTimer.stop_'
+  },
+  'timer.switch': {
+    roles: ['USER', 'ADMIN', 'SUPER_ADMIN'], ws: true, wsAdmin: false, grant: false, stepUp: false, write: true, readOnlyOk: false,
+    schema: {
+      timerId: 'id', version: 'int:1:2147483647', projectId: 'id?', taskId: 'id?', description: 'text:0:500?', billable: 'bool?',
+      tagIds: 'ids:10?'
+    },
+    handler: 'ActTimer.switch_'
+  },
+
+  // ---- entries (own; a workspace admin for others, with a step-up decided by the handler)
+  'entries.list': {
+    roles: ['USER', 'ADMIN', 'SUPER_ADMIN'], ws: true, wsAdmin: false, grant: false, stepUp: false, write: false, readOnlyOk: true,
+    schema: { from: 'date', to: 'date', userId: 'id?', projectId: 'id?', tagId: 'id?', cursor: 'cursor?' },
+    handler: 'ActEntries.list_'
+  },
+  'entries.update': {
+    roles: ['USER', 'ADMIN', 'SUPER_ADMIN'], ws: true, wsAdmin: false, grant: false, stepUp: false, write: true, readOnlyOk: false,
+    schema: {
+      id: 'id', version: 'int:1:2147483647', projectId: 'id?', taskId: 'id?', description: 'text:0:500?', billable: 'bool?',
+      tagIds: 'ids:10?', startAt: 'ms?', endAt: 'ms?'
+    },
+    handler: 'ActEntries.update_'
+  },
+  'entries.delete': {
+    roles: ['USER', 'ADMIN', 'SUPER_ADMIN'], ws: true, wsAdmin: false, grant: false, stepUp: false, write: true, readOnlyOk: false,
+    schema: { id: 'id', version: 'int:1:2147483647', reason: 'text:0:500?' }, handler: 'ActEntries.delete_'
+  },
+  'entries.bulk': {
+    roles: ['USER', 'ADMIN', 'SUPER_ADMIN'], ws: true, wsAdmin: false, grant: false, stepUp: false, write: true, readOnlyOk: false,
+    schema: { ids: 'ids:50', op: 'enum:setProject|setBillable|addTags|removeTags|delete', value: 'any?' },
+    handler: 'ActEntries.bulk_'
+  },
+
+  // ---- catalogue: every member reads, workspace admins write
+  'clients.list': {
+    roles: ['USER', 'ADMIN', 'SUPER_ADMIN'], ws: true, wsAdmin: false, grant: false, stepUp: false, write: false, readOnlyOk: true,
+    schema: {}, handler: 'ActCatalog.clientsList_'
+  },
+  'clients.create': {
+    roles: ['ADMIN', 'SUPER_ADMIN'], ws: true, wsAdmin: true, grant: true, stepUp: false, write: true, readOnlyOk: false,
+    schema: { name: 'text:1:120', notes: 'text:0:2000?' }, handler: 'ActCatalog.clientsCreate_'
+  },
+  'clients.update': {
+    roles: ['ADMIN', 'SUPER_ADMIN'], ws: true, wsAdmin: true, grant: true, stepUp: false, write: true, readOnlyOk: false,
+    schema: { id: 'id', version: 'int:1:2147483647', name: 'text:1:120', notes: 'text:0:2000?' }, handler: 'ActCatalog.clientsUpdate_'
+  },
+  'clients.archive': {
+    roles: ['ADMIN', 'SUPER_ADMIN'], ws: true, wsAdmin: true, grant: true, stepUp: false, write: true, readOnlyOk: false,
+    schema: { id: 'id', version: 'int:1:2147483647' }, handler: 'ActCatalog.clientsArchive_'
+  },
+  'projects.list': {
+    roles: ['USER', 'ADMIN', 'SUPER_ADMIN'], ws: true, wsAdmin: false, grant: false, stepUp: false, write: false, readOnlyOk: true,
+    schema: {}, handler: 'ActCatalog.projectsList_'
+  },
+  'projects.create': {
+    roles: ['ADMIN', 'SUPER_ADMIN'], ws: true, wsAdmin: true, grant: true, stepUp: false, write: true, readOnlyOk: false,
+    schema: {
+      name: 'text:1:120', code: 'code?', clientId: 'id?', restricted: 'bool?', billableDefault: 'bool?',
+      hourlyRateMinor: 'int:0:100000000?', costRateMinor: 'int:0:100000000?', estimateMinutes: 'int:0:10000000?',
+      budgetMinor: 'int:0:1000000000000?', startDate: 'date?', endDate: 'date?', color: 'text:1:20?'
+    },
+    handler: 'ActCatalog.projectsCreate_'
+  },
+  'projects.update': {
+    roles: ['ADMIN', 'SUPER_ADMIN'], ws: true, wsAdmin: true, grant: true, stepUp: false, write: true, readOnlyOk: false,
+    schema: {
+      id: 'id', version: 'int:1:2147483647', name: 'text:1:120', code: 'code?', clientId: 'id?', restricted: 'bool?',
+      billableDefault: 'bool?', hourlyRateMinor: 'int:0:100000000?', costRateMinor: 'int:0:100000000?',
+      estimateMinutes: 'int:0:10000000?', budgetMinor: 'int:0:1000000000000?', startDate: 'date?', endDate: 'date?',
+      color: 'text:1:20?'
+    },
+    handler: 'ActCatalog.projectsUpdate_'
+  },
+  'projects.archive': {
+    roles: ['ADMIN', 'SUPER_ADMIN'], ws: true, wsAdmin: true, grant: true, stepUp: false, write: true, readOnlyOk: false,
+    schema: { id: 'id', version: 'int:1:2147483647' }, handler: 'ActCatalog.projectsArchive_'
+  },
+  'tasks.list': {
+    roles: ['USER', 'ADMIN', 'SUPER_ADMIN'], ws: true, wsAdmin: false, grant: false, stepUp: false, write: false, readOnlyOk: true,
+    schema: { projectId: 'id?' }, handler: 'ActCatalog.tasksList_'
+  },
+  'tasks.create': {
+    roles: ['ADMIN', 'SUPER_ADMIN'], ws: true, wsAdmin: true, grant: true, stepUp: false, write: true, readOnlyOk: false,
+    schema: {
+      projectId: 'id', name: 'text:1:120', estimateMinutes: 'int:0:10000000?', billableDefault: 'bool?', sortOrder: 'int:0:100000?'
+    },
+    handler: 'ActCatalog.tasksCreate_'
+  },
+  'tasks.update': {
+    roles: ['ADMIN', 'SUPER_ADMIN'], ws: true, wsAdmin: true, grant: true, stepUp: false, write: true, readOnlyOk: false,
+    schema: {
+      id: 'id', version: 'int:1:2147483647', name: 'text:1:120', estimateMinutes: 'int:0:10000000?', billableDefault: 'bool?',
+      sortOrder: 'int:0:100000?'
+    },
+    handler: 'ActCatalog.tasksUpdate_'
+  },
+  'tasks.archive': {
+    roles: ['ADMIN', 'SUPER_ADMIN'], ws: true, wsAdmin: true, grant: true, stepUp: false, write: true, readOnlyOk: false,
+    schema: { id: 'id', version: 'int:1:2147483647' }, handler: 'ActCatalog.tasksArchive_'
+  },
+  'projectAccess.set': {
+    roles: ['ADMIN', 'SUPER_ADMIN'], ws: true, wsAdmin: true, grant: true, stepUp: false, write: true, readOnlyOk: false,
+    schema: { projectId: 'id', userId: 'id', canTrack: 'bool' }, handler: 'ActCatalog.projectAccessSet_'
+  },
+  'tags.list': {
+    roles: ['USER', 'ADMIN', 'SUPER_ADMIN'], ws: true, wsAdmin: false, grant: false, stepUp: false, write: false, readOnlyOk: true,
+    schema: {}, handler: 'ActCatalog.tagsList_'
+  },
+  'tags.create': {
+    roles: ['ADMIN', 'SUPER_ADMIN'], ws: true, wsAdmin: true, grant: true, stepUp: false, write: true, readOnlyOk: false,
+    schema: { name: 'text:1:60', color: 'text:1:20?' }, handler: 'ActCatalog.tagsCreate_'
+  },
+  'tags.update': {
+    roles: ['ADMIN', 'SUPER_ADMIN'], ws: true, wsAdmin: true, grant: true, stepUp: false, write: true, readOnlyOk: false,
+    schema: { id: 'id', version: 'int:1:2147483647', name: 'text:1:60', color: 'text:1:20?' }, handler: 'ActCatalog.tagsUpdate_'
+  },
+  'tags.archive': {
+    roles: ['ADMIN', 'SUPER_ADMIN'], ws: true, wsAdmin: true, grant: true, stepUp: false, write: true, readOnlyOk: false,
+    schema: { id: 'id', version: 'int:1:2147483647' }, handler: 'ActCatalog.tagsArchive_'
+  },
+
+  // ---- workspaces and members
+  'workspaces.list': {
+    roles: ['USER', 'ADMIN', 'SUPER_ADMIN'], ws: false, wsAdmin: false, grant: false, stepUp: false, write: false, readOnlyOk: false,
+    schema: {}, handler: 'ActWorkspaces.workspacesList_'
+  },
+  'workspaces.create': {
+    roles: ['SUPER_ADMIN'], ws: false, wsAdmin: false, grant: true, stepUp: true, write: true, readOnlyOk: false,
+    schema: { code: 'code', name: 'text:1:120', timezone: 'tz', weekStart: 'enum:SUN|MON|SAT' },
+    handler: 'ActWorkspaces.workspacesCreate_'
+  },
+  'workspaces.update': {
+    roles: ['SUPER_ADMIN'], ws: true, wsAdmin: true, grant: true, stepUp: true, write: true, readOnlyOk: false,
+    schema: { version: 'int:1:2147483647', name: 'text:1:120', timezone: 'tz', weekStart: 'enum:SUN|MON|SAT' },
+    handler: 'ActWorkspaces.workspacesUpdate_'
+  },
+  'workspaces.archive': {
+    roles: ['SUPER_ADMIN'], ws: true, wsAdmin: true, grant: true, stepUp: true, write: true, readOnlyOk: false,
+    schema: { version: 'int:1:2147483647' }, handler: 'ActWorkspaces.workspacesArchive_'
+  },
+  'members.list': {
+    roles: ['ADMIN', 'SUPER_ADMIN'], ws: true, wsAdmin: true, grant: true, stepUp: false, write: false, readOnlyOk: true,
+    schema: {}, handler: 'ActWorkspaces.membersList_'
+  },
+  'members.add': {
+    roles: ['ADMIN', 'SUPER_ADMIN'], ws: true, wsAdmin: true, grant: true, stepUp: false, write: true, readOnlyOk: false,
+    schema: { userId: 'id', department: 'text:0:120?', team: 'text:0:120?', jobTitle: 'text:0:120?' },
+    handler: 'ActWorkspaces.membersAdd_'
+  },
+  'members.update': {
+    roles: ['ADMIN', 'SUPER_ADMIN'], ws: true, wsAdmin: true, grant: true, stepUp: false, write: true, readOnlyOk: false,
+    schema: { userId: 'id', department: 'text:0:120?', team: 'text:0:120?', jobTitle: 'text:0:120?' },
+    handler: 'ActWorkspaces.membersUpdate_'
+  },
+  'members.remove': {
+    roles: ['ADMIN', 'SUPER_ADMIN'], ws: true, wsAdmin: true, grant: true, stepUp: false, write: true, readOnlyOk: false,
+    schema: { userId: 'id' }, handler: 'ActWorkspaces.membersRemove_'
+  },
+  'members.setAdmin': {
+    roles: ['SUPER_ADMIN'], ws: true, wsAdmin: true, grant: true, stepUp: true, write: true, readOnlyOk: false,
+    schema: { userId: 'id', isAdmin: 'bool' }, handler: 'ActWorkspaces.membersSetAdmin_'
+  },
+
+  // ---- users (Super Admin only; every write needs a step-up)
+  'users.list': {
+    roles: ['SUPER_ADMIN'], ws: false, wsAdmin: false, grant: true, stepUp: false, write: false, readOnlyOk: false,
+    schema: { status: 'enum:ACTIVE|INACTIVE?', cursor: 'cursor?' }, handler: 'ActUsers.list_'
+  },
+  'users.create': {
+    roles: ['SUPER_ADMIN'], ws: false, wsAdmin: false, grant: true, stepUp: true, write: true, readOnlyOk: false,
+    schema: { email: 'email', displayName: 'text:1:120', role: 'enum:USER|ADMIN', employeeCode: 'text:1:40?', workspaceIds: 'ids:20?' },
+    handler: 'ActUsers.create_'
+  },
+  'users.update': {
+    roles: ['SUPER_ADMIN'], ws: false, wsAdmin: false, grant: true, stepUp: true, write: true, readOnlyOk: false,
+    schema: {
+      id: 'id', version: 'int:1:2147483647', displayName: 'text:1:120?', role: 'enum:USER|ADMIN?', employeeCode: 'text:1:40?',
+      email: 'email?'
+    },
+    handler: 'ActUsers.update_'
+  },
+  'users.setAdminLimit': {
+    roles: ['SUPER_ADMIN'], ws: false, wsAdmin: false, grant: true, stepUp: true, write: true, readOnlyOk: false,
+    schema: { id: 'id', version: 'int:1:2147483647', limit: 'int:0:50?' }, handler: 'ActUsers.setAdminLimit_'
+  },
+  'users.deactivate': {
+    roles: ['SUPER_ADMIN'], ws: false, wsAdmin: false, grant: true, stepUp: true, write: true, readOnlyOk: false,
+    schema: { id: 'id', version: 'int:1:2147483647', reason: 'text:1:500' }, handler: 'ActUsers.deactivate_'
+  },
+  'users.activate': {
+    roles: ['SUPER_ADMIN'], ws: false, wsAdmin: false, grant: true, stepUp: true, write: true, readOnlyOk: false,
+    schema: { id: 'id', version: 'int:1:2147483647' }, handler: 'ActUsers.activate_'
+  },
+  'users.unlock': {
+    roles: ['SUPER_ADMIN'], ws: false, wsAdmin: false, grant: true, stepUp: true, write: true, readOnlyOk: false,
+    schema: { id: 'id' }, handler: 'ActUsers.unlock_'
+  },
+  'users.revokeGrants': {
+    roles: ['SUPER_ADMIN'], ws: false, wsAdmin: false, grant: true, stepUp: true, write: true, readOnlyOk: false,
+    schema: { id: 'id' }, handler: 'ActUsers.revokeGrants_'
+  },
+  'users.issueEnrollCode': {
+    roles: ['SUPER_ADMIN'], ws: false, wsAdmin: false, grant: true, stepUp: true, write: true, readOnlyOk: false,
+    schema: { id: 'id' }, handler: 'ActUsers.issueEnrollCode_'
+  },
+
+  // ---- reports and live view
+  'reports.summary': {
+    roles: ['USER', 'ADMIN', 'SUPER_ADMIN'], ws: true, wsAdmin: false, grant: false, stepUp: false, write: false, readOnlyOk: true,
+    schema: {
+      scope: 'enum:own|workspace', from: 'date', to: 'date', groupBy: 'enum:user|project|client|tag|task|day|week|month',
+      userIds: 'ids:50?', projectIds: 'ids:50?', clientIds: 'ids:50?', tagIds: 'ids:50?', billable: 'bool?'
+    },
+    handler: 'ActReports.summary_'
+  },
+  'reports.detailed': {
+    roles: ['USER', 'ADMIN', 'SUPER_ADMIN'], ws: true, wsAdmin: false, grant: false, stepUp: false, write: false, readOnlyOk: true,
+    schema: {
+      scope: 'enum:own|workspace', from: 'date', to: 'date', userIds: 'ids:50?', projectIds: 'ids:50?', clientIds: 'ids:50?',
+      tagIds: 'ids:50?', billable: 'bool?', cursor: 'cursor?'
+    },
+    handler: 'ActReports.detailed_'
+  },
+  'reports.exportCsv': {
+    roles: ['ADMIN', 'SUPER_ADMIN'], ws: true, wsAdmin: true, grant: true, stepUp: false, write: false, readOnlyOk: true,
+    schema: {
+      type: 'enum:summary|detailed', from: 'date', to: 'date', groupBy: 'enum:user|project|client|tag|task|day|week|month?',
+      userIds: 'ids:50?', projectIds: 'ids:50?', clientIds: 'ids:50?', tagIds: 'ids:50?', billable: 'bool?', exportId: 'id?',
+      page: 'int:1:100000?'
+    },
+    handler: 'ActReports.exportCsv_'
+  },
+  'live.list': {
+    roles: ['ADMIN', 'SUPER_ADMIN'], ws: true, wsAdmin: true, grant: true, stepUp: false, write: false, readOnlyOk: true,
+    schema: {}, handler: 'ActSystem.liveList_'
+  },
+
+  // ---- settings, audit and health (Super Admin)
+  'settings.get': {
+    roles: ['SUPER_ADMIN'], ws: false, wsAdmin: false, grant: true, stepUp: false, write: false, readOnlyOk: false,
+    schema: {}, handler: 'ActSystem.settingsGet_'
+  },
+  'settings.patch': {
+    roles: ['SUPER_ADMIN'], ws: false, wsAdmin: false, grant: true, stepUp: true, write: true, readOnlyOk: false,
+    schema: { scope: 'text:1:36', key: 'text:1:60', value: 'any' }, handler: 'ActSystem.settingsPatch_'
+  },
+  'audit.list': {
+    roles: ['SUPER_ADMIN'], ws: false, wsAdmin: false, grant: true, stepUp: false, write: false, readOnlyOk: false,
+    schema: {
+      workspaceId: 'id?', entityType: 'text:1:40?', actorUserId: 'text:1:36?', fromSeq: 'int:0:9007199254740991?', cursor: 'cursor?'
+    },
+    handler: 'ActSystem.auditList_'
+  },
+  'audit.verify': {
+    roles: ['SUPER_ADMIN'], ws: false, wsAdmin: false, grant: true, stepUp: true, write: false, readOnlyOk: false,
+    schema: {}, handler: 'ActSystem.auditVerify_'
+  },
+  'security.events': {
+    roles: ['SUPER_ADMIN'], ws: false, wsAdmin: false, grant: true, stepUp: false, write: false, readOnlyOk: false,
+    schema: { cursor: 'cursor?' }, handler: 'ActSystem.securityEvents_'
+  },
+  'system.health': {
+    roles: ['SUPER_ADMIN'], ws: false, wsAdmin: false, grant: true, stepUp: false, write: false, readOnlyOk: false,
+    schema: {}, handler: 'ActSystem.systemHealth_'
+  }
+};
 
 var Auth = {
 
@@ -278,13 +602,20 @@ var Auth = {
    * pipeline already checked, or checks ctx.grantToken now. Returns the grant and keeps it in ctx.grant.
    */
   requireStepUp_: function (ctx) {
-    var grant = ctx.grant;
-    if (grant === null || grant === undefined) {
-      grant = Auth.validGrant_(ctx.grantToken, ctx.user, ctx.now);
-      ctx.grant = grant;
-    }
+    var grant = Auth.requireGrant_(ctx);
     Auth.requireFresh_(grant, ctx.now);
     return grant;
+  },
+
+  /**
+   * For a handler that needs a valid grant only when the payload says so (reports with scope = workspace, another
+   * user's entries): uses the grant the pipeline already checked, or checks ctx.grantToken now, once. No step-up.
+   */
+  requireGrant_: function (ctx) {
+    if (ctx.grant === null || ctx.grant === undefined) {
+      ctx.grant = Auth.validGrant_(ctx.grantToken, ctx.user, ctx.now);
+    }
+    return ctx.grant;
   },
 
   // ------------------------------------------------------------ for handlers

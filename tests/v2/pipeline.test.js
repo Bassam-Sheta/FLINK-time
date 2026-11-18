@@ -509,6 +509,25 @@ test('Auth.requireStepUp_ lets a handler ask for a fresh code, using the grant a
   expectCode(() => env.ctx.Auth.requireStepUp_(lastCtx(env)), 'CODE_REQUIRED');
 });
 
+test('Auth.requireGrant_ lets a handler ask for a grant (no step-up needed), checking it once', () => {
+  const { env, world } = setup();
+  register(env, 'probe.read');
+  success(call(env, 'probe.read', { v: 1 }, world.emails.admin1));
+  expectCode(() => env.ctx.Auth.requireGrant_(lastCtx(env)), 'CODE_REQUIRED');             // none sent
+
+  env.run('Probe.stepupAt = 0');                                                          // a stale step-up is fine here
+  success(call(env, 'probe.read', { v: 1, grant: TOKEN }));
+  const ctx = lastCtx(env);
+  assert.equal(env.ctx.Auth.requireGrant_(ctx).kind, 'ADMIN');
+  assert.equal(env.ctx.Auth.requireGrant_(ctx).kind, 'ADMIN');
+  assert.equal(env.ctx.Probe.grantCalls.length, 1, 'the second ask reuses the first answer');
+  assert.equal(ctx.grant.kind, 'ADMIN');
+
+  env.run('Probe.grantFails = true');
+  success(call(env, 'probe.read', { v: 1, grant: TOKEN }));
+  expectCode(() => env.ctx.Auth.requireGrant_(lastCtx(env)), 'CODE_REQUIRED');
+});
+
 test('Auth.requireStepUp_ reuses a grant the pipeline already validated', () => {
   const { env, world } = setup();
   register(env, 'probe.grant', { grant: true });
