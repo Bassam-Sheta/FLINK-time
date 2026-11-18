@@ -2,6 +2,31 @@
 
 Newest first. Each entry: date, ticket, the question, what is blocked. The owner answers inline and marks it **Answered**.
 
+## 2026-11-18 · T1.13 · Phase 1 gate: what passes here, and what only the owner can do
+
+**Passes (all in `npm run test:v2`, 671 tests, plus the old suite's 731):** the permission matrix (60 actions × 5 callers × 2 workspaces, against a hand-written table), the transaction suite (`db.test.js`), the tamper-detection suite (`audit.test.js`: a 500-row chain recomputed independently, every field covered by the hash, deleted rows, gaps, crashes, overlapping sealers), the migration suites, and `tests/v2/server-rules.test.js` for section 7.1.
+
+**`server-rules.test.js`** tests for real what the pipeline alone can enforce (no role or workspace role can be set through the app; `members.setAdmin` needs a Super Admin with a fresh step-up; a workspace admin cannot slip a `wsRole` into `members.add` or `.update`; every write in an archived workspace is refused before a handler runs) and has nine tests written against the real `ACTIONS` and marked `todo` until their handler exists. They fail today with `INTERNAL` ("handler not implemented") and are reported as todo, not as failures:
+
+| Todo test | Rule | Ticket that must remove the `todo` |
+| --- | --- | --- |
+| Super Admin cannot change or deactivate themselves | 1 | T3.4 |
+| root cannot be demoted, deactivated, re-emailed or have MFA reset | 2 | T3.4 |
+| another Super Admin may unlock the root | 2 | T3.4 |
+| at least one active Super Admin remains | 3 | T3.4 |
+| granting workspace admin respects the Admin limit (D6) | 4 | T2.1 |
+| a write is refused by its transaction when the workspace was archived after the cache was filled | 5 | T2.4 |
+| a User never receives rate, cost, budget or money (projects) | 6 | T2.2 |
+| nor in reports | 6 | T4.1 |
+| a User cannot read another user's entries; an id outside scope is `NOT_FOUND` | 7 | T2.5 |
+
+**Does not pass, and cannot from here (needs the owner):**
+
+1. **"Schema v1 applied on staging Turso via `runMigrations`."** It needs a real staging Turso database and a staging Apps Script project, created and authorized by the owner (`docs/v2/STAGING.md`), then `runMigrations` run in the editor.
+2. **Phase 0.** `docs/v2/phase0-results.md` is still an empty template (T0.1, T0.2), and the plan's Phase 1 gate follows a Phase 0 gate (tests 2, 3, 7, 11, 14 pass or their fallback is accepted). Everything in `Db.gs` that depends on Turso's behaviour is built on the spec's description and is marked provisional in its header: that a step whose condition is false is skipped and counts as "not ok", that a failed step leaves the transaction open for the `ROLLBACK` step, the wording of error messages, and the response field names. The same goes for the Apps Script behaviours listed in the open entries below (the 30-second time-zone check, whether the file order of an upload decides load order, and `Session.getActiveUser()` in the editor).
+
+So the build carries on from here at the owner's instruction ("everything after, without asking"), but **no phase gate can be declared passed until items 1 and 2 are done**. Nothing in the build depends on those results in a way that would be expensive to change: the Turso facts are isolated in `Db.gs`, `Migrations.gs` and the fake in `tests/v2/helpers/fake-turso.js`.
+
 ## 2026-11-18 · T1.12 · Noted, no answer needed: `--app v2` in the staging tool
 
 Pinned by `tests/v2/staging-v2.test.js`; usage is in `docs/v2/STAGING.md`. The old path (no `--app`, or `--app v1`) is untouched and its tests (`tests/staging-*.test.js`) pass unchanged.
