@@ -180,6 +180,36 @@ var Main = {
     return handler.fn.call(handler.owner, ctx);
   },
 
+  /**
+   * What every write handler ends with: stores data as the request's result and commits. Returns { data, duplicate }.
+   * A retry of a request that already committed gets what the first one stored, with duplicate true: the caller must not
+   * repeat side effects such as cache bumps or mails then.
+   */
+  commit_: function (tx, data) {
+    tx.result(data);
+    var out = tx.commit();
+    return out.duplicate === true ? { data: out.result, duplicate: true } : { data: data, duplicate: false };
+  },
+
+  /**
+   * A write handler that looks at the database before its transaction (to build audit rows, to give a quick answer) must
+   * not throw on what it finds: if this very request already committed and is being retried, the state it finds is the
+   * state its own first run left, and the right answer is what that run stored. So the handler refuses THROUGH a
+   * transaction: the request_log check comes first, and either returns the stored result (a retry) or the assert fails
+   * with this error, rolled back. Returns the stored result of the earlier run, or throws AppError_(code).
+   */
+  refuse_: function (ctx, code, message, details) {
+    var tx = Db.tx_(Auth.dbCtx_(ctx));
+    tx.assert('refused', '1 = 0', [], code, message, details);
+    var out = tx.commit();
+    return out.result;
+  },
+
+  /** A write that turns out to change nothing still records the request, so that a retry returns the same answer. */
+  noop_: function (ctx, data) {
+    return Main.commit_(Db.tx_(Auth.dbCtx_(ctx)), data).data;
+  },
+
   // ------------------------------------------------------------ step 11: the response and the log
 
   /** What the page may see in details for each code (section 4.3). Nothing else is passed on. */

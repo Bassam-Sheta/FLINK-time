@@ -148,12 +148,13 @@ test('rule 4: a workspace admin cannot slip a workspace role into members.add or
   }
 });
 
-test('rule 4: granting workspace admin respects the Admin limit of the workspaces they administer (D6)', todo('T2.1'), () => {
+test('rule 4: granting workspace admin respects the Admin limit of the workspaces they administer (D6)', () => {
   const { env, world } = setup();
-  env.turso.db.exec(`UPDATE accounts SET admin_ws_limit = 1 WHERE id = '${world.ids.admin1}'`);   // admin1 already runs W1 and W2
+  env.turso.db.exec(`UPDATE accounts SET admin_ws_limit = 0 WHERE id = '${world.ids.admin2}'`);
   env.run('Cache.bump_(Cache.GEN_ACCT_)');
-  const response = send(env, world, 'sa', 'members.setAdmin', { userId: world.ids.admin1, isAdmin: true }, world.ids.w1);
-  refusedWith(response, 'POLICY', 'a limit of 1 with one workspace already administered');
+  const response = send(env, world, 'sa', 'members.setAdmin', { userId: world.ids.admin2, isAdmin: true }, world.ids.w1);
+  refusedWith(response, 'POLICY', 'a limit of 0');
+  assert.deepEqual(response.details, { rule: 'ADMIN_MAX_ACTIVE_WORKSPACES' });
 });
 
 // ---------------------------------------------------------------- rule 5: archived workspaces are read-only

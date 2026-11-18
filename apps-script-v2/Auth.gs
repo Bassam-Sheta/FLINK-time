@@ -620,6 +620,15 @@ var Auth = {
 
   // ------------------------------------------------------------ for handlers
 
+  /**
+   * Section 7.1, rule 5: every write in a workspace asserts, inside its own transaction, that the workspace is still
+   * ACTIVE, whatever the cached account said a moment ago. FORBIDDEN, as the pipeline answers for an archived workspace.
+   */
+  assertWorkspaceActive_: function (tx, workspaceId) {
+    tx.assert('workspace active', "EXISTS (SELECT 1 FROM workspaces WHERE id = ? AND status = 'ACTIVE')", [workspaceId],
+      'FORBIDDEN', 'This workspace is archived and read-only.');
+  },
+
   /** The context Db.tx_ takes (BUILD_SPEC section 5.3), from a handler's ctx. Only for write actions. */
   dbCtx_: function (ctx) {
     return {
