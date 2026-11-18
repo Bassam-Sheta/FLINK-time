@@ -257,6 +257,7 @@ function createProperties() {
   const control = {
     get: key => (store.has(key) ? store.get(key) : null),
     set(key, value) { store.set(key, String(value)); },
+    delete(key) { store.delete(key); },
     all: () => Object.fromEntries(store),
   };
   return { api, control };
