@@ -367,6 +367,72 @@ var ActCatalog = {
     return ActCatalog.archive_(ctx, { table: 'tasks', entity: 'TASK', missing: 'No such task.' });
   },
 
+  // ------------------------------------------------------------ tags
+
+  TAG_COLUMNS_: ['id', 'name', 'color', 'status', 'version'],
+
+  tagOut_: function (row, admin) {
+    var out = { id: row.id, name: row.name, color: row.color };
+    if (admin) {
+      out.status = row.status;
+      out.version = row.version;
+    }
+    return out;
+  },
+
+  /** tags.list: a workspace admin gets every tag with status and version; anyone else the active ones. */
+  tagsList_: function (ctx) {
+    var admin = ctx.workspace.isWsAdmin;
+    var rows = Db.read_([{
+      sql: 'SELECT ' + ActCatalog.TAG_COLUMNS_.join(', ') + ' FROM tags WHERE workspace_id = ?' + (admin ? '' : " AND status = 'ACTIVE'") + ' ORDER BY name, id',
+      args: [ctx.workspace.id]
+    }])[0];
+    return { tags: rows.map(function (row) { return ActCatalog.tagOut_(row, admin); }) };
+  },
+
+  tagsCreate_: function (ctx) {
+    var p = ctx.payload;
+    return ActCatalog.create_(ctx, {
+      table: 'tags', entity: 'TAG', columns: { name: p.name, color: p.color === undefined ? null : p.color },
+      out: function (row) { return ActCatalog.tagOut_(row, true); },
+      audit: function (row) { return { name: row.name, color: row.color }; }
+    });
+  },
+
+  tagsUpdate_: function (ctx) {
+    return ActCatalog.update_(ctx, {
+      table: 'tags', entity: 'TAG', columns: ActCatalog.TAG_COLUMNS_, missing: 'No such tag.',
+      changes: ActCatalog.changesFrom_(ctx.payload, { name: 'name', color: 'color' }),
+      out: function (row) { return ActCatalog.tagOut_(row, true); }
+    });
+  },
+
+  tagsArchive_: function (ctx) {
+    return ActCatalog.archive_(ctx, { table: 'tags', entity: 'TAG', missing: 'No such tag.' });
+  },
+
+  /**
+   * The tag validation that timer.start, timer.switch and entries.update share (section 6.4): every tag must be an
+   * ACTIVE tag of this workspace, one assert inside the transaction, so a tag archived a moment ago is caught. An empty
+   * list needs no assert. The label must be unique within the transaction.
+   */
+  tagAssert_: function (tx, workspaceId, tagIds, label) {
+    if (!Array.isArray(tagIds) || tagIds.length === 0) return;
+    tx.assert(label || 'tags',
+      "NOT EXISTS (SELECT 1 FROM json_each(?) j LEFT JOIN tags t ON t.id = j.value AND t.workspace_id = ? AND t.status = 'ACTIVE' WHERE t.id IS NULL)",
+      [Util.canonicalJson_(tagIds), workspaceId], 'VALIDATION', 'One of the tags does not exist or is archived.', { field: 'tagIds' });
+  },
+
+  /**
+   * When FEATURE_TAGS is off for the workspace a non-empty tag list is refused (section 6.2). Returns null, or
+   * { code, message, details } for the handler to refuse with (through Main.refuse_, so a retry stays idempotent).
+   */
+  tagsRefusal_: function (ctx, tagIds) {
+    if (!Array.isArray(tagIds) || tagIds.length === 0) return null;
+    if (ctx.setting('FEATURE_TAGS')) return null;
+    return { code: 'POLICY', message: 'Tags are switched off for this workspace.', details: { rule: 'FEATURE_TAGS' } };
+  },
+
   // ------------------------------------------------------------ project access
 
   /**

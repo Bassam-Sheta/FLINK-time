@@ -2,6 +2,14 @@
 
 Newest first. Each entry: date, ticket, the question, what is blocked. The owner answers inline and marks it **Answered**.
 
+## 2026-11-19 · T2.3 · Noted, no answer needed: tags and the tag validation timer and entries share
+
+Pinned by `tests/v2/act-tags.test.js` (13 tests).
+
+- **`tags.list/create/update/archive`** reuse the shared `create_`, `update_` and `archive_` of T2.2, so they have the same rules: workspace admins write, every write asserts the workspace is ACTIVE, the row is in this workspace and the version matches, a duplicate name is `CONFLICT`, each write is audited (`TAG_CREATED` and so on) and bumps `gen:ws:{id}`. Everyone else's `tags.list` is the active tags, `id name color` only; a workspace admin also gets `status` and `version`. Archived tags stay on old entries (a test checks the `entry_tags` row survives).
+- **`ActCatalog.tagAssert_(tx, workspaceId, tagIds, label)`** is the validation T2.4 and T2.5 call: one assert with the verified condition of section 6.4, so every tag must be an ACTIVE tag of this workspace, inside the transaction (a test archives a tag between building and committing and the commit fails). A bad list is `VALIDATION` with `details.field = 'tagIds'`; the spec says "asserts" but names no code for this one. An empty list adds no step. The label must be unique within the transaction, so a handler that checks twice passes a different label.
+- **`ActCatalog.tagsRefusal_(ctx, tagIds)`** is the `FEATURE_TAGS` rule: with tags off for the workspace, a non-empty list is refused with `POLICY` and `details.rule = FEATURE_TAGS`; an empty list or `null` is always fine. It returns `null` or `{code, message, details}` for the handler to refuse with through `Main.refuse_`, so a retry of a request that already committed keeps its stored answer. `tags.*` itself keeps working when the feature is off (an admin can still prepare tags); only adding tags to a timer or entry is refused.
+
 ## 2026-11-19 · T2.2 · Noted, no answer needed: clients, projects, tasks and project access
 
 Pinned by `tests/v2/act-catalog.test.js` (29 tests). Tags (T2.3) are not built yet: `tags.*` has its action entries but no handler, and will reuse the shared `create_`, `update_` and `archive_` in `ActCatalog.gs`.
