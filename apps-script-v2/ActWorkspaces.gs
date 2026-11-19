@@ -148,7 +148,7 @@ var ActWorkspaces = {
 
   /** The longest an entry may be: AUTO_STOP_HOURS, at most 24, in ms. */
   capMs_: function (ctx) {
-    return Math.min(ctx.setting('AUTO_STOP_HOURS'), 24) * 3600000;
+    return ActTimer.capMs_(ctx);
   },
 
   workspacesArchive_: function (ctx) {

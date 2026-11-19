@@ -173,12 +173,14 @@ test('rule 5: in an archived workspace every write is refused before it reaches 
   }
 });
 
-test('rule 5: a write is refused by its transaction when the workspace was archived after the cache was filled', todo('T2.4'), () => {
+test('rule 5: a write is refused by its transaction when the workspace was archived after the cache was filled', () => {
   const { env, world } = setup();
   const start = { clientAt: env.fakes.clock.now() };
-  assert.equal(send(env, world, 'user1', 'timer.stop', { timerId: world.ids.w1, clientAt: start.clientAt }, world.ids.w1).code !== 'FORBIDDEN', true);   // warms the cache
-  env.turso.db.exec(`UPDATE workspaces SET status = 'ARCHIVED' WHERE id = '${world.ids.w1}'`);                                    // no cache bump
-  refusedWith(send(env, world, 'user1', 'timer.start', start, world.ids.w1), 'FORBIDDEN', 'timer.start in a workspace archived a moment ago');
+  assert.equal(send(env, world, 'user1', 'timer.start', start, world.ids.w1).ok, true, 'works, and fills the cache');
+  env.turso.db.exec(`DELETE FROM active_timers; UPDATE workspaces SET status = 'ARCHIVED' WHERE id = '${world.ids.w1}'`);   // no cache bump
+  const response = send(env, world, 'user1', 'timer.start', start, world.ids.w1);
+  refusedWith(response, 'FORBIDDEN', 'timer.start in a workspace archived a moment ago');
+  assert.match(response.message, /archived/i);
 });
 
 // ---------------------------------------------------------------- rule 6: no money for the user role

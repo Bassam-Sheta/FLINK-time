@@ -181,14 +181,16 @@ var Main = {
   },
 
   /**
-   * What every write handler ends with: stores data as the request's result and commits. Returns { data, duplicate }.
+   * What every write handler ends with: stores data as the request's result and commits. Returns { data, duplicate,
+   * selects }: selects holds the rows of the transaction's .select() steps (none for a retry, whose data is what the
+   * first run stored).
    * A retry of a request that already committed gets what the first one stored, with duplicate true: the caller must not
    * repeat side effects such as cache bumps or mails then.
    */
   commit_: function (tx, data) {
     tx.result(data);
     var out = tx.commit();
-    return out.duplicate === true ? { data: out.result, duplicate: true } : { data: data, duplicate: false };
+    return out.duplicate === true ? { data: out.result, duplicate: true } : { data: data, duplicate: false, selects: out.selects };
   },
 
   /**
