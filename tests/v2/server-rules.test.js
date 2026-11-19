@@ -183,13 +183,17 @@ test('rule 5: a write is refused by its transaction when the workspace was archi
 
 // ---------------------------------------------------------------- rule 6: no money for the user role
 
-test('rule 6: a user-role caller never receives hourly_rate_minor, cost_rate_minor, budget_minor or a money total (projects)', todo('T2.2'), () => {
+test('rule 6: a user-role caller never receives hourly_rate_minor, cost_rate_minor, budget_minor or a money total (projects, tasks)', () => {
   const { env, world } = setup();
-  const response = send(env, world, 'user1', 'projects.list', {}, world.ids.w1);
-  assert.equal(response.ok, true, `${response.code} ${response.message}`);
-  const text = JSON.stringify(response.data);
-  assert.ok(text.includes(world.ids.open), 'the project the user may track is listed');
-  assert.ok(!/rate|cost|budget|amount|money/i.test(text), 'no money field of any name');
+  for (const persona of ['user1', 'user2', 'admin2']) {          // admin2 is an Admin account, but not a workspace admin
+    for (const [action, id] of [['projects.list', world.ids.open], ['tasks.list', world.ids.task]]) {
+      const response = send(env, world, persona, action, {}, world.ids.w1);
+      assert.equal(response.ok, true, `${persona} ${action}: ${response.code} ${response.message}`);
+      const text = JSON.stringify(response.data);
+      assert.ok(text.includes(id), `${persona} gets the ${action} rows they may see`);
+      assert.ok(!/rate|cost|budget|amount|money|minor|estimate/i.test(text), `${persona} ${action} holds a money field`);
+    }
+  }
 });
 
 test('rule 6: nor in reports', todo('T4.1'), () => {

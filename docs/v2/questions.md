@@ -2,6 +2,18 @@
 
 Newest first. Each entry: date, ticket, the question, what is blocked. The owner answers inline and marks it **Answered**.
 
+## 2026-11-19 · T2.2 · Noted, no answer needed: clients, projects, tasks and project access
+
+Pinned by `tests/v2/act-catalog.test.js` (29 tests). Tags (T2.3) are not built yet: `tags.*` has its action entries but no handler, and will reuse the shared `create_`, `update_` and `archive_` in `ActCatalog.gs`.
+
+- **Who sees what.** Everyone who is not a workspace admin (a User, or an Admin account that is only a plain member) gets lists built from field allowlists: clients `id name status` (active only); projects `id clientId name code billableDefault color`; tasks `id projectId name billableDefault sortOrder`. No notes, versions, rates, costs, budgets, estimates, dates or `restricted` flag. A workspace admin (or Super Admin) gets everything, including `access` (who may track each project) on `projects.list`. A test checks the exact key lists and that no money-like word appears in a non-admin's response. The rule-6 todo in `server-rules.test.js` is now a real test for projects and tasks; reports (T4.1) remain.
+- **Section 6.3 as SQL.** A non-admin's `projects.list` and `tasks.list` use the same condition as the transaction asserts of timers will: active project, and unrestricted, or the caller is an Admin or Super Admin, or an access row with `can_track = 1` (a `can_track = 0` row grants nothing). A User's tasks are those of projects they may track, so a restricted project's tasks are hidden with it.
+- **Write rules.** Every write asserts, inside its transaction, that the workspace is ACTIVE, the row is in this workspace (`NOT_FOUND`: another workspace's id looks the same as a missing one), then the version (`CONFLICT`), then changes the row and writes an audit row (`CLIENT_CREATED`, `PROJECT_UPDATED`, `TASK_ARCHIVED`, `PROJECT_ACCESS_SET` and so on, with before and after). Every write bumps `gen:ws:{id}`. A duplicate name is the table's UNIQUE, so `CONFLICT` (per workspace for clients and projects, per project for tasks). Archiving what is archived is `CONFLICT`. Updates take absent = unchanged, `null` = clear; the two flags of a project and a task's order cannot be cleared (`restricted: null` is `VALIDATION`, `sortOrder: null` becomes 0).
+- **References.** A project's client must be an ACTIVE client of the same workspace; a task's project an ACTIVE project of the same workspace; both are asserts in the transaction, and race tests show a client or project archived between the read and the write being refused. `projectAccess.set` needs the project in this workspace and an active member; the row is an upsert, and the audit `before` is `null` the first time.
+- **Archiving a project changes nothing already recorded:** entries and a running timer keep their project and the rate snapshot taken at the stop; the project simply leaves the lists and can no longer be started on (T2.4).
+- **Four mutants survive on purpose:** removing the scope assert and the `AND workspace_id = ?` from the UPDATE in `update_` and `archive_`. The row was already read with the same scope (and a row never changes workspace), so the outcome cannot differ; they stay as a second guard in the transaction.
+- **A project's end date** must not be before its start date, checked against the stored start date on update (`VALIDATION` on `endDate`). Colours are free text up to 20 characters, as the spec gives no format.
+
 ## 2026-11-18 · T2.1 · Noted, no answer needed: workspaces and members
 
 Pinned by `tests/v2/act-workspaces.test.js` (48 tests) and `tests/v2/timer-stop.test.js`. The patterns here are the ones every later write handler follows.
